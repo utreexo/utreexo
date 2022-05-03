@@ -30,10 +30,10 @@ type Leaf struct {
 
 // polNode is a node in the pollard.
 type polNode struct {
-	leftNiece, rightNiece *polNode
-	aunt                  *polNode
-	data                  Hash
-	remember              bool
+	lNiece, rNiece *polNode
+	aunt           *polNode
+	data           Hash
+	remember       bool
 }
 
 // getSibling returns the sibling of this node.
@@ -47,10 +47,10 @@ func (n *polNode) getSibling() (*polNode, error) {
 
 	// Get my sibling which is pointing to my children.
 	var sibling *polNode
-	if n == aunt.leftNiece {
-		sibling = aunt.rightNiece
-	} else if n == aunt.rightNiece {
-		sibling = aunt.leftNiece
+	if n == aunt.lNiece {
+		sibling = aunt.rNiece
+	} else if n == aunt.rNiece {
+		sibling = aunt.lNiece
 	} else {
 		return nil, fmt.Errorf("Node with hash %s has an incorrect aunt pointer "+
 			"or the aunt with hash %s has incorrect pointer to its nieces",
@@ -75,10 +75,10 @@ func (n *polNode) getParent() (*polNode, error) {
 	}
 
 	var parent *polNode
-	if aunt.aunt.leftNiece == aunt {
-		parent = aunt.aunt.rightNiece
-	} else if aunt.aunt.rightNiece == aunt {
-		parent = aunt.aunt.leftNiece
+	if aunt.aunt.lNiece == aunt {
+		parent = aunt.aunt.rNiece
+	} else if aunt.aunt.rNiece == aunt {
+		parent = aunt.aunt.lNiece
 	} else {
 		return nil, fmt.Errorf("Node with hash %s has an incorrect aunt pointer "+
 			"or the aunt with hash %s has incorrect pointer to its nieces",
@@ -94,7 +94,7 @@ func (n *polNode) getChildren() (*polNode, *polNode, error) {
 
 	// No aunt means that this node is a root. Roots point to their children.
 	if aunt == nil {
-		return n.leftNiece, n.rightNiece, nil
+		return n.lNiece, n.rNiece, nil
 	}
 
 	// Get my sibling which is pointing to my children.
@@ -108,7 +108,7 @@ func (n *polNode) getChildren() (*polNode, *polNode, error) {
 			hex.EncodeToString(n.data[:]))
 	}
 
-	return sibling.leftNiece, sibling.rightNiece, nil
+	return sibling.lNiece, sibling.rNiece, nil
 }
 
 // getNode returns the node, it's sibling, and the parent of the given position.
@@ -142,9 +142,9 @@ func (p *Pollard) getNode(pos uint64) (n, sibling, parent *polNode, err error) {
 		// Figure out which node we need to follow.
 		niecePos := uint8(bits>>h) & 1
 		if isLeftNiece(uint64(niecePos)) {
-			n, sibling = n.leftNiece, n.rightNiece
+			n, sibling = n.lNiece, n.rNiece
 		} else {
-			n, sibling = n.rightNiece, n.leftNiece
+			n, sibling = n.rNiece, n.lNiece
 		}
 
 		// Return early if the path to the node we're looking for
@@ -177,7 +177,7 @@ func (p *Pollard) calculatePosition(node *polNode) uint64 {
 
 	rowsToTop := 0
 	for polNode.aunt != nil {
-		if polNode.aunt.leftNiece == polNode {
+		if polNode.aunt.lNiece == polNode {
 			// Left
 			leftRightIndicator <<= 1
 		} else {
@@ -253,25 +253,25 @@ func (p *Pollard) calculatePosition(node *polNode) uint64 {
 
 // deadEnd returns true if both nieces are nil.
 func (n *polNode) deadEnd() bool {
-	return n.leftNiece == nil && n.rightNiece == nil
+	return n.lNiece == nil && n.rNiece == nil
 }
 
 // prune prunes deadend children.
 // don't prune at the bottom; use leaf prune instead at row 1
 func (n *polNode) prune() {
-	remember := n.leftNiece.remember || n.rightNiece.remember
-	if n.leftNiece.deadEnd() && !remember {
-		n.leftNiece = nil
+	remember := n.lNiece.remember || n.rNiece.remember
+	if n.lNiece.deadEnd() && !remember {
+		n.lNiece = nil
 	}
-	if n.rightNiece.deadEnd() && !remember {
-		n.rightNiece = nil
+	if n.rNiece.deadEnd() && !remember {
+		n.rNiece = nil
 	}
 }
 
 // chop turns a node into a deadEnd by setting both nieces to nil.
 func (n *polNode) chop() {
-	n.leftNiece = nil
-	n.rightNiece = nil
+	n.lNiece = nil
+	n.rNiece = nil
 }
 
 // delNode removes pointers so that this node can be garbage collected.
@@ -279,10 +279,10 @@ func delNode(node *polNode) {
 	// Stop pointing to my aunt and make my aunt stop pointing at me.
 	if node.aunt != nil {
 		// Figure out if this node is the left or right niece and make that nil.
-		if node.aunt.rightNiece == node {
-			node.aunt.rightNiece = nil
-		} else if node.aunt.leftNiece == node {
-			node.aunt.leftNiece = nil
+		if node.aunt.rNiece == node {
+			node.aunt.rNiece = nil
+		} else if node.aunt.lNiece == node {
+			node.aunt.lNiece = nil
 		} else {
 			// Purposely left empty. It's ok if my aunt is not pointing
 			// at me because that means it's already been updated.
@@ -290,43 +290,38 @@ func delNode(node *polNode) {
 	}
 	node.aunt = nil
 
-	// Stop pointing to my leftNiece and make my leftNiece stop pointing at me.
-	if node.leftNiece != nil {
-		node.leftNiece.aunt = nil
+	// Stop pointing to my lNiece and make my lNiece stop pointing at me.
+	if node.lNiece != nil {
+		node.lNiece.aunt = nil
 	}
-	node.leftNiece = nil
+	node.lNiece = nil
 
 	// Same for right niece.
-	if node.rightNiece != nil {
-		node.rightNiece.aunt = nil
+	if node.rNiece != nil {
+		node.rNiece.aunt = nil
 	}
-	node.rightNiece = nil
+	node.rNiece = nil
 
 	// Make myself nil.
 	node = nil
 }
 
-func moveNode(from, fromSib, to, toSib *polNode) {
-	//swapNieces(from, fromSib)
-	//transferNiece(toSib, from)
-	transferNiece(to, fromSib)
-
-	transferAunt(from, to)
-	transferNiece(from, to)
+func swapPlaces(from, fromSib, to, toSib *polNode) {
+	from.aunt, from.lNiece, from.rNiece, to.aunt, to.lNiece, to.rNiece = to.aunt, to.lNiece, to.rNiece, from.aunt, from.lNiece, from.rNiece
 }
 
 // swapNieces makes a's nieces become b's nieces and vise-versa.
 func swapNieces(a, b *polNode) {
-	a.leftNiece, a.rightNiece, b.leftNiece, b.rightNiece =
-		b.leftNiece, b.rightNiece, a.leftNiece, a.rightNiece
+	a.lNiece, a.rNiece, b.lNiece, b.rNiece =
+		b.lNiece, b.rNiece, a.lNiece, a.rNiece
 	updateAunt(a)
 	updateAunt(b)
 }
 
 // transferNiece transfers b's nieces to a.
 func transferNiece(a, b *polNode) {
-	a.leftNiece, a.rightNiece = b.leftNiece, b.rightNiece
-	b.leftNiece, b.rightNiece = nil, nil
+	a.lNiece, a.rNiece = b.lNiece, b.rNiece
+	b.lNiece, b.rNiece = nil, nil
 	updateAunt(a)
 }
 
@@ -334,10 +329,10 @@ func transferNiece(a, b *polNode) {
 func transferAunt(a, b *polNode) error {
 	// Make a's aunt stop pointing at a.
 	if a.aunt != nil {
-		if a.aunt.leftNiece == a {
-			a.aunt.leftNiece = nil
-		} else if a.aunt.rightNiece == a {
-			a.aunt.rightNiece = nil
+		if a.aunt.lNiece == a {
+			a.aunt.lNiece = nil
+		} else if a.aunt.rNiece == a {
+			a.aunt.rNiece = nil
 		} else {
 			return fmt.Errorf("Node with hash %s has an incorrect aunt pointer "+
 				"or the aunt with hash %s has incorrect pointer to its nieces",
@@ -347,10 +342,10 @@ func transferAunt(a, b *polNode) error {
 
 	// Make b's aunt point to a instead of b.
 	if b.aunt != nil {
-		if b.aunt.leftNiece == b {
-			b.aunt.leftNiece = a
-		} else if b.aunt.rightNiece == b {
-			b.aunt.rightNiece = a
+		if b.aunt.lNiece == b {
+			b.aunt.lNiece = a
+		} else if b.aunt.rNiece == b {
+			b.aunt.rNiece = a
 		} else {
 			return fmt.Errorf("Node with hash %s has an incorrect aunt pointer "+
 				"or the aunt with hash %s has incorrect pointer to its nieces",
@@ -370,25 +365,25 @@ func transferAunt(a, b *polNode) error {
 // updateAunt works its way down, updating the aunts for all the nieces until it
 // encounters the first niece that has the correct aunt.
 func updateAunt(n *polNode) {
-	if n.leftNiece != nil {
+	if n.lNiece != nil {
 		// If the aunt is correct, we can return now as all nieces
 		// of this niece will have the correct aunt.
-		if n.leftNiece.aunt == n {
+		if n.lNiece.aunt == n {
 			return
 		} else {
 			// Update the aunt for this niece and check the nieces of this niece.
-			n.leftNiece.aunt = n
-			updateAunt(n.leftNiece)
+			n.lNiece.aunt = n
+			updateAunt(n.lNiece)
 		}
 	}
 
 	// Do the same for the other niece.
-	if n.rightNiece != nil {
-		if n.rightNiece.aunt == n {
+	if n.rNiece != nil {
+		if n.rNiece.aunt == n {
 			return
 		} else {
-			n.rightNiece.aunt = n
-			updateAunt(n.rightNiece)
+			n.rNiece.aunt = n
+			updateAunt(n.rNiece)
 		}
 	}
 }
@@ -447,8 +442,8 @@ func deTwinPolNode(polNodes []nodeAndPos, forestRows uint8) []nodeAndPos {
 
 			// Calculate and insert the parent in order.
 			parentNode := &polNode{data: parentHash(pn.node.data, sibNode.data)}
-			parentNode.leftNiece = pn.node
-			parentNode.rightNiece = sibNode
+			parentNode.lNiece = pn.node
+			parentNode.rNiece = sibNode
 			updateAunt(parentNode)
 
 			position := parent(pn.pos, forestRows)

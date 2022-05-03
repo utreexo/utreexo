@@ -138,7 +138,7 @@ func (p *Pollard) calculateNewRoot(node *polNode) *polNode {
 		// Calculate the hash of the new root.
 		nHash := parentHash(root.data, node.data)
 
-		newRoot := &polNode{data: nHash, leftNiece: root, rightNiece: node}
+		newRoot := &polNode{data: nHash, lNiece: root, rNiece: node}
 		if p.full {
 			newRoot.remember = true
 		}
@@ -194,11 +194,11 @@ func (p *Pollard) deleteRoot(del uint64) error {
 	// Delete from map.
 	delete(p.nodeMap, p.roots[tree].data.mini())
 
-	if p.roots[tree].leftNiece != nil {
-		p.roots[tree].leftNiece.aunt = nil
+	if p.roots[tree].lNiece != nil {
+		p.roots[tree].lNiece.aunt = nil
 	}
-	if p.roots[tree].rightNiece != nil {
-		p.roots[tree].rightNiece.aunt = nil
+	if p.roots[tree].rNiece != nil {
+		p.roots[tree].rNiece.aunt = nil
 	}
 	p.roots[tree].chop()
 	p.roots[tree].aunt = nil
@@ -352,7 +352,7 @@ func (p *Pollard) undoSingleAdd() {
 		lowestRoot := p.roots[len(p.roots)-1]
 		p.roots = p.roots[:len(p.roots)-1]
 
-		lNiece, rNiece := lowestRoot.leftNiece, lowestRoot.rightNiece
+		lNiece, rNiece := lowestRoot.lNiece, lowestRoot.rNiece
 
 		if lNiece != nil {
 			swapNieces(lNiece, rNiece)
@@ -428,21 +428,21 @@ func (p *Pollard) undoSingleDel(node *polNode, pos uint64) error {
 		transferNiece(parent, sibling)
 		updateAunt(parent)
 
-		auntLNiece := aunt.leftNiece
-		auntRNiece := aunt.rightNiece
+		auntLNiece := aunt.lNiece
+		auntRNiece := aunt.rNiece
 		if isLeftNiece(pos) {
-			aunt.leftNiece = node
-			aunt.rightNiece = sibling
+			aunt.lNiece = node
+			aunt.rNiece = sibling
 		} else {
-			aunt.leftNiece = sibling
-			aunt.rightNiece = node
+			aunt.lNiece = sibling
+			aunt.rNiece = node
 		}
 		updateAunt(aunt)
 
 		transferNiece(sibling, node)
 
-		node.leftNiece = auntLNiece
-		node.rightNiece = auntRNiece
+		node.lNiece = auntLNiece
+		node.rNiece = auntRNiece
 		updateAunt(node)
 	} else {
 		// We're moving the parent to sibling position.
@@ -450,16 +450,16 @@ func (p *Pollard) undoSingleDel(node *polNode, pos uint64) error {
 		sibling, parent = parent, sibling
 
 		if isLeftNiece(pos) {
-			parent.leftNiece = node
-			parent.rightNiece = sibling
+			parent.lNiece = node
+			parent.rNiece = sibling
 		} else {
-			parent.leftNiece = sibling
-			parent.rightNiece = node
+			parent.lNiece = sibling
+			parent.rNiece = node
 		}
 		updateAunt(parent)
 		updateAunt(sibling)
 
-		swapNieces(parent.leftNiece, parent.rightNiece)
+		swapNieces(parent.lNiece, parent.rNiece)
 
 		_, found := p.nodeMap[sibling.data.mini()]
 		if found {

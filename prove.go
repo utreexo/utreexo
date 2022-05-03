@@ -179,9 +179,9 @@ func (p *Pollard) calculateNodes(toProve []nodeAndPos, proofHashes []Hash) []*po
 				swapNieces(prove.node, proves[i+1].node)
 				nextNode := nodeAndPos{
 					node: &polNode{
-						data:       parentHash(prove.node.data, proves[i+1].node.data),
-						leftNiece:  prove.node,
-						rightNiece: proves[i+1].node,
+						data:   parentHash(prove.node.data, proves[i+1].node.data),
+						lNiece: prove.node,
+						rNiece: proves[i+1].node,
 					},
 					pos: parent(prove.pos, totalRows),
 				}
@@ -199,15 +199,15 @@ func (p *Pollard) calculateNodes(toProve []nodeAndPos, proofHashes []Hash) []*po
 				nextNode := nodeAndPos{pos: parent(prove.pos, totalRows)}
 				if isLeftNiece(prove.pos) {
 					nextNode.node = &polNode{
-						data:       parentHash(prove.node.data, hash),
-						leftNiece:  prove.node,
-						rightNiece: proofNode,
+						data:   parentHash(prove.node.data, hash),
+						lNiece: prove.node,
+						rNiece: proofNode,
 					}
 				} else {
 					nextNode.node = &polNode{
-						data:       parentHash(hash, prove.node.data),
-						leftNiece:  proofNode,
-						rightNiece: prove.node,
+						data:   parentHash(hash, prove.node.data),
+						lNiece: proofNode,
+						rNiece: prove.node,
 					}
 				}
 

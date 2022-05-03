@@ -50,8 +50,8 @@ func TestPollardAdditions(t *testing.T) {
 		// Check the hashes every 500 blocks.
 		if b%500 == 0 {
 			for _, root := range p.roots {
-				if root.leftNiece != nil && root.rightNiece != nil {
-					err = checkHashes(root.leftNiece, root.rightNiece, &p)
+				if root.lNiece != nil && root.rNiece != nil {
+					err = checkHashes(root.lNiece, root.rNiece, &p)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -110,8 +110,8 @@ func TestPollardAddDel(t *testing.T) {
 
 		if b%100 == 0 {
 			for _, root := range p.roots {
-				if root.leftNiece != nil && root.rightNiece != nil {
-					err = checkHashes(root.leftNiece, root.rightNiece, &p)
+				if root.lNiece != nil && root.rNiece != nil {
+					err = checkHashes(root.lNiece, root.rNiece, &p)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -200,8 +200,8 @@ func TestUndo(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, root := range p.roots {
-			if root.leftNiece != nil && root.rightNiece != nil {
-				err = checkHashes(root.leftNiece, root.rightNiece, &p)
+			if root.lNiece != nil && root.rNiece != nil {
+				err = checkHashes(root.lNiece, root.rNiece, &p)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -213,8 +213,8 @@ func TestUndo(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, root := range p.roots {
-			if root.leftNiece != nil && root.rightNiece != nil {
-				err = checkHashes(root.leftNiece, root.rightNiece, &p)
+			if root.lNiece != nil && root.rNiece != nil {
+				err = checkHashes(root.lNiece, root.rNiece, &p)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -305,8 +305,8 @@ func TestRandUndoAdd(t *testing.T) {
 
 		if b%500 == 0 {
 			for _, root := range p.roots {
-				if root.leftNiece != nil && root.rightNiece != nil {
-					err = checkHashes(root.leftNiece, root.rightNiece, &p)
+				if root.lNiece != nil && root.rNiece != nil {
+					err = checkHashes(root.lNiece, root.rNiece, &p)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -417,8 +417,8 @@ func TestRandUndo(t *testing.T) {
 		// Check hashes.
 		if b%500 == 0 {
 			for _, root := range p.roots {
-				if root.leftNiece != nil && root.rightNiece != nil {
-					err = checkHashes(root.leftNiece, root.rightNiece, &p)
+				if root.lNiece != nil && root.rNiece != nil {
+					err = checkHashes(root.lNiece, root.rNiece, &p)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -445,33 +445,33 @@ func TestRandUndo(t *testing.T) {
 func checkHashes(node, sibling *polNode, p *Pollard) error {
 	// If node has a niece, then we can calculate the hash of the sibling because
 	// every tree is a perfect binary tree.
-	if node.leftNiece != nil {
-		calculated := parentHash(node.leftNiece.data, node.rightNiece.data)
+	if node.lNiece != nil {
+		calculated := parentHash(node.lNiece.data, node.rNiece.data)
 		if sibling.data != calculated {
 			return fmt.Errorf("For position %d, calculated %s from left %s, right %s but read %s",
 				p.calculatePosition(sibling),
 				hex.EncodeToString(calculated[:]),
-				hex.EncodeToString(node.leftNiece.data[:]), hex.EncodeToString(node.rightNiece.data[:]),
+				hex.EncodeToString(node.lNiece.data[:]), hex.EncodeToString(node.rNiece.data[:]),
 				hex.EncodeToString(sibling.data[:]))
 		}
 
-		err := checkHashes(node.leftNiece, node.rightNiece, p)
+		err := checkHashes(node.lNiece, node.rNiece, p)
 		if err != nil {
 			return err
 		}
 	}
 
-	if sibling.leftNiece != nil {
-		calculated := parentHash(sibling.leftNiece.data, sibling.rightNiece.data)
+	if sibling.lNiece != nil {
+		calculated := parentHash(sibling.lNiece.data, sibling.rNiece.data)
 		if node.data != calculated {
 			return fmt.Errorf("For position %d, calculated %s from left %s, right %s but read %s",
 				p.calculatePosition(node),
 				hex.EncodeToString(calculated[:]),
-				hex.EncodeToString(sibling.leftNiece.data[:]), hex.EncodeToString(sibling.rightNiece.data[:]),
+				hex.EncodeToString(sibling.lNiece.data[:]), hex.EncodeToString(sibling.rNiece.data[:]),
 				hex.EncodeToString(node.data[:]))
 		}
 
-		err := checkHashes(sibling.leftNiece, sibling.rightNiece, p)
+		err := checkHashes(sibling.lNiece, sibling.rNiece, p)
 		if err != nil {
 			return err
 		}
