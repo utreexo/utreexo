@@ -51,13 +51,14 @@ func (p *Proof) ToString() string {
 }
 
 func (p *Pollard) Prove(hashes []Hash) (Proof, error) {
-	// No hashes to prove means that the proof is empty.
-	if len(hashes) == 0 {
+	// No hashes to prove means that the proof is empty. An empty
+	// pollard also has an empty proof.
+	if len(hashes) == 0 || p.numLeaves == 0 {
 		return Proof{}, nil
 	}
-	// No proof needed for an accumulator that has one leaf or less.
-	if p.numLeaves <= 1 {
-		return Proof{}, nil
+	// A Pollard with 1 leaf has no proof and only 1 target.
+	if p.numLeaves == 1 {
+		return Proof{Targets: []uint64{0}}, nil
 	}
 
 	var proof Proof
