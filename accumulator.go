@@ -54,13 +54,21 @@ func NewAccumulator(full bool) Pollard {
 //
 // NOTE Modify does NOT do any validation and assumes that all the positions of the leaves
 // being deleted have already been verified.
-func (p *Pollard) Modify(adds []Leaf, delHashes []Hash, dels []uint64) error {
+func (p *Pollard) Modify(adds []Leaf, delHashes []Hash, origDels []uint64) error {
+	// Make a copy to avoid mutating the deletion slice passed in.
+	delCount := len(origDels)
+	dels := make([]uint64, delCount)
+	copy(dels, origDels)
+
+	// Remove the delHashes from the map.
 	p.deleteFromMap(delHashes)
+
+	// Perform the deletion. It's important that this must happen before the addition.
 	err := p.remove(dels)
 	if err != nil {
 		return err
 	}
-	p.numDels += uint64(len(dels))
+	p.numDels += uint64(delCount)
 
 	p.add(adds)
 
