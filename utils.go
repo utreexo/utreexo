@@ -541,10 +541,13 @@ func getRootPosition(position uint64, numLeaves uint64, forestRows uint8) (uint6
 // AllSubTreesToString returns a string of all the individual subtrees in the accumulator.
 func (p *Pollard) AllSubTreesToString() string {
 	str := ""
-	for _, root := range p.roots {
-		pos := p.calculatePosition(root)
-		str += fmt.Sprintf(p.SubTreeToString(pos, false))
-		str += "\n"
+	totalRows := treeRows(p.numLeaves)
+	for h := uint8(0); h < totalRows; h++ {
+		rootPos := rootPosition(p.numLeaves, h, totalRows)
+		if isRootPosition(rootPos, p.numLeaves, totalRows) {
+			str += fmt.Sprintf(p.SubTreeToString(rootPos, false))
+			str += "\n"
+		}
 	}
 
 	return str
@@ -684,8 +687,41 @@ func printHashes(hashes []Hash) string {
 		str += " " + hex.EncodeToString(hash[:])
 
 		if i != len(hashes)-1 {
-			str += ","
+			str += "\n"
 		}
+	}
+
+	return str
+}
+
+// printPolNodes returns the hashes encoded to string of the polNodes passed in.
+func printPolNodes(nodes []*polNode) string {
+	str := ""
+	for i, node := range nodes {
+		str += node.String()
+
+		if i != len(nodes)-1 {
+			str += "\n"
+		}
+	}
+
+	return str
+}
+
+// nodeMapToString returns all the entries in the node map as a string.
+func nodeMapToString(m map[miniHash]*polNode) string {
+	str := ""
+	idx := 0
+	for h, node := range m {
+		keyStr := fmt.Sprintf("key:%s, node:%s",
+			hex.EncodeToString(h[:]), node.String())
+
+		if idx != 0 {
+			str += "\n" + keyStr
+		} else {
+			str += keyStr
+		}
+		idx++
 	}
 
 	return str

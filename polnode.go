@@ -262,6 +262,30 @@ func (n *polNode) chop() {
 	n.rNiece = nil
 }
 
+// String returns a string of the polnode's data, its aunt's data, and its nieces' data.
+func (n *polNode) String() string {
+	if n == nil {
+		return "node is nil"
+	}
+
+	auntStr := "nil"
+	if n.aunt != nil {
+		auntStr = hex.EncodeToString(n.aunt.data[:10])
+	}
+	lNieceStr := "nil"
+	if n.lNiece != nil {
+		lNieceStr = hex.EncodeToString(n.lNiece.data[:10])
+	}
+	rNieceStr := "nil"
+	if n.rNiece != nil {
+		rNieceStr = hex.EncodeToString(n.rNiece.data[:10])
+	}
+	nStr := hex.EncodeToString(n.data[:10])
+
+	return fmt.Sprintf("n.data:%s, n.aunt:%s, n.lNiece:%s, n.rNiece:%s",
+		nStr, auntStr, lNieceStr, rNieceStr)
+}
+
 // delNode removes pointers so that this node can be garbage collected.
 func delNode(node *polNode) {
 	// Stop pointing to my aunt and make my aunt stop pointing at me.
