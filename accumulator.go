@@ -487,3 +487,13 @@ func (p *Pollard) GetRoots() []Hash {
 
 	return roots
 }
+
+// GetTotalCount returns the count of all the polNodes in the pollard.
+func (p *Pollard) GetTotalCount() int64 {
+	var size int64
+	for _, root := range p.roots {
+		size += getCount(root)
+	}
+
+	return size
+}

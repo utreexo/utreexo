@@ -421,6 +421,14 @@ func hashToRoot(node *polNode) error {
 	return nil
 }
 
+// getCount returns the count of all the nieces below it and itself.
+func getCount(n *polNode) int64 {
+	if n == nil {
+		return 0
+	}
+	return (getCount(n.lNiece) + 1 + getCount(n.rNiece))
+}
+
 // calculateParentHash returns the parent hash of the passed in nodes.
 func calculateParentHash(nodePos uint64, node, sibling *polNode) Hash {
 	if isLeftNiece(nodePos) {
