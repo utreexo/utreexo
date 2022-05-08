@@ -219,18 +219,6 @@ func (p *Pollard) calculatePosition(node *polNode) uint64 {
 			rootIdx--
 		}
 	}
-	//fmt.Println("node", hex.EncodeToString(node.data[:]))
-	//auntHash := "nil"
-	//auntauntHash := "nil"
-	//if node.aunt != nil {
-	//	auntHash = hex.EncodeToString(node.aunt.data[:])
-	//	fmt.Println("node.aunt", auntHash)
-
-	//	if node.aunt.aunt != nil {
-	//		auntauntHash = hex.EncodeToString(node.aunt.aunt.data[:])
-	//	}
-	//	fmt.Println("node.aunt.aunt", auntauntHash)
-	//}
 
 	// Start from the root and work our way down the position that we want.
 	retPos := rootPosition(p.numLeaves, uint8(rootRow), forestRows)

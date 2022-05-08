@@ -71,8 +71,6 @@ func (p *Pollard) Prove(hashes []Hash) (Proof, error) {
 				hex.EncodeToString(wanted[:]))
 		}
 		proof.Targets[i] = p.calculatePosition(node)
-		//fmt.Printf("calculated %d for hash %s\n",
-		//	proof.Targets[i], hex.EncodeToString(node.data[:]))
 	}
 
 	// Sort the targets as the proof hashes need to be sorted.
@@ -100,7 +98,6 @@ func (p *Pollard) Prove(hashes []Hash) (Proof, error) {
 }
 
 func (p *Pollard) VerifyAndPopulate(delHashes []Hash, proof Proof) error {
-	//fmt.Println("numLeaves", p.numLeaves)
 	if len(delHashes) == 0 {
 		return nil
 	}
@@ -117,10 +114,6 @@ func (p *Pollard) VerifyAndPopulate(delHashes []Hash, proof Proof) error {
 	if len(rootNodes) == 0 {
 		return fmt.Errorf("No roots calculated but has %d deletions", len(delHashes))
 	}
-
-	//for i, rootHash := range rootNodes {
-	//	fmt.Printf("root %d, hash %s\n", i, hex.EncodeToString(rootHash.data[:]))
-	//}
 
 	rootMatches := 0
 	for i := range p.roots {
@@ -150,11 +143,7 @@ func (p *Pollard) populate(rootNodes []*polNode) error {
 	return nil
 }
 
-func (p *Pollard) pop() {
-}
-
 func (p *Pollard) calculateNodes(toProve []nodeAndPos, proofHashes []Hash) []*polNode {
-	//fmt.Println(p.String())
 	calculatedRootNodes := make([]*polNode, 0, len(p.roots))
 	totalRows := treeRows(p.numLeaves)
 
@@ -242,10 +231,6 @@ func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
 	if len(rootHashes) == 0 {
 		return fmt.Errorf("No roots calculated but has %d deletions", len(delHashes))
 	}
-
-	//for i, rootHash := range rootHashes {
-	//	fmt.Printf("root %d, hash %s\n", i, hex.EncodeToString(rootHash[:]))
-	//}
 
 	rootMatches := 0
 	for i := range p.roots {
