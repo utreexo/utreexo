@@ -480,6 +480,40 @@ func checkHashes(node, sibling *polNode, p *Pollard) error {
 	return nil
 }
 
+func (p *Pollard) positionSanity() error {
+	totalRows := treeRows(p.numLeaves)
+
+	var pos uint64
+	for row := uint8(0); row < totalRows; row++ {
+		pos = startPositionAtRow(row, totalRows)
+		maxPosAtRow, err := maxPositionAtRow(row, totalRows, p.numLeaves)
+		if err != nil {
+			return fmt.Errorf("positionSanity fail. Error %v", err)
+		}
+
+		for pos < maxPosAtRow {
+			node, _, _, err := p.getNode(pos)
+			if err != nil {
+				return fmt.Errorf("positionSanity fail. Error %v", err)
+			}
+
+			if node != nil {
+				gotPos := p.calculatePosition(node)
+
+				if gotPos != pos {
+					err := fmt.Errorf("expected %d but got %d for. Node: %s",
+						pos, gotPos, node.String())
+					return fmt.Errorf("positionSanity fail. Error %v", err)
+				}
+			}
+
+			pos++
+		}
+	}
+
+	return nil
+}
+
 // simChain is for testing; it spits out "blocks" of adds and deletes
 type simChain struct {
 	ttlSlices    [][]Hash

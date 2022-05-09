@@ -253,12 +253,27 @@ func maxPosition(forestRows uint8) uint64 {
 	return uint64(2<<forestRows) - 1
 }
 
+// startPositionAtRow returns the smallest position an accumulator can have for the
+// requested row for the given numLeaves.
+func startPositionAtRow(row, forestRows uint8) uint64 {
+	// 2 << forestRows is 2 more than the max poisition
+	// to get the correct offset for a given row,
+	// subtract (2 << `row complement of forestRows`) from (2 << forestRows)
+	offset := (2 << forestRows) - (2 << (forestRows - row))
+	return uint64(offset)
+}
+
 // maxPositionAtRow returns the biggest position an accumulator can have for the
 // requested row for the given numLeaves.
 func maxPositionAtRow(row, forestRows uint8, numLeaves uint64) (uint64, error) {
 	max, err := parentMany(numLeaves, row, forestRows)
 	if err != nil {
 		return 0, err
+	}
+
+	// We're returning the position not the leaf count so -1 here.
+	if max != 0 {
+		max -= 1
 	}
 	return max, nil
 }
@@ -520,7 +535,7 @@ func getRootPosition(position uint64, numLeaves uint64, forestRows uint8) (uint6
 	h := detectRow(position, forestRows)
 
 	for ; h <= forestRows; h++ {
-		rootPos := rootPosition(numLeaves, uint8(h), forestRows)
+		rootPos := rootPosition(numLeaves, h, forestRows)
 		if rootPos == returnPos {
 			return returnPos, nil
 		}
