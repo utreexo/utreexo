@@ -46,6 +46,11 @@ func TestUndo(t *testing.T) {
 		adds           []Leaf
 	}{
 		{
+			6,
+			[]Hash{{6}, {4}, {2}, {1}, {3}},
+			[]Leaf{{Hash: Hash{7}}, {Hash: Hash{8}}},
+		},
+		{
 			8,
 			[]Hash{{5}, {6}},
 			nil,
@@ -63,6 +68,11 @@ func TestUndo(t *testing.T) {
 		{
 			8,
 			[]Hash{{4}, {5}},
+			[]Leaf{{Hash: Hash{9}}, {Hash: Hash{10}}},
+		},
+		{
+			8,
+			[]Hash{{2}, {3}, {7}},
 			[]Leaf{{Hash: Hash{9}}, {Hash: Hash{10}}},
 		},
 		{
@@ -81,12 +91,12 @@ func TestUndo(t *testing.T) {
 	for _, test := range tests {
 		p := NewAccumulator(true)
 
-		// Create the starting off pollard.
 		adds := make([]Leaf, test.startLeafCount)
 		for i := range adds {
 			adds[i].Hash[0] = uint8(i + 1)
 		}
 
+		// Create the initial starting off pollard.
 		err := p.Modify(adds, nil, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -99,30 +109,60 @@ func TestUndo(t *testing.T) {
 			t.Fatal(err)
 		}
 
+		err = proofSanity(bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		beforeStr := p.String()
+
+		// Perform the modify to undo.
 		err = p.Modify(test.adds, test.dels, bp.Targets)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, root := range p.roots {
-			if root.lNiece != nil && root.rNiece != nil {
-				err = checkHashes(root.lNiece, root.rNiece, &p)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
+		afterStr := p.String()
+
+		err = p.posMapSanity()
+		if err != nil {
+			str := fmt.Errorf("TestUndo fail: error %v"+
+				"\nbefore:\n\n%s"+
+				"\nafter:\n\n%s",
+				err,
+				beforeStr,
+				afterStr)
+			t.Fatal(str)
 		}
 
+		err = p.checkHashes()
+		if err != nil {
+			str := fmt.Errorf("TestUndo fail: error %v"+
+				"\nbefore:\n\n%s"+
+				"\nafter:\n\n%s",
+				err,
+				beforeStr,
+				afterStr)
+			t.Fatal(str)
+		}
+
+		// Perform the undo.
 		err = p.Undo(uint64(len(test.adds)), bp.Targets, test.dels)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, root := range p.roots {
-			if root.lNiece != nil && root.rNiece != nil {
-				err = checkHashes(root.lNiece, root.rNiece, &p)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
+		undoStr := p.String()
+
+		err = p.checkHashes()
+		if err != nil {
+			err := fmt.Errorf("TestUndo fail: error %v"+
+				"\nbefore:\n\n%s"+
+				"\nafter:\n\n%s"+
+				"\nundo:\n\n%s",
+				err,
+				beforeStr,
+				afterStr,
+				undoStr)
+			t.Fatal(err)
 		}
 		if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
 			err := fmt.Errorf("TestUndo fail have %d leaves in map but only %d leaves in total",
@@ -131,7 +171,14 @@ func TestUndo(t *testing.T) {
 		}
 		err = p.posMapSanity()
 		if err != nil {
-			err := fmt.Errorf("TestUndo fail: error %v", err)
+			err := fmt.Errorf("TestUndo fail: error %v"+
+				"\nbefore:\n\n%s"+
+				"\nafter:\n\n%s"+
+				"\nundo:\n\n%s",
+				err,
+				beforeStr,
+				afterStr,
+				undoStr)
 			t.Fatal(err)
 		}
 
@@ -141,7 +188,7 @@ func TestUndo(t *testing.T) {
 			beforeStr := printHashes(beforeRoots)
 			afterStr := printHashes(afterRoots)
 
-			err := fmt.Errorf("PollardUndo Fail: roots don't equal, before %v, after %v",
+			err := fmt.Errorf("TestUndo Fail: roots don't equal, before %v, after %v",
 				beforeStr, afterStr)
 			t.Fatal(err)
 		}
