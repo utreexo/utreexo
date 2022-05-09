@@ -1,6 +1,7 @@
 package utreexo
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math/rand"
@@ -9,7 +10,12 @@ import (
 )
 
 func (p *Pollard) posMapSanity() error {
-	for _, node := range p.nodeMap {
+	for mHash, node := range p.nodeMap {
+		if node == nil {
+			return fmt.Errorf("Node in nodemap is nil. Key: %s",
+				hex.EncodeToString(mHash[:]))
+		}
+
 		pos := p.calculatePosition(node)
 		gotNode, _, _, err := p.getNode(pos)
 		if err != nil {
@@ -293,12 +299,41 @@ func checkHashes(node, sibling *polNode, p *Pollard) error {
 	return nil
 }
 
+// checkHashes is a wrapper around the checkHashes function. Provides an easy function to
+// check that the pollard has correct hashes.
+func (p *Pollard) checkHashes() error {
+	for _, root := range p.roots {
+		if root.lNiece != nil && root.rNiece != nil {
+			// First check the root hash.
+			calculatedHash := parentHash(root.lNiece.data, root.rNiece.data)
+			if calculatedHash != root.data {
+				err := fmt.Errorf("For position %d, calculated %s from left %s, right %s but read %s",
+					p.calculatePosition(root),
+					hex.EncodeToString(calculatedHash[:]),
+					hex.EncodeToString(root.lNiece.data[:]), hex.EncodeToString(root.rNiece.data[:]),
+					hex.EncodeToString(root.data[:]))
+				return err
+			}
+
+			// Then check all other hashes.
+			err := checkHashes(root.lNiece, root.rNiece, p)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// positionSanity tries to grab all the eligible positions of the pollard and
+// calculates its position. Returns an error if the position calculated does
+// not match the position used to fetch the node.
 func (p *Pollard) positionSanity() error {
 	totalRows := treeRows(p.numLeaves)
 
-	var pos uint64
 	for row := uint8(0); row < totalRows; row++ {
-		pos = startPositionAtRow(row, totalRows)
+		pos := startPositionAtRow(row, totalRows)
 		maxPosAtRow, err := maxPositionAtRow(row, totalRows, p.numLeaves)
 		if err != nil {
 			return fmt.Errorf("positionSanity fail. Error %v", err)
@@ -427,4 +462,73 @@ func (s *simChain) NextBlock(numAdds uint32) ([]Leaf, []int32, []Hash) {
 	}
 
 	return adds, durations, delHashes
+}
+
+// getAddsAndDels generates leaves to add and then randomly grabs some of those
+// leaves to be deleted.
+//
+// NOTE if getAddsAndDels are called multiple times for the same pollard, pass in
+// p.numLeaves into getAddsAndDels after the pollard has been modified with the
+// previous set of adds and deletions. The leaves genereated are not random and
+// are just the next leaf encoded to a 32 byte hash.
+func getAddsAndDels(currentLeaves, addCount, delCount uint32) ([]Leaf, []Hash, []uint64) {
+	if addCount == 0 {
+		return nil, nil, nil
+	}
+	leaves := make([]Leaf, addCount)
+	for i := uint32(0); i < addCount; i++ {
+		// Convert int to byte slice.
+		bs := make([]byte, 32)
+		hashInt := i + currentLeaves
+		binary.LittleEndian.PutUint32(bs, hashInt)
+
+		// Add FF at the end as you can't add an empty leaf to the accumulator.
+		bs[31] = 0xFF
+
+		// Hash the byte slice.
+		leaves[i] = Leaf{Hash: *(*Hash)(bs)}
+	}
+
+	delHashes := make([]Hash, delCount)
+	delTargets := make([]uint64, delCount)
+
+	prevIdx := make(map[int]struct{})
+	for i := range delHashes {
+		var idx int
+		for {
+			if addCount == 1 {
+				idx = 0
+				prevIdx[idx] = struct{}{}
+				break
+			} else {
+				idx = rand.Intn(int(addCount))
+				_, found := prevIdx[idx]
+				if !found {
+					prevIdx[idx] = struct{}{}
+					break
+				}
+			}
+		}
+
+		delHashes[i] = leaves[idx].Hash
+		delTargets[i] = uint64(idx)
+	}
+
+	return leaves, delHashes, delTargets
+}
+
+// proofSanity checks that a given proof doesn't have duplicate targets.
+func proofSanity(proof Proof) error {
+	targetMap := make(map[uint64]int)
+	for idx, target := range proof.Targets {
+		foundIdx, found := targetMap[target]
+		if found {
+			return fmt.Errorf("proofSanity fail. Found duplicate target "+
+				"at idx %d and %d in targets: %v", foundIdx, idx, proof.Targets)
+		}
+
+		targetMap[target] = idx
+	}
+
+	return nil
 }
