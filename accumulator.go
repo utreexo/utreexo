@@ -1,6 +1,7 @@
 package utreexo
 
 import (
+	"encoding/hex"
 	"fmt"
 	"sort"
 
@@ -54,13 +55,21 @@ func NewAccumulator(full bool) Pollard {
 //
 // NOTE Modify does NOT do any validation and assumes that all the positions of the leaves
 // being deleted have already been verified.
-func (p *Pollard) Modify(adds []Leaf, delHashes []Hash, dels []uint64) error {
+func (p *Pollard) Modify(adds []Leaf, delHashes []Hash, origDels []uint64) error {
+	// Make a copy to avoid mutating the deletion slice passed in.
+	delCount := len(origDels)
+	dels := make([]uint64, delCount)
+	copy(dels, origDels)
+
+	// Remove the delHashes from the map.
 	p.deleteFromMap(delHashes)
+
+	// Perform the deletion. It's important that this must happen before the addition.
 	err := p.remove(dels)
 	if err != nil {
 		return err
 	}
-	p.numDels += uint64(len(dels))
+	p.numDels += uint64(delCount)
 
 	p.add(adds)
 
@@ -316,11 +325,17 @@ func (p *Pollard) Undo(numAdds uint64, dels []uint64, delHashes []Hash) error {
 
 // undoEmptyRoots places empty roots back in after undoing the additions.
 func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64) error {
+	if len(p.roots) >= int(numRoots(p.numLeaves)) {
+		return nil
+	}
 	dels := make([]uint64, len(origDels))
 	copy(dels, origDels)
 
+	// Sort before detwining.
+	slices.Sort(dels)
 	dels = deTwin(dels, treeRows(p.numLeaves))
-	for _, del := range dels {
+	for i := len(dels) - 1; i >= 0; i-- {
+		del := dels[i]
 		if isRootPosition(del, p.numLeaves, treeRows(p.numLeaves)) {
 			tree, _, _, err := detectOffset(del, p.numLeaves)
 			if err != nil {
@@ -370,7 +385,7 @@ func (p *Pollard) undoSingleAdd() {
 
 func (p *Pollard) undoDels(dels []uint64, delHashes []Hash) error {
 	if len(dels) != len(delHashes) {
-		return fmt.Errorf("Got %d dels but %d delHashes",
+		return fmt.Errorf("Got %d targets to be deleted but have %d hashes",
 			len(dels), len(delHashes))
 	}
 
@@ -416,7 +431,8 @@ func (p *Pollard) undoSingleDel(node *polNode, pos uint64) error {
 	siblingPos := parent(pos, totalRows)
 	sibling, aunt, _, err := p.getNode(siblingPos)
 	if err != nil {
-		return err
+		return fmt.Errorf("Couldn't undo %s at position %d, err: %v",
+			hex.EncodeToString(node.data[:]), pos, err)
 	}
 
 	pHash := calculateParentHash(pos, node, sibling)

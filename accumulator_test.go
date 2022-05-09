@@ -1,6 +1,7 @@
 package utreexo
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math/rand"
@@ -9,7 +10,12 @@ import (
 )
 
 func (p *Pollard) posMapSanity() error {
-	for _, node := range p.nodeMap {
+	for mHash, node := range p.nodeMap {
+		if node == nil {
+			return fmt.Errorf("Node in nodemap is nil. Key: %s",
+				hex.EncodeToString(mHash[:]))
+		}
+
 		pos := p.calculatePosition(node)
 		gotNode, _, _, err := p.getNode(pos)
 		if err != nil {
@@ -29,108 +35,6 @@ func (p *Pollard) posMapSanity() error {
 	}
 
 	return nil
-}
-
-func TestPollardAdditions(t *testing.T) {
-	t.Parallel()
-
-	// simulate blocks with simchain
-	numAdds := uint32(300)
-	sc := newSimChain(0x07)
-
-	p := NewAccumulator(true)
-	for b := 0; b < 3000; b++ {
-		adds, _, _ := sc.NextBlock(numAdds)
-
-		err := p.Modify(adds, nil, nil)
-		if err != nil {
-			t.Fatalf("TestSwapLessAddDel fail at block %d. Error: %v", b, err)
-		}
-
-		// Check the hashes every 500 blocks.
-		if b%500 == 0 {
-			for _, root := range p.roots {
-				if root.lNiece != nil && root.rNiece != nil {
-					err = checkHashes(root.lNiece, root.rNiece, &p)
-					if err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-		}
-
-		if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
-			err := fmt.Errorf("TestSwapLessAdditions fail at block %d: "+
-				"have %d leaves in map but only %d leaves in total",
-				b, len(p.nodeMap), p.numLeaves-p.numDels)
-			t.Fatal(err)
-		}
-	}
-}
-
-func TestPollardAddDel(t *testing.T) {
-	t.Parallel()
-
-	// simulate blocks with simchain
-	numAdds := uint32(5)
-	sc := newSimChain(0x07)
-
-	p := NewAccumulator(true)
-	var totalAdds, totalDels int
-
-	for b := 0; b <= 2000; b++ {
-		adds, _, delHashes := sc.NextBlock(numAdds)
-		totalAdds += len(adds)
-		totalDels += len(delHashes)
-
-		proof, err := p.Prove(delHashes)
-		if err != nil {
-			t.Fatalf("TestSwapLessAddDel fail at block %d. Error: %v", b, err)
-		}
-
-		err = p.VerifyAndPopulate(delHashes, proof)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		for _, target := range proof.Targets {
-			n, _, _, err := p.getNode(target)
-			if err != nil {
-				t.Fatalf("TestSwapLessAddDel fail at block %d. Error: %v", b, err)
-			}
-			if n == nil {
-				t.Fatalf("TestSwapLessAddDel fail to read %d at block %d.", target, b)
-			}
-		}
-
-		err = p.Modify(adds, delHashes, proof.Targets)
-		if err != nil {
-			t.Fatalf("TestSwapLessAddDel fail at block %d. Error: %v", b, err)
-		}
-
-		if b%100 == 0 {
-			for _, root := range p.roots {
-				if root.lNiece != nil && root.rNiece != nil {
-					err = checkHashes(root.lNiece, root.rNiece, &p)
-					if err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-		}
-
-		err = p.posMapSanity()
-		if err != nil {
-			t.Fatalf("TestSwapLessAddDel fail at block %d. Error: %v",
-				b, err)
-		}
-		if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
-			err := fmt.Errorf("TestSwapLessAddDel fail at block %d: "+
-				"have %d leaves in map but only %d leaves in total",
-				b, len(p.nodeMap), p.numLeaves-p.numDels)
-			t.Fatal(err)
-		}
-	}
 }
 
 func TestUndo(t *testing.T) {
@@ -239,91 +143,6 @@ func TestUndo(t *testing.T) {
 
 			err := fmt.Errorf("PollardUndo Fail: roots don't equal, before %v, after %v",
 				beforeStr, afterStr)
-			t.Fatal(err)
-		}
-	}
-}
-
-func TestRandUndoAdd(t *testing.T) {
-	t.Parallel()
-
-	p := NewAccumulator(true)
-
-	sc := newSimChain(0x07)
-	numAdds := uint32(3)
-	for b := 0; b <= 1000; b++ {
-		adds, durations, delHashes := sc.NextBlock(numAdds)
-
-		beforeRoot := p.GetRoots()
-		beforeMap := make(map[miniHash]polNode)
-		for key, value := range p.nodeMap {
-			beforeMap[key] = *value
-		}
-
-		err := p.Modify(adds, nil, nil)
-		if err != nil {
-			t.Fatalf("TestRandUndoAdd fail at block %d. Error: %v", b, err)
-		}
-
-		if b%3 == 2 {
-			err := p.Undo(uint64(len(adds)), nil, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			sc.BackOne(adds, durations, delHashes)
-			afterRoot := p.GetRoots()
-			if !reflect.DeepEqual(beforeRoot, afterRoot) {
-				err := fmt.Errorf("TestRandUndoAdd fail at block %d, "+
-					"root mismatch. Before %s, after %s",
-					b, printHashes(beforeRoot), printHashes(afterRoot))
-				t.Fatal(err)
-			}
-
-			if len(p.nodeMap) != len(beforeMap) {
-				err := fmt.Errorf("undo map before %d, after %d", len(beforeMap), len(p.nodeMap))
-				t.Fatal(err)
-			}
-
-			for key, value := range beforeMap {
-				node, found := p.nodeMap[key]
-				if !found {
-					err := fmt.Errorf("hash %s not found after undo",
-						hex.EncodeToString(key[:]))
-					t.Fatal(err)
-				}
-
-				if node.data != value.data {
-					err := fmt.Errorf("For hash %s, expected %s, got %s ",
-						hex.EncodeToString(key[:]),
-						hex.EncodeToString(value.data[:]),
-						hex.EncodeToString(node.data[:]))
-					t.Fatal(err)
-				}
-			}
-		}
-
-		if b%500 == 0 {
-			for _, root := range p.roots {
-				if root.lNiece != nil && root.rNiece != nil {
-					err = checkHashes(root.lNiece, root.rNiece, &p)
-					if err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-		}
-
-		if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
-			err := fmt.Errorf("TestUndoRand fail at block %d: "+
-				"have %d leaves in map but only %d leaves in total",
-				b, len(p.nodeMap), p.numLeaves-p.numDels)
-			t.Fatal(err)
-		}
-
-		err = p.posMapSanity()
-		if err != nil {
-			err := fmt.Errorf("TestUndoRand fail at block %d: error %v", b, err)
 			t.Fatal(err)
 		}
 	}
@@ -480,6 +299,69 @@ func checkHashes(node, sibling *polNode, p *Pollard) error {
 	return nil
 }
 
+// checkHashes is a wrapper around the checkHashes function. Provides an easy function to
+// check that the pollard has correct hashes.
+func (p *Pollard) checkHashes() error {
+	for _, root := range p.roots {
+		if root.lNiece != nil && root.rNiece != nil {
+			// First check the root hash.
+			calculatedHash := parentHash(root.lNiece.data, root.rNiece.data)
+			if calculatedHash != root.data {
+				err := fmt.Errorf("For position %d, calculated %s from left %s, right %s but read %s",
+					p.calculatePosition(root),
+					hex.EncodeToString(calculatedHash[:]),
+					hex.EncodeToString(root.lNiece.data[:]), hex.EncodeToString(root.rNiece.data[:]),
+					hex.EncodeToString(root.data[:]))
+				return err
+			}
+
+			// Then check all other hashes.
+			err := checkHashes(root.lNiece, root.rNiece, p)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// positionSanity tries to grab all the eligible positions of the pollard and
+// calculates its position. Returns an error if the position calculated does
+// not match the position used to fetch the node.
+func (p *Pollard) positionSanity() error {
+	totalRows := treeRows(p.numLeaves)
+
+	for row := uint8(0); row < totalRows; row++ {
+		pos := startPositionAtRow(row, totalRows)
+		maxPosAtRow, err := maxPositionAtRow(row, totalRows, p.numLeaves)
+		if err != nil {
+			return fmt.Errorf("positionSanity fail. Error %v", err)
+		}
+
+		for pos < maxPosAtRow {
+			node, _, _, err := p.getNode(pos)
+			if err != nil {
+				return fmt.Errorf("positionSanity fail. Error %v", err)
+			}
+
+			if node != nil {
+				gotPos := p.calculatePosition(node)
+
+				if gotPos != pos {
+					err := fmt.Errorf("expected %d but got %d for. Node: %s",
+						pos, gotPos, node.String())
+					return fmt.Errorf("positionSanity fail. Error %v", err)
+				}
+			}
+
+			pos++
+		}
+	}
+
+	return nil
+}
+
 // simChain is for testing; it spits out "blocks" of adds and deletes
 type simChain struct {
 	ttlSlices    [][]Hash
@@ -580,4 +462,73 @@ func (s *simChain) NextBlock(numAdds uint32) ([]Leaf, []int32, []Hash) {
 	}
 
 	return adds, durations, delHashes
+}
+
+// getAddsAndDels generates leaves to add and then randomly grabs some of those
+// leaves to be deleted.
+//
+// NOTE if getAddsAndDels are called multiple times for the same pollard, pass in
+// p.numLeaves into getAddsAndDels after the pollard has been modified with the
+// previous set of adds and deletions. The leaves genereated are not random and
+// are just the next leaf encoded to a 32 byte hash.
+func getAddsAndDels(currentLeaves, addCount, delCount uint32) ([]Leaf, []Hash, []uint64) {
+	if addCount == 0 {
+		return nil, nil, nil
+	}
+	leaves := make([]Leaf, addCount)
+	for i := uint32(0); i < addCount; i++ {
+		// Convert int to byte slice.
+		bs := make([]byte, 32)
+		hashInt := i + currentLeaves
+		binary.LittleEndian.PutUint32(bs, hashInt)
+
+		// Add FF at the end as you can't add an empty leaf to the accumulator.
+		bs[31] = 0xFF
+
+		// Hash the byte slice.
+		leaves[i] = Leaf{Hash: *(*Hash)(bs)}
+	}
+
+	delHashes := make([]Hash, delCount)
+	delTargets := make([]uint64, delCount)
+
+	prevIdx := make(map[int]struct{})
+	for i := range delHashes {
+		var idx int
+		for {
+			if addCount == 1 {
+				idx = 0
+				prevIdx[idx] = struct{}{}
+				break
+			} else {
+				idx = rand.Intn(int(addCount))
+				_, found := prevIdx[idx]
+				if !found {
+					prevIdx[idx] = struct{}{}
+					break
+				}
+			}
+		}
+
+		delHashes[i] = leaves[idx].Hash
+		delTargets[i] = uint64(idx)
+	}
+
+	return leaves, delHashes, delTargets
+}
+
+// proofSanity checks that a given proof doesn't have duplicate targets.
+func proofSanity(proof Proof) error {
+	targetMap := make(map[uint64]int)
+	for idx, target := range proof.Targets {
+		foundIdx, found := targetMap[target]
+		if found {
+			return fmt.Errorf("proofSanity fail. Found duplicate target "+
+				"at idx %d and %d in targets: %v", foundIdx, idx, proof.Targets)
+		}
+
+		targetMap[target] = idx
+	}
+
+	return nil
 }
