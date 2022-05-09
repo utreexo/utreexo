@@ -579,3 +579,167 @@ func proofSanity(proof Proof) error {
 
 	return nil
 }
+
+func FuzzModify(f *testing.F) {
+	var tests = []struct {
+		startLeaves uint32
+		modifyAdds  uint32
+		delCount    uint32
+	}{
+		{
+			8,
+			2,
+			3,
+		},
+		{
+			6,
+			2,
+			5,
+		},
+	}
+	for _, test := range tests {
+		f.Add(test.startLeaves, test.modifyAdds, test.delCount)
+	}
+
+	f.Fuzz(func(t *testing.T, startLeaves uint32, modifyAdds uint32, delCount uint32) {
+		// delCount must be less than the current number of leaves.
+		if delCount > startLeaves {
+			return
+		}
+
+		p := NewAccumulator(true)
+		leaves, delHashes, delTargets := getAddsAndDels(uint32(p.numLeaves), startLeaves, delCount)
+		err := p.Modify(leaves, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		beforeStr := p.String()
+		beforeMap := nodeMapToString(p.nodeMap)
+
+		modifyLeaves, _, _ := getAddsAndDels(uint32(p.numLeaves), modifyAdds, 0)
+		err = p.Modify(modifyLeaves, delHashes, delTargets)
+		if err != nil {
+			t.Fatal(err)
+		}
+		afterStr := p.String()
+		afterMap := nodeMapToString(p.nodeMap)
+
+		err = p.checkHashes()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
+			startHashes := make([]Hash, len(leaves))
+			for i, leaf := range leaves {
+				startHashes[i] = leaf.Hash
+			}
+
+			modifyHashes := make([]Hash, len(modifyLeaves))
+			for i, leaf := range modifyLeaves {
+				modifyHashes[i] = leaf.Hash
+			}
+			err := fmt.Errorf("FuzzModify fail: have %d leaves in map but %d leaves in total. "+
+				"\nbefore:\n\n%s"+
+				"\nafter:\n\n%s"+
+				"\nstartLeaves %d, modifyAdds %d, delCount %d, "+
+				"\nstartHashes:\n%s"+
+				"\nmodifyAdds:\n%s"+
+				"\nmodifyDels:\n%s"+
+				"\ndel targets:\n %v"+
+				"\nnodemap before modify:\n %s"+
+				"\nnodemap after modify:\n %s",
+				len(p.nodeMap), p.numLeaves-p.numDels,
+				beforeStr,
+				afterStr,
+				startLeaves, modifyAdds, delCount,
+				printHashes(startHashes),
+				printHashes(modifyHashes),
+				printHashes(delHashes),
+				delTargets,
+				beforeMap,
+				afterMap)
+			t.Fatal(err)
+		}
+
+		err = p.posMapSanity()
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func FuzzModifyChain(f *testing.F) {
+	var tests = []struct {
+		numAdds  uint32
+		duration uint32
+		seed     int64
+	}{
+		{3, 0x07, 0x07},
+	}
+	for _, test := range tests {
+		f.Add(test.numAdds, test.duration, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		// simulate blocks with simchain
+		sc := newSimChainWithSeed(duration, seed)
+
+		p := NewAccumulator(true)
+		var totalAdds, totalDels int
+		for b := 0; b <= 100; b++ {
+			adds, _, delHashes := sc.NextBlock(numAdds)
+			totalAdds += len(adds)
+			totalDels += len(delHashes)
+
+			proof, err := p.Prove(delHashes)
+			if err != nil {
+				t.Fatalf("FuzzModifyChain fail at block %d. Error: %v", b, err)
+			}
+
+			err = p.Verify(delHashes, proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for _, target := range proof.Targets {
+				n, _, _, err := p.getNode(target)
+				if err != nil {
+					t.Fatalf("FuzzModifyChain fail at block %d. Error: %v", b, err)
+				}
+				if n == nil {
+					t.Fatalf("FuzzModifyChain fail to read %d at block %d.", target, b)
+				}
+			}
+
+			err = p.Modify(adds, delHashes, proof.Targets)
+			if err != nil {
+				t.Fatalf("FuzzModifyChain fail at block %d. Error: %v", b, err)
+			}
+
+			if b%10 == 0 {
+				err = p.checkHashes()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			err = p.posMapSanity()
+			if err != nil {
+				t.Fatalf("FuzzModifyChain fail at block %d. Error: %v",
+					b, err)
+			}
+			if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
+				err := fmt.Errorf("FuzzModifyChain fail at block %d: "+
+					"have %d leaves in map but only %d leaves in total",
+					b, len(p.nodeMap), p.numLeaves-p.numDels)
+				t.Fatal(err)
+			}
+
+			err = p.positionSanity()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+}
