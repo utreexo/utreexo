@@ -31,43 +31,6 @@ func (p *Pollard) posMapSanity() error {
 	return nil
 }
 
-func TestPollardAdditions(t *testing.T) {
-	t.Parallel()
-
-	// simulate blocks with simchain
-	numAdds := uint32(300)
-	sc := newSimChain(0x07)
-
-	p := NewAccumulator(true)
-	for b := 0; b < 3000; b++ {
-		adds, _, _ := sc.NextBlock(numAdds)
-
-		err := p.Modify(adds, nil, nil)
-		if err != nil {
-			t.Fatalf("TestSwapLessAddDel fail at block %d. Error: %v", b, err)
-		}
-
-		// Check the hashes every 500 blocks.
-		if b%500 == 0 {
-			for _, root := range p.roots {
-				if root.lNiece != nil && root.rNiece != nil {
-					err = checkHashes(root.lNiece, root.rNiece, &p)
-					if err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-		}
-
-		if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
-			err := fmt.Errorf("TestSwapLessAdditions fail at block %d: "+
-				"have %d leaves in map but only %d leaves in total",
-				b, len(p.nodeMap), p.numLeaves-p.numDels)
-			t.Fatal(err)
-		}
-	}
-}
-
 func TestPollardAddDel(t *testing.T) {
 	t.Parallel()
 
