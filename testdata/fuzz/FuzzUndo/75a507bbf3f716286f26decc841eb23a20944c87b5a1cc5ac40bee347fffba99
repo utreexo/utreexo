@@ -1,0 +1,4 @@
+go test fuzz v1
+byte('\x03')
+byte('\x13')
+byte('\x03')

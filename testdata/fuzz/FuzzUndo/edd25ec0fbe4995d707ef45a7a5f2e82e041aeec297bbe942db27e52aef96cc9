@@ -1,0 +1,4 @@
+go test fuzz v1
+byte('\x06')
+byte('\x02')
+byte('\x05')
