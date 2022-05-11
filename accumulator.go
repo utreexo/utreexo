@@ -4,8 +4,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
-
-	"golang.org/x/exp/slices"
 )
 
 // Pollard is a representation of the utreexo forest using a collection of
@@ -163,7 +161,7 @@ func (p *Pollard) calculateNewRoot(node *polNode) *polNode {
 
 // remove removes all the positions that are passed in.
 func (p *Pollard) remove(dels []uint64) error {
-	slices.Sort(dels)
+	sort.Slice(dels, func(a, b int) bool { return dels[a] < dels[b] })
 
 	totalRows := treeRows(p.numLeaves)
 	dels = deTwin(dels, totalRows)
@@ -332,7 +330,7 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64) error {
 	copy(dels, origDels)
 
 	// Sort before detwining.
-	slices.Sort(dels)
+	sort.Slice(dels, func(a, b int) bool { return dels[a] < dels[b] })
 	dels = deTwin(dels, treeRows(p.numLeaves))
 	for i := len(dels) - 1; i >= 0; i-- {
 		del := dels[i]

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"math/bits"
 	"sort"
-
-	"golang.org/x/exp/slices"
 )
 
 // parentHash returns the hash of the left and right hashes passed in.
@@ -380,7 +378,7 @@ func proofPositions(targets []uint64, numLeaves uint64, forestRows uint8) []uint
 		rowTargs := extractRow(targets, forestRows, row)
 
 		rowTargs = append(rowTargs, nextTargets...)
-		slices.Sort(rowTargs)
+		sort.Slice(rowTargs, func(a, b int) bool { return rowTargs[a] < rowTargs[b] })
 
 		// Reset nextTargets
 		nextTargets = nextTargets[:0]
