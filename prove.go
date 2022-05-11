@@ -4,8 +4,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
-
-	"golang.org/x/exp/slices"
 )
 
 // Proof is the inclusion-proof for multiple leaves.
@@ -37,7 +35,8 @@ type Proof struct {
 func (p *Proof) ToString() string {
 	targs := make([]uint64, len(p.Targets))
 	copy(targs, p.Targets)
-	slices.Sort(targs)
+	sort.Slice(targs, func(a, b int) bool { return targs[a] < targs[b] })
+
 	s := fmt.Sprintf("%d targets: ", len(targs))
 	for _, t := range targs {
 		s += fmt.Sprintf("%d ", t)
@@ -80,7 +79,7 @@ func (p *Pollard) Prove(hashes []Hash) (Proof, error) {
 	// locality or performance.
 	sortedTargets := make([]uint64, len(proof.Targets))
 	copy(sortedTargets, proof.Targets)
-	slices.Sort(sortedTargets)
+	sort.Slice(sortedTargets, func(a, b int) bool { return sortedTargets[a] < sortedTargets[b] })
 
 	// Get the positions of all the hashes that are needed to prove the targets
 	proofPositions := proofPositions(sortedTargets, p.numLeaves, treeRows(p.numLeaves))

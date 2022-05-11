@@ -3,6 +3,7 @@ package utreexo
 import (
 	"fmt"
 	"math/rand"
+	"sort"
 	"testing"
 	"time"
 
@@ -71,7 +72,7 @@ func TestDeTwinRand(t *testing.T) {
 			dels = append(dels, randNum)
 		}
 
-		slices.Sort(dels)
+		sort.Slice(dels, func(a, b int) bool { return dels[a] < dels[b] })
 		origDels := make([]uint64, len(dels))
 		copy(origDels, dels)
 
