@@ -10,6 +10,12 @@ import (
 )
 
 func (p *Pollard) posMapSanity() error {
+	if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
+		err := fmt.Errorf("Have %d leaves in map but only %d leaves in total",
+			len(p.nodeMap), p.numLeaves-p.numDels)
+		return err
+	}
+
 	for mHash, node := range p.nodeMap {
 		if node == nil {
 			return fmt.Errorf("Node in nodemap is nil. Key: %s",
@@ -238,11 +244,7 @@ func TestUndo(t *testing.T) {
 				undoStr)
 			t.Fatal(err)
 		}
-		if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
-			err := fmt.Errorf("TestUndo fail have %d leaves in map but only %d leaves in total",
-				len(p.nodeMap), p.numLeaves-p.numDels)
-			t.Fatal(err)
-		}
+
 		err = p.posMapSanity()
 		if err != nil {
 			err := fmt.Errorf("TestUndo fail: error %v"+
@@ -582,7 +584,8 @@ func FuzzModify(f *testing.F) {
 			t.Fatal(err)
 		}
 
-		if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
+		err = p.posMapSanity()
+		if err != nil {
 			startHashes := make([]Hash, len(leaves))
 			for i, leaf := range leaves {
 				startHashes[i] = leaf.Hash
@@ -592,7 +595,7 @@ func FuzzModify(f *testing.F) {
 			for i, leaf := range modifyLeaves {
 				modifyHashes[i] = leaf.Hash
 			}
-			err := fmt.Errorf("FuzzModify fail: have %d leaves in map but %d leaves in total. "+
+			err := fmt.Errorf("FuzzModify fail: %v. "+
 				"\nbefore:\n\n%s"+
 				"\nafter:\n\n%s"+
 				"\nstartLeaves %d, modifyAdds %d, delCount %d, "+
@@ -602,7 +605,7 @@ func FuzzModify(f *testing.F) {
 				"\ndel targets:\n %v"+
 				"\nnodemap before modify:\n %s"+
 				"\nnodemap after modify:\n %s",
-				len(p.nodeMap), p.numLeaves-p.numDels,
+				err,
 				beforeStr,
 				afterStr,
 				startLeaves, modifyAdds, delCount,
@@ -612,11 +615,6 @@ func FuzzModify(f *testing.F) {
 				delTargets,
 				beforeMap,
 				afterMap)
-			t.Fatal(err)
-		}
-
-		err = p.posMapSanity()
-		if err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -1018,13 +1016,6 @@ func FuzzUndoChain(f *testing.F) {
 				if err != nil {
 					t.Fatal(err)
 				}
-			}
-
-			if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
-				err := fmt.Errorf("FuzzUndoChain fail at block %d: "+
-					"have %d leaves in map but only %d leaves in total",
-					b, len(p.nodeMap), p.numLeaves-p.numDels)
-				t.Fatal(err)
 			}
 
 			err = p.posMapSanity()
