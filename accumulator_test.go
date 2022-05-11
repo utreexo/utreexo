@@ -41,59 +41,94 @@ func TestUndo(t *testing.T) {
 	t.Parallel()
 
 	var tests = []struct {
-		startLeafCount int
-		dels           []Hash
-		adds           []Leaf
+		startAdds []Hash
+		startDels []Hash
+
+		modifyAdds []Hash
+		modifyDels []Hash
 	}{
 		{
-			6,
+			[]Hash{{1}, {2}, {3}, {4}, {5}, {6}},
+			nil,
+
+			[]Hash{{7}, {8}},
 			[]Hash{{6}, {4}, {2}, {1}, {3}},
-			[]Leaf{{Hash: Hash{7}}, {Hash: Hash{8}}},
 		},
 		{
-			8,
+			[]Hash{{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}},
+			nil,
+
+			nil,
 			[]Hash{{5}, {6}},
-			nil,
 		},
 		{
-			8,
+			[]Hash{{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}},
+			nil,
+
+			nil,
 			[]Hash{{4}, {5}},
+		},
+		{
+			[]Hash{{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}},
+			nil,
+
+			[]Hash{{9}, {10}},
 			nil,
 		},
 		{
-			8,
+			[]Hash{{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}},
 			nil,
-			[]Leaf{{Hash: Hash{9}}, {Hash: Hash{10}}},
-		},
-		{
-			8,
+
+			[]Hash{{9}, {10}},
 			[]Hash{{4}, {5}},
-			[]Leaf{{Hash: Hash{9}}, {Hash: Hash{10}}},
 		},
 		{
-			8,
+			[]Hash{{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}},
+			nil,
+
+			[]Hash{{9}, {10}},
 			[]Hash{{2}, {3}, {7}},
-			[]Leaf{{Hash: Hash{9}}, {Hash: Hash{10}}},
 		},
 		{
-			7,
+			[]Hash{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
+			nil,
+
+			[]Hash{{8}, {9}},
 			[]Hash{{5}, {6}},
-			[]Leaf{{Hash: Hash{8}}, {Hash: Hash{9}}},
 		},
 
 		{
-			12,
+			[]Hash{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
 			nil,
-			[]Leaf{{Hash: Hash{14}}, {Hash: Hash{15}}, {Hash: Hash{16}}, {Hash: Hash{17}}},
+
+			[]Hash{{14}, {15}, {16}, {17}},
+			nil,
+		},
+
+		{
+			[]Hash{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
+			[]Hash{{1}, {2}, {3}, {4}, {5}, {6}},
+
+			[]Hash{{8}},
+			nil,
+		},
+
+		{
+			[]Hash{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
+			[]Hash{{1}, {2}, {3}, {4}, {6}, {7}},
+
+			[]Hash{{8}},
+			nil,
 		},
 	}
 
-	for _, test := range tests {
+	for i, test := range tests {
 		p := NewAccumulator(true)
 
-		adds := make([]Leaf, test.startLeafCount)
+		adds := make([]Leaf, len(test.startAdds))
 		for i := range adds {
-			adds[i].Hash[0] = uint8(i + 1)
+			hash := test.startAdds[i]
+			adds[i] = Leaf{Hash: hash}
 		}
 
 		// Create the initial starting off pollard.
@@ -101,34 +136,47 @@ func TestUndo(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		proof, err := p.Prove(test.startDels)
+		if err != nil {
+			t.Fatalf("TestUndo failed %d: error %v", i, err)
+		}
+		err = p.Modify(nil, test.startDels, proof.Targets)
+		if err != nil {
+			t.Fatalf("TestUndo failed %d: error %v", i, err)
+		}
 
 		beforeRoots := p.GetRoots()
-
-		bp, err := p.Prove(test.dels)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		err = proofSanity(bp)
-		if err != nil {
-			t.Fatal(err)
-		}
-
 		beforeStr := p.String()
 
-		// Perform the modify to undo.
-		err = p.Modify(test.adds, test.dels, bp.Targets)
+		modifyAdds := make([]Leaf, len(test.modifyAdds))
+		for i := range modifyAdds {
+			hash := test.modifyAdds[i]
+			modifyAdds[i] = Leaf{Hash: hash}
+		}
+
+		modifyProof, err := p.Prove(test.modifyDels)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("TestUndo failed %d: error %v", i, err)
+		}
+
+		err = proofSanity(modifyProof)
+		if err != nil {
+			t.Fatalf("TestUndo failed %d: error %v", i, err)
+		}
+
+		// Perform the modify to undo.
+		err = p.Modify(modifyAdds, test.modifyDels, modifyProof.Targets)
+		if err != nil {
+			t.Fatalf("TestUndo failed %d: error %v", i, err)
 		}
 		afterStr := p.String()
 
 		err = p.posMapSanity()
 		if err != nil {
-			str := fmt.Errorf("TestUndo fail: error %v"+
+			str := fmt.Errorf("TestUndo failed %d: error %v"+
 				"\nbefore:\n\n%s"+
 				"\nafter:\n\n%s",
-				err,
+				i, err,
 				beforeStr,
 				afterStr)
 			t.Fatal(str)
@@ -136,21 +184,47 @@ func TestUndo(t *testing.T) {
 
 		err = p.checkHashes()
 		if err != nil {
-			str := fmt.Errorf("TestUndo fail: error %v"+
+			str := fmt.Errorf("TestUndo failed %d: error %v"+
 				"\nbefore:\n\n%s"+
 				"\nafter:\n\n%s",
-				err,
+				i, err,
 				beforeStr,
 				afterStr)
 			t.Fatal(str)
 		}
 
 		// Perform the undo.
-		err = p.Undo(uint64(len(test.adds)), bp.Targets, test.dels)
+		err = p.Undo(uint64(len(test.modifyAdds)), modifyProof.Targets, test.modifyDels)
 		if err != nil {
+			err := fmt.Errorf("TestUndo failed %d: error %v"+
+				"\nbefore:\n\n%s"+
+				"\nafter:\n\n%s",
+				i, err,
+				beforeStr,
+				afterStr)
 			t.Fatal(err)
 		}
 		undoStr := p.String()
+
+		afterRoots := p.GetRoots()
+		if !reflect.DeepEqual(beforeRoots, afterRoots) {
+			beforeRootsStr := printHashes(beforeRoots)
+			afterRootsStr := printHashes(afterRoots)
+
+			err := fmt.Errorf("TestUndo failed %d: roots don't equal."+
+				"\nbefore roots: %v"+
+				"\nafter roots: %v"+
+				"\nbefore:\n\n%s"+
+				"\nafter:\n\n%s"+
+				"\nundo:\n\n%s",
+				i,
+				beforeRootsStr,
+				afterRootsStr,
+				beforeStr,
+				afterStr,
+				undoStr)
+			t.Fatal(err)
+		}
 
 		err = p.checkHashes()
 		if err != nil {
@@ -182,16 +256,6 @@ func TestUndo(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		afterRoots := p.GetRoots()
-
-		if !reflect.DeepEqual(beforeRoots, afterRoots) {
-			beforeStr := printHashes(beforeRoots)
-			afterStr := printHashes(afterRoots)
-
-			err := fmt.Errorf("TestUndo Fail: roots don't equal, before %v, after %v",
-				beforeStr, afterStr)
-			t.Fatal(err)
-		}
 	}
 }
 
