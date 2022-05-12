@@ -304,11 +304,11 @@ func (p *Pollard) deleteFromMap(delHashes []Hash) {
 }
 
 // Undo reverts the most recent modify that happened to the accumulator.
-func (p *Pollard) Undo(numAdds uint64, dels []uint64, delHashes []Hash) error {
+func (p *Pollard) Undo(numAdds uint64, dels []uint64, delHashes []Hash, prevRoots []Hash) error {
 	for i := 0; i < int(numAdds); i++ {
 		p.undoSingleAdd()
 	}
-	err := p.undoEmptyRoots(numAdds, dels)
+	err := p.undoEmptyRoots(numAdds, dels, prevRoots)
 	if err != nil {
 		return err
 	}
@@ -322,16 +322,34 @@ func (p *Pollard) Undo(numAdds uint64, dels []uint64, delHashes []Hash) error {
 }
 
 // undoEmptyRoots places empty roots back in after undoing the additions.
-func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64) error {
+func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []Hash) error {
 	if len(p.roots) >= int(numRoots(p.numLeaves)) {
 		return nil
 	}
+
+	// Add empty roots that was present in the previous roots.
+	for i, prevRoot := range prevRoots {
+		if prevRoot == empty {
+			if i >= len(p.roots) {
+				p.roots = append(p.roots, &polNode{remember: p.full})
+			}
+			if p.roots[i].data != empty {
+				p.roots = append(p.roots, nil)
+				copy(p.roots[i+1:], p.roots[i:])
+				p.roots[i] = &polNode{data: prevRoot, remember: p.full}
+			}
+		}
+	}
+
 	dels := make([]uint64, len(origDels))
 	copy(dels, origDels)
 
 	// Sort before detwining.
 	sort.Slice(dels, func(a, b int) bool { return dels[a] < dels[b] })
 	dels = deTwin(dels, treeRows(p.numLeaves))
+
+	// Add empty roots that were destroyed during the additions. Need to do this
+	// separate step before the deletions are undo-ed.
 	for i := len(dels) - 1; i >= 0; i-- {
 		del := dels[i]
 		if isRootPosition(del, p.numLeaves, treeRows(p.numLeaves)) {
@@ -350,7 +368,7 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64) error {
 			if p.roots[tree].data != empty {
 				p.roots = append(p.roots, nil)
 				copy(p.roots[tree+1:], p.roots[tree:])
-				p.roots[tree] = &polNode{data: empty}
+				p.roots[tree] = &polNode{data: empty, remember: p.full}
 			}
 		}
 	}
