@@ -200,7 +200,7 @@ func TestUndo(t *testing.T) {
 		}
 
 		// Perform the undo.
-		err = p.Undo(uint64(len(test.modifyAdds)), modifyProof.Targets, test.modifyDels)
+		err = p.Undo(uint64(len(test.modifyAdds)), modifyProof.Targets, test.modifyDels, beforeRoots)
 		if err != nil {
 			err := fmt.Errorf("TestUndo failed %d: error %v"+
 				"\nbefore:\n\n%s"+
@@ -218,8 +218,8 @@ func TestUndo(t *testing.T) {
 			afterRootsStr := printHashes(afterRoots)
 
 			err := fmt.Errorf("TestUndo failed %d: roots don't equal."+
-				"\nbefore roots: %v"+
-				"\nafter roots: %v"+
+				"\nbefore roots:\n%v"+
+				"\nafter roots:\n%v"+
 				"\nbefore:\n\n%s"+
 				"\nafter:\n\n%s"+
 				"\nundo:\n\n%s",
@@ -763,7 +763,7 @@ func FuzzUndo(f *testing.F) {
 		afterStr := p.String()
 		afterMap := nodeMapToString(p.nodeMap)
 
-		err = p.Undo(uint64(modifyAdds), bp.Targets, dels)
+		err = p.Undo(uint64(modifyAdds), bp.Targets, dels, beforeRoots)
 		if err != nil {
 			startHashes := make([]Hash, len(leaves))
 			for i, leaf := range leaves {
@@ -972,7 +972,7 @@ func FuzzUndoChain(f *testing.F) {
 
 			// Undo the last modify.
 			if b%3 == 2 {
-				err := p.Undo(uint64(len(adds)), undoTargs, undoDelHashes)
+				err := p.Undo(uint64(len(adds)), undoTargs, undoDelHashes, beforeRoot)
 				if err != nil {
 					t.Fatal(err)
 				}
