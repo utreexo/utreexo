@@ -244,20 +244,24 @@ func (n *polNode) deadEnd() bool {
 	return n.lNiece == nil && n.rNiece == nil
 }
 
-// prune prunes deadend children.
-// don't prune at the bottom; use leaf prune instead at row 1
+// prune forgets the nieces of the passed in nodes if they are not
+// marked to be remebered.
 func (n *polNode) prune() {
 	remember := n.lNiece.remember || n.rNiece.remember
 	if n.lNiece.deadEnd() && !remember {
+		delNode(n.lNiece)
 		n.lNiece = nil
 	}
 	if n.rNiece.deadEnd() && !remember {
+		delNode(n.rNiece)
 		n.rNiece = nil
 	}
 }
 
-// chop turns a node into a deadEnd by setting both nieces to nil.
+// chop turns a node into a deadEnd by deleting both nieces.
 func (n *polNode) chop() {
+	delNode(n.lNiece)
+	delNode(n.rNiece)
 	n.lNiece = nil
 	n.rNiece = nil
 }
@@ -288,6 +292,11 @@ func (n *polNode) String() string {
 
 // delNode removes pointers so that this node can be garbage collected.
 func delNode(node *polNode) {
+	// Return early if the node itself is nil.
+	if node == nil {
+		return
+	}
+
 	// Stop pointing to my aunt and make my aunt stop pointing at me.
 	if node.aunt != nil {
 		// Figure out if this node is the left or right niece and make that nil.
