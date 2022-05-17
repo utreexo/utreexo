@@ -102,20 +102,30 @@ type hashAndPos struct {
 	pos  uint64
 }
 
+// toHashAndPos returns a slice of hash and pos that's sorted.
+func toHashAndPos(targets []uint64, hashes []Hash) []hashAndPos {
+	hnp := make([]hashAndPos, len(hashes))
+
+	for i := range hnp {
+		hnp[i].hash = hashes[i]
+		hnp[i].pos = targets[i]
+	}
+
+	sort.Slice(hnp, func(a, b int) bool { return hnp[a].pos < hnp[b].pos })
+
+	return hnp
+}
+
+// Verify calculates the root hashes from the passed in proof and delHashes and
+// compares it against the current roots in the pollard.
 func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
 	if len(delHashes) == 0 {
 		return nil
 	}
-	toProve := make([]hashAndPos, len(delHashes))
 
-	for i := range toProve {
-		toProve[i].hash = delHashes[i]
-		toProve[i].pos = proof.Targets[i]
-	}
+	toProve := toHashAndPos(proof.Targets, delHashes)
 
-	sort.Slice(toProve, func(a, b int) bool { return toProve[a].pos < toProve[b].pos })
-
-	rootHashes := p.calculateRoots(toProve, proof.Proof)
+	rootHashes := calculateRoots(p.numLeaves, toProve, proof.Proof)
 	if len(rootHashes) == 0 {
 		return fmt.Errorf("No roots calculated but has %d deletions", len(delHashes))
 	}
@@ -138,9 +148,10 @@ func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
 	return nil
 }
 
-func (p *Pollard) calculateRoots(toProve []hashAndPos, proofHashes []Hash) []Hash {
-	calculatedRootHashes := make([]Hash, 0, len(p.roots))
-	totalRows := treeRows(p.numLeaves)
+// calculateRoots calculates and returns the root hashes.
+func calculateRoots(numLeaves uint64, toProve []hashAndPos, proofHashes []Hash) []Hash {
+	calculatedRootHashes := make([]Hash, 0, numRoots(numLeaves))
+	totalRows := treeRows(numLeaves)
 
 	var nextProves []hashAndPos
 	for row := 0; row <= int(totalRows); row++ {
@@ -153,7 +164,7 @@ func (p *Pollard) calculateRoots(toProve []hashAndPos, proofHashes []Hash) []Has
 			prove := proves[i]
 
 			// This means we hashed all the way to the top of this subtree.
-			if isRootPosition(prove.pos, p.numLeaves, totalRows) {
+			if isRootPosition(prove.pos, numLeaves, totalRows) {
 				calculatedRootHashes = append(calculatedRootHashes, prove.hash)
 				continue
 			}
