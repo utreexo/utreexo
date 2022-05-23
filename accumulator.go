@@ -74,6 +74,177 @@ func (p *Pollard) Modify(adds []Leaf, delHashes []Hash, origDels []uint64) error
 	return nil
 }
 
+func (p *Pollard) ModifyWithProof(delHashes []Hash, proof Proof) error {
+	err := p.Verify(delHashes, proof)
+	if err != nil {
+		return fmt.Errorf("ModifyWithProof fail. Error %s", err)
+	}
+
+	// Remove the delHashes from the map.
+	p.deleteFromMap(delHashes)
+
+	err = p.delSparsePollard(proof)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (p *Pollard) delSparsePollard(proof Proof) error {
+	// Copy the dels to avoid mutating the original dels passed in.
+	dels := make([]uint64, len(proof.Targets))
+	copy(dels, proof.Targets)
+
+	sort.Slice(dels, func(a, b int) bool { return dels[a] < dels[b] })
+
+	totalRows := treeRows(p.numLeaves)
+	dels = deTwin(dels, totalRows)
+
+	for _, del := range dels {
+		// If a root is being deleted, then we mark it and all the leaves below
+		// it to be deleted.
+		if isRootPosition(del, p.numLeaves, totalRows) {
+			err := p.deleteRoot(del)
+			if err != nil {
+				return err
+			}
+		} else {
+			//fmt.Println(del, p.String())
+			n, _, _, err := p.getNode(del)
+			if err != nil {
+				return err
+			}
+
+			sib, _, _, err := p.getNode(sibling(del))
+			if err != nil {
+				return err
+			}
+
+			if n == nil && sib == nil {
+				continue
+			}
+
+			if sib != nil {
+				sib.chop()
+			}
+
+			if n != nil {
+				if !n.deadEnd() {
+					n.aunt.lNiece = n.lNiece
+					n.aunt.rNiece = n.rNiece
+					continue
+				}
+			}
+
+			if sib.aunt.aunt != nil {
+				moveUp(sib)
+			} else {
+				// My data is given to the root.
+				*sib.aunt = *sib
+
+				// Update all the nieces to point at me.
+				updateAunt(sib.aunt)
+			}
+
+			//fmt.Println(del, p.String())
+		}
+	}
+
+	err := p.updateNodes(proof)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (p *Pollard) updateNodes(beforeProof Proof) error {
+	delHashes, proof, err := proofAfterDeletion(p.numLeaves, beforeProof)
+	if err != nil {
+		return err
+	}
+	updateNodes, err := p.cachedHashUpdateList()
+	if err != nil {
+		return err
+	}
+
+	totalRows := treeRows(p.numLeaves)
+
+	// Where all the parent hashes we've calculated in a given row will go to.
+	nextProves := make([]hashAndPos, 0, len(delHashes))
+
+	// These are the leaves to be proven. Each represent a position and the
+	// hash of a leaf.
+	toProve := toHashAndPos(proof.Targets, delHashes)
+
+	// Separate index for the hashes in the passed in proof.
+	proofHashIdx := 0
+	for row := 0; row <= int(totalRows); row++ {
+		extractedProves := extractRowHash(toProve, totalRows, uint8(row))
+
+		proves := mergeSortedHashAndPos(nextProves, extractedProves)
+		nextProves = nextProves[:0]
+
+		for i := 0; i < len(proves); i++ {
+			prove := proves[i]
+
+			if len(updateNodes) > 0 && prove.pos == updateNodes[0].pos {
+				updateNodes[0].node.data = prove.hash
+				updateNodes = updateNodes[1:]
+			}
+
+			// This means we hashed all the way to the top of this subtree.
+			if isRootPosition(prove.pos, p.numLeaves, totalRows) {
+				n, _, _, err := p.getNode(prove.pos)
+				if err != nil {
+					return err
+				}
+				n.data = prove.hash
+
+				continue
+			}
+
+			// Check if the next prove is the sibling of this prove.
+			if i+1 < len(proves) && rightSib(prove.pos) == proves[i+1].pos {
+				nextProve := hashAndPos{
+					hash: parentHash(prove.hash, proves[i+1].hash),
+					pos:  parent(prove.pos, totalRows),
+				}
+				nextProves = append(nextProves, nextProve)
+
+				if len(updateNodes) > 0 && proves[i+1].pos == updateNodes[0].pos {
+					updateNodes[0].node.data = proves[i+1].hash
+					updateNodes = updateNodes[1:]
+				}
+
+				i++ // Increment one more since we procesed another prove.
+			} else {
+				// If the next prove isn't the sibling of this prove, we fetch
+				// the next proof hash to calculate the parent.
+				hash := proof.Proof[proofHashIdx]
+				proofHashIdx++
+
+				nextProve := hashAndPos{pos: parent(prove.pos, totalRows)}
+				if isLeftNiece(prove.pos) {
+					nextProve.hash = parentHash(prove.hash, hash)
+				} else {
+					nextProve.hash = parentHash(hash, prove.hash)
+				}
+
+				if len(updateNodes) > 0 && sibling(prove.pos) == updateNodes[0].pos {
+					updateNodes[0].node.data = hash
+					updateNodes = updateNodes[1:]
+				}
+
+				nextProves = append(nextProves, nextProve)
+			}
+		}
+	}
+
+	return nil
+}
+
 // add adds all the passed in leaves to the accumulator.
 func (p *Pollard) add(adds []Leaf) {
 	for _, add := range adds {

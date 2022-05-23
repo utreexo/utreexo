@@ -150,7 +150,7 @@ func (p *Pollard) getNode(pos uint64) (n, sibling, parent *polNode, err error) {
 		// Return early if the path to the node we're looking for
 		// doesn't exist.
 		if n == nil {
-			return nil, nil, nil, nil
+			return nil, sibling, parent, nil
 		}
 	}
 
@@ -495,4 +495,98 @@ func insertSortNodeAndPos(nodes []nodeAndPos, el nodeAndPos) []nodeAndPos {
 	nodes[index] = el
 
 	return nodes
+}
+
+func moveUp(node *polNode) {
+	if node == nil {
+		return
+	}
+
+	fmt.Println("moving up", node.String())
+
+	if node.aunt == node.aunt.aunt.rNiece {
+		// If there is a niece where I will be, then get its nieces and delete it.
+		if node.aunt.aunt.lNiece != nil {
+			transferNiece(node, node.aunt.aunt.lNiece)
+			delNode(node.aunt.aunt.lNiece)
+		}
+		// Make my future aunt point at me.
+		node.aunt.aunt.lNiece = node
+
+		// Make my current aunt stop pointing at me.
+		if node.aunt.lNiece == node {
+			node.aunt.lNiece = nil
+		} else if node.aunt.rNiece == node {
+			node.aunt.rNiece = nil
+		}
+		// Then make my grandaunt my aunt.
+		node.aunt = node.aunt.aunt
+
+		if node.aunt != nil {
+			node.aunt.rNiece.chop()
+			if !node.aunt.rNiece.remember && node.aunt.lNiece == nil || !node.aunt.lNiece.remember {
+				aunt := node.aunt
+				//delNode(node.aunt.lNiece)
+				//delNode(node.aunt.rNiece)
+				delNode(aunt.lNiece)
+				delNode(aunt.rNiece)
+
+				// Prune any nodes that have
+				for aunt != nil && aunt.deadEnd() {
+					n := aunt.aunt
+					delNode(aunt)
+
+					aunt = n
+				}
+			}
+			//if !node.aunt.lNiece.remember && !node.aunt.rNiece.remember {
+			//	delNode(node.aunt.lNiece)
+			//}
+		}
+		//fmt.Println("3hi", p.String())
+	} else if node.aunt == node.aunt.aunt.lNiece {
+		if node.aunt.aunt.rNiece != nil {
+			transferNiece(node, node.aunt.aunt.rNiece)
+			delNode(node.aunt.aunt.rNiece)
+		}
+
+		node.aunt.aunt.rNiece = node
+
+		if node.aunt.lNiece == node {
+			node.aunt.lNiece = nil
+		} else if node.aunt.rNiece == node {
+			node.aunt.rNiece = nil
+		}
+		node.aunt = node.aunt.aunt
+
+		if node.aunt != nil {
+			node.aunt.lNiece.chop()
+			//if !node.aunt.lNiece.remember {
+			//	delNode(node.aunt.lNiece)
+			//}
+			if !node.aunt.lNiece.remember && node.aunt.rNiece == nil || !node.aunt.rNiece.remember {
+				aunt := node.aunt
+				//delNode(node.aunt.lNiece)
+				//delNode(node.aunt.rNiece)
+				delNode(aunt.lNiece)
+				delNode(aunt.rNiece)
+
+				for aunt != nil && aunt.deadEnd() {
+					n := aunt.aunt
+					delNode(aunt)
+
+					aunt = n
+				}
+			}
+		}
+	}
+
+	node = node.aunt
+	// Prune any nodes that have
+	for node != nil && node.deadEnd() {
+		aunt := node.aunt
+		delNode(node)
+
+		node = aunt
+	}
 }

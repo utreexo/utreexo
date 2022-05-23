@@ -92,6 +92,24 @@ func isRootPosition(position, numLeaves uint64, forestRows uint8) bool {
 	return rootPresent && rootPos == position
 }
 
+func isAncestor(higherPos, lowerPos uint64, forestRows uint8) (bool, error) {
+	lowerRow := detectRow(lowerPos, forestRows)
+	higherRow := detectRow(higherPos, forestRows)
+
+	for ; lowerRow < higherRow; lowerRow++ {
+		ancestor, err := parentMany(lowerPos, higherRow-lowerRow, forestRows)
+		if err != nil {
+			return false, err
+		}
+
+		if ancestor == higherPos {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
 // detectRow finds the current row of your node given the position
 // and the total forest rows.
 func detectRow(position uint64, forestRows uint8) uint8 {

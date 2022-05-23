@@ -4,6 +4,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+
+	"golang.org/x/exp/slices"
 )
 
 // Proof is the inclusion-proof for multiple leaves.
@@ -125,21 +127,33 @@ func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
 
 	rootHashes := calculateRoots(p.numLeaves, delHashes, proof)
 	if len(rootHashes) == 0 {
-		return fmt.Errorf("No roots calculated but has %d deletions", len(delHashes))
+		return fmt.Errorf("Pollard.Verify fail. No roots calculated "+
+			"but have %d deletions", len(delHashes))
 	}
 
+	err := verify(rootHashes, p.roots)
+	if err != nil {
+		return fmt.Errorf("Pollard.Verify fail. Error %s", err)
+	}
+
+	return nil
+}
+
+// verify takes compares the root polnodes with the root candidates. Errors out if all the
+// rootCandidates do not have a corresponding polnode with the same hash.
+func verify(rootCandidates []Hash, currentRoots []*polNode) error {
 	rootMatches := 0
-	for i := range p.roots {
-		if len(rootHashes) > rootMatches &&
-			p.roots[len(p.roots)-(i+1)].data == rootHashes[rootMatches] {
+	for i := range currentRoots {
+		if len(rootCandidates) > rootMatches &&
+			currentRoots[len(currentRoots)-(i+1)].data == rootCandidates[rootMatches] {
 			rootMatches++
 		}
 	}
-	if len(rootHashes) != rootMatches {
-		// the proof is invalid because some root candidates were not
+	if len(rootCandidates) != rootMatches {
+		// The proof is invalid because some root candidates were not
 		// included in `roots`.
-		err := fmt.Errorf("Pollard.Verify: generated %d roots but only"+
-			"matched %d roots", len(rootHashes), rootMatches)
+		err := fmt.Errorf("Have %d roots but only "+
+			"matched %d roots", len(rootCandidates), rootMatches)
 		return err
 	}
 
@@ -373,4 +387,126 @@ func extractRowNode(toProve []nodeAndPos, forestRows, rowToExtract uint8) []node
 	copy(row, toProve[start:end+1])
 
 	return row
+}
+
+// calculateRootsAfterDel returns the accumulator roots after the targets in the proof
+// has been deleted.
+func calculateRootsAfterDel(numLeaves uint64, proof Proof) ([]Hash, error) {
+	delHashes, afterProof, err := proofAfterDeletion(numLeaves, proof)
+	if err != nil {
+		return nil, err
+	}
+
+	roots := calculateRoots(numLeaves, delHashes, afterProof)
+	return roots, nil
+}
+
+// proofAfterDeletion modifies the proof so that it proves the siblings of the targets
+// in this proof. Having this information allows for the calculation of roots after the
+// deletion has happened.
+func proofAfterDeletion(numLeaves uint64, proof Proof) ([]Hash, Proof, error) {
+	forestRows := treeRows(numLeaves)
+	proofPos := proofPositions(proof.Targets, numLeaves, forestRows)
+
+	// Copy the targets to avoid mutating the original. Then detwin it
+	// to prep for deletion.
+	targets := make([]uint64, len(proof.Targets))
+	copy(targets, proof.Targets)
+	targets = deTwin(targets, forestRows)
+
+	proveTargets := make([]uint64, 0, len(targets))
+	targetHashes := make([]Hash, 0, len(targets))
+
+	hnp := toHashAndPos(proofPos, proof.Proof)
+	for i := 0; i < len(targets); i++ {
+		if isRootPosition(targets[i], numLeaves, forestRows) {
+			break
+		}
+
+		sib := sibling(targets[i])
+
+		// Look for the sibling in the proof hashes.
+		idx := slices.IndexFunc(hnp, func(elem hashAndPos) bool { return elem.pos == sib })
+		if idx != -1 {
+			parentPos := parent(sib, forestRows)
+			if len(proveTargets) > 0 && proveTargets[len(proveTargets)-1] == leftSib(parentPos) {
+				proveTargets[len(proveTargets)-1] = parent(parentPos, forestRows)
+
+				pHash := parentHash(targetHashes[len(targetHashes)-1], hnp[idx].hash)
+				targetHashes[len(targetHashes)-1] = pHash
+			} else {
+				proveTargets = append(proveTargets, parentPos)
+				targetHashes = append(targetHashes, hnp[idx].hash)
+			}
+
+			// Delete the sibling from hnp.
+			hnp = append(hnp[:idx], hnp[idx+1:]...)
+		} else {
+			// If the sibling is not in the proof hashes, it's in the targets.
+			idx := slices.IndexFunc(proveTargets, func(elem uint64) bool { return elem == sib })
+			if idx != -1 {
+				proveTargets[idx] = parent(proveTargets[idx], forestRows)
+			} else {
+				return nil, Proof{}, fmt.Errorf("proofAfterDeletion error: Couldn't find expected pos of %d", sib)
+			}
+		}
+	}
+
+	hashes := make([]Hash, len(hnp))
+	for i := range hnp {
+		hashes[i] = hnp[i].hash
+	}
+
+	return targetHashes, Proof{proveTargets, hashes}, nil
+}
+
+// cachedHashUpdateList returns the cached nodes that should be updated after deletion.
+func (p *Pollard) cachedHashUpdateList() ([]nodeAndPos, error) {
+	forestRows := treeRows(p.numLeaves)
+
+	// Map to keep track of what's already in the slice to avoid duplicates.
+	posMap := make(map[uint64]interface{})
+
+	// The nodes that will need to have their hashes checked for updates.
+	updateNodes := make([]nodeAndPos, 0, len(p.nodeMap))
+	for _, node := range p.nodeMap {
+		pos := p.calculatePosition(node)
+		_, found := posMap[pos]
+		if !found {
+			updateNodes = append(updateNodes, nodeAndPos{node, pos})
+			posMap[pos] = nil
+		}
+
+		sibPos := sibling(pos)
+		_, found = posMap[sibPos]
+		if found {
+			// If the sibling is in the map, we can skip following up the
+			// aunts as they share the same aunts.
+			continue
+		}
+		posMap[sibPos] = nil
+
+		sibNode, err := node.getSibling()
+		if err != nil {
+			return nil, err
+		}
+		updateNodes = append(updateNodes, nodeAndPos{sibNode, sibPos})
+
+		// Keep adding aunts until we get to the root.
+		for node.aunt != nil {
+			pos = sibling(parent(pos, forestRows))
+			node = node.aunt
+
+			_, found = posMap[pos]
+			if found {
+				continue
+			}
+
+			posMap[pos] = nil
+			updateNodes = append(updateNodes, nodeAndPos{node, pos})
+		}
+	}
+
+	sort.Slice(updateNodes, func(a, b int) bool { return updateNodes[a].pos < updateNodes[b].pos })
+	return updateNodes, nil
 }

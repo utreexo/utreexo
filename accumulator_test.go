@@ -364,6 +364,103 @@ func (p *Pollard) positionSanity() error {
 	return nil
 }
 
+func TestSparseModify(t *testing.T) {
+	pFull := NewAccumulator(true)
+	pSparse := NewAccumulator(false)
+
+	leaves := []Leaf{
+		{Hash{1}, true},
+		{Hash{2}, false},
+		{Hash{3}, false},
+		{Hash{4}, false},
+	}
+
+	err := pFull.Modify(leaves, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = pSparse.Modify(leaves, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leaves = []Leaf{
+		{Hash{5}, false},
+		{Hash{6}, false},
+		{Hash{7}, false},
+		{Hash{8}, false},
+		{Hash{9}, false},
+		{Hash{10}, false},
+		{Hash{11}, false},
+	}
+
+	err = pFull.Modify(leaves, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = pSparse.Modify(leaves, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println(pFull.String())
+	fmt.Println(pSparse.String())
+
+	delHashes := []Hash{{1}, {2}, {4}, {5}}
+	proof, err := pFull.Prove(delHashes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = pFull.Modify(nil, delHashes, proof.Targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fmt.Println("full", pFull.String())
+
+	//proofPos := proofPositions(proof.Targets, pSparse.numLeaves, treeRows(pSparse.numLeaves))
+	fmt.Printf("targets: %v\n", proof.Targets)
+	//afterRoots, err := calculateRootsAfterDel(pSparse.numLeaves, proof)
+	//if err != nil {
+	//	t.Fatal(err)
+	//}
+
+	//fmt.Println("after roots", printHashes(afterRoots))
+	fmt.Println("sparse before", pSparse.String())
+
+	err = pSparse.ModifyWithProof(delHashes, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fmt.Println("sparse", pSparse.String())
+	//dels := []Hash{
+	//	{1},
+	//}
+
+	//proof, err := pFull.Prove(dels)
+	//if err != nil {
+	//	t.Fatal(err)
+	//}
+
+	//err = pFull.Modify(nil, dels, proof.Targets)
+	//if err != nil {
+	//	t.Fatal(err)
+	//}
+
+	//err = pSparse.VerifyAndPopulate(dels, proof)
+	//if err != nil {
+	//	t.Fatal(err)
+	//}
+
+	//err = pSparse.Modify(nil, dels, proof.Targets)
+	//if err != nil {
+	//	t.Fatal(err)
+	//}
+	//fmt.Println(pSparse.String())
+}
+
 // simChain is for testing; it spits out "blocks" of adds and deletes
 type simChain struct {
 	ttlSlices    [][]Hash
