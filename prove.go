@@ -123,9 +123,7 @@ func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
 		return nil
 	}
 
-	toProve := toHashAndPos(proof.Targets, delHashes)
-
-	rootHashes := calculateRoots(p.numLeaves, toProve, proof.Proof)
+	rootHashes := calculateRoots(p.numLeaves, delHashes, proof)
 	if len(rootHashes) == 0 {
 		return fmt.Errorf("No roots calculated but has %d deletions", len(delHashes))
 	}
@@ -149,11 +147,21 @@ func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
 }
 
 // calculateRoots calculates and returns the root hashes.
-func calculateRoots(numLeaves uint64, toProve []hashAndPos, proofHashes []Hash) []Hash {
-	calculatedRootHashes := make([]Hash, 0, numRoots(numLeaves))
+func calculateRoots(numLeaves uint64, delHashes []Hash, proof Proof) []Hash {
 	totalRows := treeRows(numLeaves)
 
-	var nextProves []hashAndPos
+	// Where all the root hashes that we've calculated will go to.
+	calculatedRootHashes := make([]Hash, 0, numRoots(numLeaves))
+
+	// Where all the parent hashes we've calculated in a given row will go to.
+	nextProves := make([]hashAndPos, 0, len(delHashes))
+
+	// These are the leaves to be proven. Each represent a position and the
+	// hash of a leaf.
+	toProve := toHashAndPos(proof.Targets, delHashes)
+
+	// Separate index for the hashes in the passed in proof.
+	proofHashIdx := 0
 	for row := 0; row <= int(totalRows); row++ {
 		extractedProves := extractRowHash(toProve, totalRows, uint8(row))
 
@@ -179,8 +187,10 @@ func calculateRoots(numLeaves uint64, toProve []hashAndPos, proofHashes []Hash) 
 
 				i++ // Increment one more since we procesed another prove.
 			} else {
-				hash := proofHashes[0]
-				proofHashes = proofHashes[1:]
+				// If the next prove isn't the sibling of this prove, we fetch
+				// the next proof hash to calculate the parent.
+				hash := proof.Proof[proofHashIdx]
+				proofHashIdx++
 
 				nextProve := hashAndPos{pos: parent(prove.pos, totalRows)}
 				if isLeftNiece(prove.pos) {
