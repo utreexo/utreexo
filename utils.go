@@ -4,6 +4,7 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"math/bits"
 	"sort"
 )
@@ -90,6 +91,89 @@ func isRootPosition(position, numLeaves uint64, forestRows uint8) bool {
 	rootPos := rootPosition(numLeaves, row, forestRows)
 
 	return rootPresent && rootPos == position
+}
+
+// isAncestor returns true if the higherPos is an ancestor of the lowerPos.
+//
+// 14
+// |---------------\
+// 12              13
+// |-------\       |-------\
+// 08      09      10      11
+// |---\   |---\   |---\   |---\
+// 00  01  02  03  04  05  06  07
+//
+// In the above tree, 12 is an ancestor of 00. 13 is not an ancestor of 00.
+func isAncestor(higherPos, lowerPos uint64, forestRows uint8) bool {
+	lowerRow := detectRow(lowerPos, forestRows)
+	higherRow := detectRow(higherPos, forestRows)
+
+	// Prevent underflows by checking that the higherRow is not less
+	// than the lowerRow.
+	if higherRow < lowerRow {
+		return false
+	}
+
+	// Return false if we error out or the calculated ancestor doesn't
+	// match the higherPos.
+	ancestor, err := parentMany(lowerPos, higherRow-lowerRow, forestRows)
+	if err != nil || higherPos != ancestor {
+		return false
+	}
+
+	return true
+}
+
+// removeBit removes the nth bit from the val passed in. For example, if the 2nd
+// bit is to be removed from 1011 (11 in dec), the returned value is 111 (7 in dec).
+func removeBit(val, bit uint64) uint64 {
+	mask := uint64((2 << bit) - 1)
+	upperMask := math.MaxUint64 ^ mask
+	upper := val & upperMask
+
+	mask = (1 << bit) - 1
+	lowerMask := ^(math.MaxUint64 ^ mask)
+	lower := val & lowerMask
+
+	return (upper >> 1) | lower
+}
+
+// calcNextPosition calculates where a position should move to if an ancestor of
+// delPos gets deleted.
+// NOTE: caller must check that delPos is an ancestor of position. Wrong position
+// will be returned if delPos is not an ancestor of position.
+//
+// Ex: pos of 1, delPos of 5.
+// In the below tree, when we delete 5 (101), we'll remove the 1st bit of 1 (001)
+// and we get 01. Then we prepend bit 1 on 01 and get 101, which is 4, the position
+// 1 needs to go to when we delete 5.
+//
+// row 2: 110
+//        |---------\
+// row 1: 100       101
+//        |----\    |----\
+// row 0: 000  001  010  011
+//
+// TODO? we could have a function that supports moving up multiple rows. Not sure
+// if it's needed.
+func calcNextPosition(position, delPos uint64, forestRows uint8) (uint64, error) {
+	delRow := detectRow(delPos, forestRows)
+	posRow := detectRow(position, forestRows)
+
+	if delRow < posRow {
+		return 0, fmt.Errorf("calcNextPosition fail. delPos of %d is lower than %d",
+			delPos, position)
+	}
+
+	// This is the lower bits where we'll remove the nth bit.
+	lowerBits := removeBit(position, uint64(delRow-posRow))
+
+	// This is the bit to be prepended.
+	toRow := posRow + 1
+	higherBits := uint64(1<<toRow) << uint64(forestRows-toRow)
+
+	// Put the bits together and return it.
+	return higherBits | lowerBits, nil
 }
 
 // detectRow finds the current row of your node given the position
