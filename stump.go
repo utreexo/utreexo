@@ -24,7 +24,9 @@ func UpdateStump(delHashes, addHashes []Hash, proof Proof, stump Stump) (Stump, 
 
 	roots := make([]Hash, len(stump.Roots))
 	idx := 0
-	for i, root := range stump.Roots {
+	for i := len(stump.Roots) - 1; i >= 0; i-- {
+		root := stump.Roots[i]
+
 		if idx < len(rootCandidates) && root == rootCandidates[idx] {
 			roots[i] = modifiedRoots[idx]
 			idx++
@@ -48,7 +50,7 @@ func StumpVerify(stump Stump, delHashes []Hash, proof Proof) ([]Hash, error) {
 	rootMatches := 0
 	for i := range stump.Roots {
 		if len(rootCandidates) > rootMatches &&
-			stump.Roots[i] == rootCandidates[rootMatches] {
+			stump.Roots[len(stump.Roots)-(i+1)] == rootCandidates[rootMatches] {
 			rootMatches++
 		}
 	}

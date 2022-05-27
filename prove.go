@@ -141,7 +141,7 @@ func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
 	rootMatches := 0
 	for i := range p.roots {
 		if len(rootCandidates) > rootMatches &&
-			p.roots[i].data == rootCandidates[rootMatches] {
+			p.roots[len(p.roots)-(i+1)].data == rootCandidates[rootMatches] {
 			rootMatches++
 		}
 	}
@@ -214,13 +214,6 @@ func calculateRoots(numLeaves uint64, delHashes []Hash, proof Proof) []Hash {
 				nextProves = append(nextProves, nextProve)
 			}
 		}
-	}
-
-	// The roots are organized from the greatest position to the smallest but
-	// since we've calculated up, the calculated roots are in smallest to greatest
-	// order. Reversing makes the roots all be in an expected order.
-	for i, j := 0, len(calculatedRootHashes)-1; i < j; i, j = i+1, j-1 {
-		calculatedRootHashes[i], calculatedRootHashes[j] = calculatedRootHashes[j], calculatedRootHashes[i]
 	}
 
 	return calculatedRootHashes
