@@ -4,6 +4,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+
+	"golang.org/x/exp/slices"
 )
 
 // Proof is the inclusion-proof for multiple leaves.
@@ -373,4 +375,124 @@ func extractRowNode(toProve []nodeAndPos, forestRows, rowToExtract uint8) []node
 	copy(row, toProve[start:end+1])
 
 	return row
+}
+
+func removeDuplicateInt(uint64Slice []uint64) []uint64 {
+	allKeys := make(map[uint64]bool)
+	list := []uint64{}
+	for _, item := range uint64Slice {
+		if _, value := allKeys[item]; !value {
+			allKeys[item] = true
+			list = append(list, item)
+		}
+	}
+	return list
+}
+
+// proofAfterDeletion modifies the proof so that it proves the siblings of the targets
+// in this proof. Having this information allows for the calculation of roots after the
+// deletion has happened.
+func proofAfterDeletion(numLeaves uint64, proof Proof) ([]Hash, Proof) {
+	forestRows := treeRows(numLeaves)
+
+	// Copy the targets to avoid mutating the original. Then detwin it
+	// to prep for deletion.
+	targets := make([]uint64, len(proof.Targets))
+	copy(targets, proof.Targets)
+	sort.Slice(targets, func(a, b int) bool { return targets[a] < targets[b] })
+
+	// Use the sorted targets to generate the positions for the proof hashes.
+	proofPos := proofPositions(targets, numLeaves, forestRows)
+	// Attach a position to each of the proof hashes.
+	hnp := toHashAndPos(proofPos, proof.Proof)
+
+	// This is where the new targets and its hashes will go to.
+	proveTargets := make([]uint64, 0, len(targets))
+	targetHashes := make([]Hash, 0, len(targets))
+
+	// Detwin before processing.
+	targets = deTwin(targets, forestRows)
+
+	// For each of the targets, we'll try to find the sibling in the proof hashes
+	// and promote it as the parent. If it's not in the proof hashes, we'll move
+	// the descendatns of the existing targets and proofs of the sibling's parent
+	// up by one row.
+	for i := 0; i < len(targets); i++ {
+		// If the target is a root, we need to add an empty hash so
+		// that the stump correctly udpates the roots to include the
+		// empty roots.
+		if isRootPosition(targets[i], numLeaves, forestRows) {
+			proveTargets = append(proveTargets, targets[i])
+			targetHashes = append(targetHashes, empty)
+			continue
+		}
+
+		sib := sibling(targets[i])
+
+		// Look for the sibling in the proof hashes.
+		if idx := slices.IndexFunc(hnp, func(elem hashAndPos) bool { return elem.pos == sib }); idx != -1 {
+			parentPos := parent(sib, forestRows)
+
+			proveTargets = append(proveTargets, parentPos)
+			targetHashes = append(targetHashes, hnp[idx].hash)
+
+			// Delete the sibling from hnp as this sibling is a target now, not a proof.
+			hnp = append(hnp[:idx], hnp[idx+1:]...)
+		} else {
+			// If the sibling is not in the proof hashes or the targets,
+			// the descendants of the sibling will be moving up.
+			//
+			// 14
+			// |---------------\
+			// 12              13
+			// |-------\       |-------\
+			// 08      09      10      11
+			// |---\   |---\   |---\   |---\
+			// 00  01          04  05  06  07
+			//
+			// In the above tree, if we're deleting 00 and 09, 09 won't be
+			// able to find the sibling in the proof hashes. 01 would have moved
+			// up to 08 and we'll move 08 up and to 12 as 09 is also being deleted.
+
+			// First update the targets to their new positions.
+			for j := len(proveTargets) - 1; j >= 0; j-- {
+				ancestor := isAncestor(parent(sib, forestRows), proveTargets[j], forestRows)
+				if ancestor {
+					// We can ignore the error since we've already verified that
+					// the proveTargets[j] is an ancestor of sib.
+					nextPos, _ := calcNextPosition(proveTargets[j], sib, forestRows)
+					proveTargets[j] = nextPos
+				}
+			}
+
+			// Update the proofs as well.
+			for j := len(hnp) - 1; j >= 0; j-- {
+				ancestor := isAncestor(parent(sib, forestRows), hnp[j].pos, forestRows)
+				if ancestor {
+					// We can ignore the error since we've already verified that
+					// the hnp[j] is an ancestor of sib.
+					nextPos, _ := calcNextPosition(hnp[j].pos, sib, forestRows)
+					hnp[j].pos = nextPos
+				}
+			}
+
+			// TODO I think we can do this a different way. We need
+			// the prove targets in the same order as the proof hashes
+			// so if we sort and dedupe, we'd also need to sort targetHashes
+			// as well.
+			proveTargets = removeDuplicateInt(proveTargets)
+		}
+	}
+
+	// The proof hashes should be in order before they're included in the proof.
+	sort.Slice(hnp, func(a, b int) bool { return hnp[a].pos < hnp[b].pos })
+
+	// The leftover proofs that weren't siblings of the detwined targets are
+	// the new proofs for the new targets.
+	hashes := make([]Hash, len(hnp))
+	for i := range hnp {
+		hashes[i] = hnp[i].hash
+	}
+
+	return targetHashes, Proof{proveTargets, hashes}
 }
