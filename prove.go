@@ -113,6 +113,8 @@ func toHashAndPos(targets []uint64, hashes []Hash) []hashAndPos {
 		hnp[i].pos = targets[i]
 	}
 
+	// No guarantee that the targets and the delHashes are in order. Sort them
+	// before processing.
 	sort.Slice(hnp, func(a, b int) bool { return hnp[a].pos < hnp[b].pos })
 
 	return hnp
@@ -125,23 +127,31 @@ func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
 		return nil
 	}
 
-	rootHashes := calculateRoots(p.numLeaves, delHashes, proof)
-	if len(rootHashes) == 0 {
-		return fmt.Errorf("No roots calculated but has %d deletions", len(delHashes))
+	if len(delHashes) != len(proof.Targets) {
+		return fmt.Errorf("Pollard.Verify fail. Was given %d targets but got %d hashes",
+			len(proof.Targets), len(delHashes))
+	}
+
+	rootCandidates := calculateRoots(p.numLeaves, delHashes, proof)
+	if len(rootCandidates) == 0 {
+		return fmt.Errorf("Pollard.Verify fail. No roots calculated "+
+			"but have %d deletions", len(delHashes))
 	}
 
 	rootMatches := 0
 	for i := range p.roots {
-		if len(rootHashes) > rootMatches &&
-			p.roots[len(p.roots)-(i+1)].data == rootHashes[rootMatches] {
+		if len(rootCandidates) > rootMatches &&
+			p.roots[i].data == rootCandidates[rootMatches] {
 			rootMatches++
 		}
 	}
-	if len(rootHashes) != rootMatches {
-		// the proof is invalid because some root candidates were not
+	// Error out if all the rootCandidates do not have a corresponding
+	// polnode with the same hash.
+	if len(rootCandidates) != rootMatches {
+		// The proof is invalid because some root candidates were not
 		// included in `roots`.
-		err := fmt.Errorf("Pollard.Verify: generated %d roots but only"+
-			"matched %d roots", len(rootHashes), rootMatches)
+		err := fmt.Errorf("Pollard.Verify fail. Have %d roots but only "+
+			"matched %d roots", len(rootCandidates), rootMatches)
 		return err
 	}
 
@@ -204,6 +214,13 @@ func calculateRoots(numLeaves uint64, delHashes []Hash, proof Proof) []Hash {
 				nextProves = append(nextProves, nextProve)
 			}
 		}
+	}
+
+	// The roots are organized from the greatest position to the smallest but
+	// since we've calculated up, the calculated roots are in smallest to greatest
+	// order. Reversing makes the roots all be in an expected order.
+	for i, j := 0, len(calculatedRootHashes)-1; i < j; i, j = i+1, j-1 {
+		calculatedRootHashes[i], calculatedRootHashes[j] = calculatedRootHashes[j], calculatedRootHashes[i]
 	}
 
 	return calculatedRootHashes
