@@ -33,14 +33,10 @@ type Proof struct {
 	Proof []Hash
 }
 
-// ToString for debugging, shows the proof
-func (p *Proof) ToString() string {
-	targs := make([]uint64, len(p.Targets))
-	copy(targs, p.Targets)
-	sort.Slice(targs, func(a, b int) bool { return targs[a] < targs[b] })
-
-	s := fmt.Sprintf("%d targets: ", len(targs))
-	for _, t := range targs {
+// String returns a string of the proof. Useful for debugging.
+func (p *Proof) String() string {
+	s := fmt.Sprintf("%d targets: ", len(p.Targets))
+	for _, t := range p.Targets {
 		s += fmt.Sprintf("%d ", t)
 	}
 	s += fmt.Sprintf("\n%d proofs: ", len(p.Proof))
