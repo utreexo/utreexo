@@ -104,6 +104,17 @@ type hashAndPos struct {
 	pos  uint64
 }
 
+// hashAndPosCmp compares the elements of a and b.
+// The result is 0 if a == b, -1 if a < b, and +1 if a > b.
+func hashAndPosCmp(a, b hashAndPos) int {
+	if a.pos < b.pos {
+		return -1
+	} else if a.pos > b.pos {
+		return 1
+	}
+	return 0
+}
+
 // toHashAndPos returns a slice of hash and pos that's sorted.
 func toHashAndPos(targets []uint64, hashes []Hash) []hashAndPos {
 	hnp := make([]hashAndPos, len(hashes))
@@ -177,7 +188,7 @@ func calculateRoots(numLeaves uint64, delHashes []Hash, proof Proof) []Hash {
 	for row := 0; row <= int(totalRows); row++ {
 		extractedProves := extractRowHash(toProve, totalRows, uint8(row))
 
-		proves := mergeSortedHashAndPos(nextProves, extractedProves)
+		proves := mergeSortedSlicesFunc(nextProves, extractedProves, hashAndPosCmp)
 		nextProves = nextProves[:0]
 
 		for i := 0; i < len(proves); i++ {
@@ -219,7 +230,7 @@ func calculateRoots(numLeaves uint64, delHashes []Hash, proof Proof) []Hash {
 	return calculatedRootHashes
 }
 
-func mergeSortedHashAndPos(a []hashAndPos, b []hashAndPos) (c []hashAndPos) {
+func mergeSortedSlicesFunc[E any](a, b []E, cmp func(E, E) int) (c []E) {
 	maxa := len(a)
 	maxb := len(b)
 
@@ -232,7 +243,7 @@ func mergeSortedHashAndPos(a []hashAndPos, b []hashAndPos) (c []hashAndPos) {
 	}
 
 	// make it (potentially) too long and truncate later
-	c = make([]hashAndPos, maxa+maxb)
+	c = make([]E, maxa+maxb)
 
 	idxa, idxb := 0, 0
 	for j := 0; j < len(c); j++ {
@@ -251,10 +262,10 @@ func mergeSortedHashAndPos(a []hashAndPos, b []hashAndPos) (c []hashAndPos) {
 		}
 
 		vala, valb := a[idxa], b[idxb]
-		if vala.pos < valb.pos { // a is less so append that
+		if cmp(vala, valb) == -1 { // a is less so append that
 			c[j] = vala
 			idxa++
-		} else if vala.pos > valb.pos { // b is less so append that
+		} else if cmp(vala, valb) == 1 { // b is less so append that
 			c[j] = valb
 			idxb++
 		} else { // they're equal
@@ -263,53 +274,7 @@ func mergeSortedHashAndPos(a []hashAndPos, b []hashAndPos) (c []hashAndPos) {
 			idxb++
 		}
 	}
-	return
-}
 
-func mergeSortedNodeAndPos(a []nodeAndPos, b []nodeAndPos) (c []nodeAndPos) {
-	maxa := len(a)
-	maxb := len(b)
-
-	// shortcuts:
-	if maxa == 0 {
-		return b
-	}
-	if maxb == 0 {
-		return a
-	}
-
-	// make it (potentially) too long and truncate later
-	c = make([]nodeAndPos, maxa+maxb)
-
-	idxa, idxb := 0, 0
-	for j := 0; j < len(c); j++ {
-		// if we're out of a or b, just use the remainder of the other one
-		if idxa >= maxa {
-			// a is done, copy remainder of b
-			j += copy(c[j:], b[idxb:])
-			c = c[:j] // truncate empty section of c
-			break
-		}
-		if idxb >= maxb {
-			// b is done, copy remainder of a
-			j += copy(c[j:], a[idxa:])
-			c = c[:j] // truncate empty section of c
-			break
-		}
-
-		vala, valb := a[idxa], b[idxb]
-		if vala.pos < valb.pos { // a is less so append that
-			c[j] = vala
-			idxa++
-		} else if vala.pos > valb.pos { // b is less so append that
-			c[j] = valb
-			idxb++
-		} else { // they're equal
-			c[j] = vala
-			idxa++
-			idxb++
-		}
-	}
 	return
 }
 
