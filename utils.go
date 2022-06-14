@@ -455,12 +455,13 @@ func extractRow(targets []uint64, forestRows, rowToExtract uint8) []uint64 {
 }
 
 // proofPositions returns all the positions that are needed to prove targets passed in.
-func proofPositions(targets []uint64, numLeaves uint64, forestRows uint8) []uint64 {
-	var nextTargets, proofPositions []uint64
+func proofPositions(targets []uint64, numLeaves uint64, forestRows uint8) ([]uint64, []uint64) {
+	var nextTargets, proofPositions, computedPositions []uint64
 
 	for row := uint8(0); row < forestRows; row++ {
 		rowTargs := extractRow(targets, forestRows, row)
 
+		computedPositions = append(computedPositions, nextTargets...)
 		rowTargs = append(rowTargs, nextTargets...)
 		sort.Slice(rowTargs, func(a, b int) bool { return rowTargs[a] < rowTargs[b] })
 
@@ -537,7 +538,7 @@ func proofPositions(targets []uint64, numLeaves uint64, forestRows uint8) []uint
 		}
 	}
 
-	return proofPositions
+	return proofPositions, computedPositions
 }
 
 // String prints out the whole thing. Only viable for forest that have height of 5 and less.
@@ -819,6 +820,19 @@ func nodeMapToString(m map[miniHash]*polNode) string {
 			str += keyStr
 		}
 		idx++
+	}
+
+	return str
+}
+
+func hashAndPosToString(hnps []hashAndPos) string {
+	str := ""
+	for i, hnp := range hnps {
+		str += fmt.Sprintf("pos:%d, hash:%s", hnp.pos, hex.EncodeToString(hnp.hash[:]))
+
+		if i != len(hnps)-1 {
+			str += "\n"
+		}
 	}
 
 	return str

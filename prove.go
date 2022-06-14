@@ -80,7 +80,7 @@ func (p *Pollard) Prove(hashes []Hash) (Proof, error) {
 	sort.Slice(sortedTargets, func(a, b int) bool { return sortedTargets[a] < sortedTargets[b] })
 
 	// Get the positions of all the hashes that are needed to prove the targets
-	proofPositions := proofPositions(sortedTargets, p.numLeaves, treeRows(p.numLeaves))
+	proofPositions, _ := proofPositions(sortedTargets, p.numLeaves, treeRows(p.numLeaves))
 
 	// Fetch all the proofs from the accumulator.
 	proof.Proof = make([]Hash, len(proofPositions))
@@ -155,10 +155,16 @@ func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
 	// Error out if all the rootCandidates do not have a corresponding
 	// polnode with the same hash.
 	if len(rootCandidates) != rootMatches {
+		rootHashes := make([]Hash, len(p.roots))
+		for i := range rootHashes {
+			rootHashes[i] = p.roots[i].data
+		}
 		// The proof is invalid because some root candidates were not
 		// included in `roots`.
 		err := fmt.Errorf("Pollard.Verify fail. Have %d roots but only "+
-			"matched %d roots", len(rootCandidates), rootMatches)
+			"matched %d roots.\nRootcandidates:\n%v\nRoots:\n%v",
+			len(rootCandidates), rootMatches,
+			printHashes(rootCandidates), printHashes(rootHashes))
 		return err
 	}
 
@@ -373,7 +379,7 @@ func proofAfterDeletion(numLeaves uint64, proof Proof) ([]Hash, Proof) {
 	sort.Slice(targets, func(a, b int) bool { return targets[a] < targets[b] })
 
 	// Use the sorted targets to generate the positions for the proof hashes.
-	proofPos := proofPositions(targets, numLeaves, forestRows)
+	proofPos, _ := proofPositions(targets, numLeaves, forestRows)
 	// Attach a position to each of the proof hashes.
 	hnp := toHashAndPos(proofPos, proof.Proof)
 
@@ -466,4 +472,345 @@ func proofAfterDeletion(numLeaves uint64, proof Proof) ([]Hash, Proof) {
 	}
 
 	return targetHashes, Proof{proveTargets, hashes}
+}
+
+// GetMissingPositions returns the positions missing in the proof to proof the desiredTargets.
+// The proof being passed in MUST be a valid proof. No validity checks are done so the caller
+// must make sure the proof is valid.
+func GetMissingPositions(numLeaves uint64, proof Proof, desiredTargets []uint64) []uint64 {
+	forestRows := treeRows(numLeaves)
+
+	// Copy the targets to avoid mutating the original. Then detwin it
+	// to prep for deletion.
+	targets := make([]uint64, len(proof.Targets))
+	copy(targets, proof.Targets)
+
+	// Targets and the desiredTargets need to be sorted.
+	sort.Slice(targets, func(a, b int) bool { return targets[a] < targets[b] })
+	sort.Slice(desiredTargets, func(a, b int) bool { return desiredTargets[a] < desiredTargets[b] })
+
+	// Check for the targets that we already have.
+	targIdx := 0
+	for i := 0; i < len(desiredTargets); i++ {
+		if targIdx >= len(targets) {
+			break
+		}
+		if desiredTargets[i] == targets[targIdx] {
+			desiredTargets = append(desiredTargets[:i], desiredTargets[i+1:]...)
+			i--
+		} else if desiredTargets[i] < targets[targIdx] {
+			continue
+		} else if desiredTargets[i] > targets[targIdx] {
+			targIdx++
+			i--
+		}
+	}
+
+	// Return early if we don't have any targets to prove.
+	if len(desiredTargets) <= 0 {
+		return nil
+	}
+
+	// desiredPositions are all the positions that are needed to proof the desiredTargets.
+	desiredPositions, _ := proofPositions(desiredTargets, numLeaves, forestRows)
+
+	// havePositions represent all the positions in the tree we already have access to.
+	// Since targets and computablePositions are something we already have, append
+	// those to the havePositions.
+	havePositions, computablePos := proofPositions(targets, numLeaves, forestRows)
+	havePositions = append(havePositions, targets...)
+	havePositions = append(havePositions, computablePos...)
+	sort.Slice(havePositions, func(a, b int) bool { return havePositions[a] < havePositions[b] })
+
+	// Get rid of any positions that we already have.
+	haveIdx := 0
+	for i := 0; i < len(desiredPositions); i++ {
+		if haveIdx >= len(havePositions) {
+			break
+		}
+		if desiredPositions[i] == havePositions[haveIdx] ||
+			desiredPositions[i] == sibling(havePositions[haveIdx]) {
+
+			desiredPositions = append(desiredPositions[:i], desiredPositions[i+1:]...)
+			i--
+		} else if desiredPositions[i] < havePositions[haveIdx] {
+			continue
+		} else if desiredPositions[i] > havePositions[haveIdx] {
+			haveIdx++
+			i--
+		}
+	}
+
+	return desiredPositions
+}
+
+func AddProof(origProof, newProof Proof, numLeaves uint64) Proof {
+	origProof.Targets = append(origProof.Targets, newProof.Targets...)
+
+	forestRows := treeRows(numLeaves)
+	origProofPositions, _ := proofPositions(origProof.Targets, numLeaves, forestRows)
+	newProofPositions, _ := proofPositions(newProof.Targets, numLeaves, forestRows)
+
+	origHashes := toHashAndPos(origProofPositions, origProof.Proof)
+	newHashes := toHashAndPos(newProofPositions, newProof.Proof)
+
+	origHashes = append(origHashes, newHashes...)
+
+	sort.Slice(origHashes, func(a, b int) bool { return origHashes[a].pos < origHashes[b].pos })
+
+	hashes := make([]Hash, len(origHashes))
+	for i := range hashes {
+		hashes[i] = origHashes[i].hash
+	}
+
+	origProof.Proof = hashes
+
+	return origProof
+}
+
+// getRemovePositions removes all the duplicates from removePositions that also exist in wantPositions.
+func getRemovePositions(wantPositions, removePositions []uint64) []uint64 {
+	sort.Slice(wantPositions, func(a, b int) bool { return wantPositions[a] < wantPositions[b] })
+	sort.Slice(removePositions, func(a, b int) bool { return removePositions[a] < removePositions[b] })
+
+	wantIdx := 0
+	for i := 0; i < len(removePositions); i++ {
+		if wantIdx >= len(wantPositions) {
+			break
+		}
+		if removePositions[i] == wantPositions[wantIdx] {
+			removePositions = append(removePositions[:i], removePositions[i+1:]...)
+			wantIdx++
+			i--
+		} else if removePositions[i] < wantPositions[wantIdx] {
+			continue
+		} else if removePositions[i] > wantPositions[wantIdx] {
+			i--
+			wantIdx++
+		}
+	}
+
+	sort.Slice(removePositions, func(a, b int) bool { return removePositions[a] < removePositions[b] })
+	return removePositions
+}
+
+func hashSiblings(proofHashes []hashAndPos, hash Hash, pos uint64, forestRows uint8) []hashAndPos {
+	idx := slices.IndexFunc(proofHashes, func(hnp hashAndPos) bool { return hnp.pos == sibling(pos) })
+	for idx != -1 {
+		if isLeftNiece(pos) {
+			hash = parentHash(hash, proofHashes[idx].hash)
+		} else {
+			hash = parentHash(proofHashes[idx].hash, hash)
+		}
+		// TODO we expect the caller to have already hashed once so we pop off the last allocated
+		// one. Shouldn't be like this..
+		proofHashes = append(proofHashes[:len(proofHashes)-1], proofHashes[len(proofHashes):]...)
+		proofHashes = append(proofHashes[:idx], proofHashes[idx+1:]...)
+
+		pos = parent(pos, forestRows)
+		proofHashes = append(proofHashes, hashAndPos{hash, pos})
+
+		idx = slices.IndexFunc(proofHashes, func(hnp hashAndPos) bool { return hnp.pos == sibling(pos) })
+	}
+
+	return proofHashes
+}
+
+func targetRemove(proofHashes []hashAndPos, remTargets, targets []uint64, delHashes []Hash, forestRows uint8) ([]uint64, []hashAndPos) {
+	for i := 0; i < len(remTargets); i++ {
+		remTarget := remTargets[i]
+		if i < len(remTargets)-1 && rightSib(remTarget) == remTargets[i+1] {
+			idx := slices.Index(targets, remTarget)
+
+			parentPos := parent(remTarget, forestRows)
+			parentH := parentHash(delHashes[idx], delHashes[idx+1])
+			proofHashes = append(proofHashes, hashAndPos{parentH, parentPos})
+
+			proofHashes = hashSiblings(proofHashes, parentH, parentPos, forestRows)
+
+			// Pop off the siblings.
+			delHashes = append(delHashes[:idx], delHashes[idx+2:]...)
+			targets = append(targets[:idx], targets[idx+2:]...)
+
+			// We processed an extra target.
+			i++
+		} else {
+			idx := slices.Index(targets, remTarget)
+			proofHashes = append(proofHashes, hashAndPos{delHashes[idx], remTarget})
+
+			// Pop off the target.
+			targets = append(targets[:idx], targets[idx+1:]...)
+			delHashes = append(delHashes[:idx], delHashes[idx+1:]...)
+		}
+	}
+
+	sort.Slice(proofHashes, func(a, b int) bool { return proofHashes[a].pos < proofHashes[b].pos })
+
+	return targets, proofHashes
+}
+
+func RemoveTargets(numLeaves uint64, delHashes []Hash, proof Proof, remTargets []uint64) Proof {
+	// Copy targets to avoid mutating the original.
+	targets := make([]uint64, len(proof.Targets))
+	copy(targets, proof.Targets)
+
+	forestRows := treeRows(numLeaves)
+
+	havePositions, _ := proofPositions(targets, numLeaves, forestRows)
+	proofHashes := toHashAndPos(havePositions, proof.Proof)
+
+	targets, proofHashes = targetRemove(proofHashes, remTargets, targets, delHashes, forestRows)
+	if len(targets) == 0 {
+		return Proof{}
+	}
+
+	// These are the positions that we need to calculate the new targets after deletion.
+	wantPositions, calculateable := proofPositions(targets, numLeaves, forestRows)
+	wantPositions = append(wantPositions, calculateable...)
+
+	// Remove positions are all the positions that we want gone since they're to be deleted.
+	removePositions, _ := proofPositions(remTargets, numLeaves, forestRows)
+	removePositions = append(removePositions, remTargets...)
+
+	// Get rid of the duplicates in removePositions and wantPositions. Some leaves may overlap so
+	// we remove them from the removePositions.
+	removePositions = getRemovePositions(wantPositions, removePositions)
+
+	// Calculate all the subtrees that we're interested in.
+	subTrees := []uint8{}
+	for _, target := range targets {
+		subTree, _, _, _ := detectOffset(target, numLeaves)
+
+		idx := slices.Index(subTrees, subTree)
+		if idx == -1 {
+			subTrees = append(subTrees, subTree)
+		}
+	}
+
+	proofIdx := 0
+	for i := 0; i < len(removePositions); i++ {
+		if proofIdx >= len(proofHashes) {
+			break
+		}
+
+		proofHash := proofHashes[proofIdx]
+		removePosition := removePositions[i]
+
+		if removePosition == proofHash.pos {
+			// Don't bother hashing up if the current position to be removed isn't
+			// gonna be required.
+			subTree, _, _, _ := detectOffset(removePosition, numLeaves)
+			if !slices.Contains(subTrees, subTree) {
+				proofHashes = append(proofHashes[:proofIdx], proofHashes[proofIdx+1:]...)
+				continue
+			}
+
+			// The proofs are always sorted. Look at the next proof or the previous proof and check for sibling-ness.
+			if proofIdx < len(proofHashes)-1 && proofHashes[proofIdx+1].pos == rightSib(proofHash.pos) {
+				parentPos := parent(proofHash.pos, forestRows)
+				parentH := parentHash(proofHash.hash, proofHashes[proofIdx+1].hash)
+				proofHashes = append(proofHashes, hashAndPos{parentH, parentPos})
+
+				proofHashes = hashSiblings(proofHashes, parentH, parentPos, forestRows)
+
+				proofHashes = append(proofHashes[:proofIdx], proofHashes[proofIdx+2:]...)
+			} else if proofIdx >= 1 && proofHashes[proofIdx-1].pos == leftSib(proofHash.pos) {
+				parentPos := parent(proofHash.pos, forestRows)
+				parentH := parentHash(proofHashes[proofIdx-1].hash, proofHash.hash)
+				proofHashes = append(proofHashes, hashAndPos{parentH, parentPos})
+
+				proofHashes = hashSiblings(proofHashes, parentH, parentPos, forestRows)
+
+				proofHashes = append(proofHashes[:proofIdx-1], proofHashes[proofIdx+1:]...)
+				proofIdx-- // decrement since we're taking out an element from the left side.
+			} else {
+				// If there are no siblings present, just remove it.
+				proofHashes = append(proofHashes[:proofIdx], proofHashes[proofIdx+1:]...)
+			}
+
+			sort.Slice(proofHashes, func(a, b int) bool { return proofHashes[a].pos < proofHashes[b].pos })
+
+			continue
+		} else if removePosition < proofHash.pos {
+			continue
+		} else if removePosition > proofHash.pos {
+			i--
+			proofIdx++
+		}
+	}
+	sort.Slice(proofHashes, func(a, b int) bool { return proofHashes[a].pos < proofHashes[b].pos })
+
+	// Take out proofs that are not in the subtrees our new targets are located in.
+	for i := 0; i < len(proofHashes); i++ {
+		proof := proofHashes[i]
+		subTree, _, _, _ := detectOffset(proof.pos, numLeaves)
+
+		if !slices.Contains(subTrees, subTree) {
+			idx := slices.IndexFunc(proofHashes, func(elem hashAndPos) bool { return elem.pos == proof.pos })
+			proofHashes = append(proofHashes[:idx], proofHashes[idx+1:]...)
+			i--
+		}
+	}
+
+	hashes := make([]Hash, len(proofHashes))
+	for i := range hashes {
+		hashes[i] = proofHashes[i].hash
+	}
+
+	return Proof{targets, hashes}
+}
+
+func calculateRootsCached(numLeaves uint64, delHashes []Hash, proof, cachedProof Proof) []Hash {
+	return nil
+}
+
+// cachedHashUpdateList returns the cached nodes that should be updated after deletion.
+func (p *Pollard) cachedHashUpdateList() ([]nodeAndPos, error) {
+	forestRows := treeRows(p.numLeaves)
+
+	// Map to keep track of what's already in the slice to avoid duplicates.
+	posMap := make(map[uint64]interface{})
+
+	// The nodes that will need to have their hashes checked for updates.
+	updateNodes := make([]nodeAndPos, 0, len(p.nodeMap))
+	for _, node := range p.nodeMap {
+		pos := p.calculatePosition(node)
+		_, found := posMap[pos]
+		if !found {
+			updateNodes = append(updateNodes, nodeAndPos{node, pos})
+			posMap[pos] = nil
+		}
+
+		sibPos := sibling(pos)
+		_, found = posMap[sibPos]
+		if found {
+			// If the sibling is in the map, we can skip following up the
+			// aunts as they share the same aunts.
+			continue
+		}
+		posMap[sibPos] = nil
+
+		sibNode, err := node.getSibling()
+		if err != nil {
+			return nil, err
+		}
+		updateNodes = append(updateNodes, nodeAndPos{sibNode, sibPos})
+
+		// Keep adding aunts until we get to the root.
+		for node.aunt != nil {
+			pos = sibling(parent(pos, forestRows))
+			node = node.aunt
+
+			_, found = posMap[pos]
+			if found {
+				continue
+			}
+
+			posMap[pos] = nil
+			updateNodes = append(updateNodes, nodeAndPos{node, pos})
+		}
+	}
+
+	sort.Slice(updateNodes, func(a, b int) bool { return updateNodes[a].pos < updateNodes[b].pos })
+	return updateNodes, nil
 }

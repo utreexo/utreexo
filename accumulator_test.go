@@ -10,7 +10,7 @@ import (
 )
 
 func (p *Pollard) posMapSanity() error {
-	if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
+	if p.full && uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
 		err := fmt.Errorf("Have %d leaves in map but only %d leaves in total",
 			len(p.nodeMap), p.numLeaves-p.numDels)
 		return err
@@ -488,7 +488,7 @@ func getAddsAndDels(currentLeaves, addCount, delCount uint32) ([]Leaf, []Hash, [
 		bs[31] = 0xFF
 
 		// Hash the byte slice.
-		leaves[i] = Leaf{Hash: *(*Hash)(bs)}
+		leaves[i] = Leaf{*(*Hash)(bs), rand.Intn(1) == 0}
 	}
 
 	delHashes := make([]Hash, delCount)
@@ -1026,3 +1026,223 @@ func FuzzUndoChain(f *testing.F) {
 		}
 	})
 }
+
+func checkCachedPolNodeHashes(p *Pollard) error {
+	fmt.Println("\nnodemap:\n", nodeMapToString(p.nodeMap))
+	if len(p.nodeMap) == 0 {
+		fmt.Println("empty nodemap")
+		fmt.Println(p.String())
+	}
+	for _, node := range p.nodeMap {
+		pos := p.calculatePosition(node)
+
+		origPos := pos
+
+		gotNode, sib, _, err := p.getNode(pos)
+		if err != nil {
+			return err
+		}
+
+		if gotNode == nil {
+			return fmt.Errorf("Couldn't fetch %s", node.String())
+		}
+
+		if gotNode.data != node.data {
+			return fmt.Errorf("Expected data of %s, got %s",
+				hex.EncodeToString(node.data[:]),
+				hex.EncodeToString(gotNode.data[:]))
+		}
+
+		currentHash := gotNode.data
+		sibHash := sib.data
+
+		forestRows := treeRows(p.numLeaves)
+		row := detectRow(pos, forestRows)
+		for ; row < forestRows; row++ {
+			fmt.Printf("on pos %d, sib %d, hash %s, sib %s\n",
+				pos, sibling(pos), hex.EncodeToString(currentHash[:]),
+				hex.EncodeToString(sibHash[:]))
+			var pHash Hash
+			if isLeftNiece(pos) {
+				fmt.Printf("hash permutation: %s || %s\n",
+					hex.EncodeToString(currentHash[:]),
+					hex.EncodeToString(sibHash[:]))
+
+				pHash = parentHash(currentHash, sibHash)
+			} else {
+				pHash = parentHash(sibHash, currentHash)
+
+				fmt.Printf("hash permutation: %s || %s\n",
+					hex.EncodeToString(sibHash[:]),
+					hex.EncodeToString(currentHash[:]))
+			}
+			pos = parent(pos, forestRows)
+
+			if isRootPosition(pos, p.numLeaves, forestRows) {
+				rootHash := p.getHash(pos)
+				if rootHash == empty {
+					return fmt.Errorf("Couldn't fetch root at position %d", pos)
+				}
+
+				if rootHash != pHash {
+					return fmt.Errorf("Calculated root hash of %s "+
+						"for node %s but expected %s",
+						hex.EncodeToString(pHash[:]),
+						node.String(),
+						hex.EncodeToString(rootHash[:]))
+				}
+				break
+			}
+
+			currentHash = pHash
+			sibHash = p.getHash(sibling(pos))
+			if sibHash == empty {
+				return fmt.Errorf("Couldn't proof at position %d for %d",
+					pos, origPos)
+			}
+		}
+	}
+
+	return nil
+}
+
+//func FuzzModifyWithProof(f *testing.F) {
+//	var tests = []struct {
+//		startLeaves uint32
+//		modifyAdds  uint32
+//		delCount    uint32
+//		seed        int64
+//	}{
+//		{
+//			8,
+//			2,
+//			3,
+//			0,
+//		},
+//		{
+//			6,
+//			2,
+//			5,
+//			0,
+//		},
+//		{
+//			16,
+//			44,
+//			10,
+//			0,
+//		},
+//		{
+//			16,
+//			4,
+//			3,
+//			28,
+//		},
+//	}
+//	for _, test := range tests {
+//		f.Add(test.startLeaves, test.modifyAdds, test.delCount, test.seed)
+//	}
+//
+//	f.Fuzz(func(t *testing.T, startLeaves uint32, modifyAdds uint32, delCount uint32, seed int64) {
+//		// Set seed to make sure the test is reproducible.
+//		rand.Seed(seed)
+//
+//		//if startLeaves > 32 || modifyAdds > 6 {
+//		//	return
+//		//}
+//
+//		// delCount must be less than the current number of leaves.
+//		if delCount > startLeaves {
+//			return
+//		}
+//
+//		pFull := NewAccumulator(true)
+//		p := NewAccumulator(false)
+//
+//		leaves, delHashes, _ := getAddsAndDels(uint32(pFull.numLeaves), startLeaves, delCount)
+//		//fmt.Println("leaves", leaves)
+//		fmt.Println("delHashes", printHashes(delHashes))
+//
+//		err := pFull.Modify(leaves, nil, nil)
+//		if err != nil {
+//			t.Fatal(err)
+//		}
+//		err = p.ModifyWithProof(leaves, nil, Proof{})
+//		if err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		fmt.Println("11 full", pFull.String())
+//		fmt.Println("11 p", p.String())
+//
+//		//fmt.Println("11 del", printHashes(delHashes))
+//
+//		proof, err := pFull.Prove(delHashes)
+//		if err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		pfullStr := pFull.String()
+//
+//		err = p.Verify(delHashes, proof)
+//		if err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		modifyLeaves, _, _ := getAddsAndDels(uint32(pFull.numLeaves), 0, 0)
+//		err = pFull.Modify(modifyLeaves, delHashes, proof.Targets)
+//		if err != nil {
+//			t.Fatal(err)
+//		}
+//		fmt.Println("full", pFull.String())
+//
+//		err = p.ModifyWithProof(modifyLeaves, delHashes, proof)
+//		if err != nil {
+//			t.Fatalf("delHashes:\n%s\n%s\nerr:\n%v",
+//				printHashes(delHashes), pfullStr, err)
+//		}
+//		fmt.Printf("delHashes:\n%s\n%s\nerr:\n%v",
+//			printHashes(delHashes), pfullStr, err)
+//
+//		if len(p.roots) != len(pFull.roots) {
+//			t.Fatalf("Have %d roots for pollard and %d roots for full pollard",
+//				len(p.roots), len(pFull.roots))
+//		}
+//		for i := range p.roots {
+//			if p.roots[i].data != pFull.roots[i].data {
+//				t.Fatalf("Roots do not equal between pollard and full pollard."+
+//					"\nFull Pollard:\n%s\nPollard:\n%s\n",
+//					printPolNodes(pFull.roots), printPolNodes(p.roots))
+//			}
+//		}
+//		err = p.posMapSanity()
+//		if err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		err = p.positionSanity()
+//		if err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		err = checkCachedPolNodeHashes(&p)
+//		if err != nil {
+//			fmt.Println("sparse", p.String())
+//			fmt.Println("full", pFull.String())
+//			t.Fatal(err)
+//		}
+//		//fmt.Println("11 prove:\n", proof.ToString())
+//
+//		//if len(proof.Targets) != len(delHashes) {
+//		//	fmt.Println("err", proof.ToString())
+//		//	fmt.Println("err", printHashes(delHashes))
+//		//	panic("hi")
+//		//}
+//
+//		//fmt.Printf("deleting %v, adding %d elements\n", proof.Targets, len(modifyLeaves))
+//
+//		//if len(proof.Targets) != len(delHashes) {
+//		//	panic("yo")
+//		//}
+//		fmt.Println("p", p.String())
+//	})
+//}
