@@ -155,10 +155,16 @@ func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
 	// Error out if all the rootCandidates do not have a corresponding
 	// polnode with the same hash.
 	if len(rootCandidates) != rootMatches {
+		rootHashes := make([]Hash, len(p.roots))
+		for i := range rootHashes {
+			rootHashes[i] = p.roots[i].data
+		}
 		// The proof is invalid because some root candidates were not
 		// included in `roots`.
 		err := fmt.Errorf("Pollard.Verify fail. Have %d roots but only "+
-			"matched %d roots", len(rootCandidates), rootMatches)
+			"matched %d roots.\nRootcandidates:\n%v\nRoots:\n%v",
+			len(rootCandidates), rootMatches,
+			printHashes(rootCandidates), printHashes(rootHashes))
 		return err
 	}
 
