@@ -80,7 +80,7 @@ func (p *Pollard) Prove(hashes []Hash) (Proof, error) {
 	sort.Slice(sortedTargets, func(a, b int) bool { return sortedTargets[a] < sortedTargets[b] })
 
 	// Get the positions of all the hashes that are needed to prove the targets
-	proofPositions := proofPositions(sortedTargets, p.numLeaves, treeRows(p.numLeaves))
+	proofPositions, _ := proofPositions(sortedTargets, p.numLeaves, treeRows(p.numLeaves))
 
 	// Fetch all the proofs from the accumulator.
 	proof.Proof = make([]Hash, len(proofPositions))
@@ -373,7 +373,7 @@ func proofAfterDeletion(numLeaves uint64, proof Proof) ([]Hash, Proof) {
 	sort.Slice(targets, func(a, b int) bool { return targets[a] < targets[b] })
 
 	// Use the sorted targets to generate the positions for the proof hashes.
-	proofPos := proofPositions(targets, numLeaves, forestRows)
+	proofPos, _ := proofPositions(targets, numLeaves, forestRows)
 	// Attach a position to each of the proof hashes.
 	hnp := toHashAndPos(proofPos, proof.Proof)
 
