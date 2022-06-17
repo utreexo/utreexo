@@ -226,3 +226,100 @@ func FuzzGetMissingPositions(f *testing.F) {
 		}
 	})
 }
+
+func FuzzRemoveTargets(f *testing.F) {
+	var tests = []struct {
+		startLeaves uint32
+		delCount    uint32
+		seed        int64
+	}{
+		{
+			16,
+			2,
+			12,
+		},
+	}
+	for _, test := range tests {
+		f.Add(test.startLeaves, test.delCount, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, startLeaves uint32, delCount uint32, seed int64) {
+		rand.Seed(seed)
+
+		// It'll error out if we try to delete more than we have. >= since we want
+		// at least 2 leftOver leaf to test.
+		if int(delCount) >= int(startLeaves)-2 {
+			return
+		}
+
+		// Get leaves and dels.
+		leaves, delHashes, delPos := getAddsAndDels(0, startLeaves, delCount)
+
+		// Create the starting off pollard.
+		p := NewAccumulator(true)
+		err := p.Modify(leaves, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = p.Modify(nil, delHashes, delPos)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Grab the current leaves that exist in the accumulator.
+		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
+		for _, node := range p.nodeMap {
+			currentLeaves = append(currentLeaves,
+				hashAndPos{node.data, p.calculatePosition(node)})
+		}
+		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
+		// guaranteed to have the same order, we need to do this.
+		sort.Slice(currentLeaves, func(a, b int) bool { return currentLeaves[a].pos < currentLeaves[b].pos })
+
+		// Randomly grab some leaves.
+		indexes := randomIndexes(len(currentLeaves), 2)
+		leafSubset := make([]hashAndPos, len(indexes))
+		for i := range leafSubset {
+			leafSubset[i] = currentLeaves[indexes[i]]
+		}
+
+		// Generate a proof of the leafSubset.
+		leafHashes := make([]Hash, len(leafSubset))
+		for i := range leafHashes {
+			leafHashes[i] = leafSubset[i].hash
+		}
+		proof, err := p.Prove(leafHashes)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Randomly generate some positions to delete.
+		leafPositions := make([]uint64, len(leafSubset))
+		for i := range leafPositions {
+			leafPositions[i] = leafSubset[i].pos
+		}
+		indexes = randomIndexes(len(leafPositions), 1)
+		positions := make([]uint64, len(indexes))
+		for i := range positions {
+			positions[i] = leafPositions[indexes[i]]
+		}
+
+		// Delete the targets from the proof and verify the modified proof.
+		newproof := RemoveTargets(p.numLeaves, leafHashes, proof, positions)
+		newDelHashes := make([]Hash, len(newproof.Targets))
+		for i := range newDelHashes {
+			newDelHashes[i] = p.getHash(newproof.Targets[i])
+			if newDelHashes[i] == empty {
+				t.Fatalf("FuzzRemoveTargets fail: Couldn't grab the hash "+
+					"for target %d", newproof.Targets[i])
+			}
+		}
+
+		err = p.Verify(newDelHashes, newproof)
+		if err != nil {
+			t.Fatalf("FuzzRemoveTargets fail. Error: %v\n\nWas removing targets:\n%v\n"+
+				"from proof:\n%s\nGot proof:\n%s\nPollard:\n%s", err,
+				positions, proof.String(), newproof.String(), p.String())
+		}
+	})
+}
