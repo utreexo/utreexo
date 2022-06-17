@@ -473,3 +473,78 @@ func proofAfterDeletion(numLeaves uint64, proof Proof) ([]Hash, Proof) {
 
 	return targetHashes, Proof{proveTargets, hashes}
 }
+
+// GetMissingPositions returns the positions missing in the proof to proof the desiredTargets.
+//
+// The proof being passed in MUST be a valid proof. No validity checks are done so the caller
+// must make sure the proof is valid.
+//
+// The passed in desiredTargets also MUST be a valid position in the accumulator. There are
+// no checks to make sure the desiredTargets exist in the accumulator so the caller must
+// check that they indeed do exist.
+func GetMissingPositions(numLeaves uint64, proof Proof, desiredTargets []uint64) []uint64 {
+	forestRows := treeRows(numLeaves)
+
+	// Copy the targets to avoid mutating the original. Then detwin it
+	// to prep for deletion.
+	targets := make([]uint64, len(proof.Targets))
+	copy(targets, proof.Targets)
+
+	// Targets and the desiredTargets need to be sorted.
+	sort.Slice(targets, func(a, b int) bool { return targets[a] < targets[b] })
+	sort.Slice(desiredTargets, func(a, b int) bool { return desiredTargets[a] < desiredTargets[b] })
+
+	// Check for the targets that we already have.
+	targIdx := 0
+	for i := 0; i < len(desiredTargets); i++ {
+		if targIdx >= len(targets) {
+			break
+		}
+		if desiredTargets[i] == targets[targIdx] {
+			desiredTargets = append(desiredTargets[:i], desiredTargets[i+1:]...)
+			i--
+		} else if desiredTargets[i] < targets[targIdx] {
+			continue
+		} else if desiredTargets[i] > targets[targIdx] {
+			targIdx++
+			i--
+		}
+	}
+
+	// Return early if we don't have any targets to prove.
+	if len(desiredTargets) <= 0 {
+		return nil
+	}
+
+	// desiredPositions are all the positions that are needed to proof the desiredTargets.
+	desiredPositions, _ := proofPositions(desiredTargets, numLeaves, forestRows)
+
+	// havePositions represent all the positions in the tree we already have access to.
+	// Since targets and computablePositions are something we already have, append
+	// those to the havePositions.
+	havePositions, computablePos := proofPositions(targets, numLeaves, forestRows)
+	havePositions = append(havePositions, targets...)
+	havePositions = append(havePositions, computablePos...)
+	sort.Slice(havePositions, func(a, b int) bool { return havePositions[a] < havePositions[b] })
+
+	// Get rid of any positions that we already have.
+	haveIdx := 0
+	for i := 0; i < len(desiredPositions); i++ {
+		if haveIdx >= len(havePositions) {
+			break
+		}
+		if desiredPositions[i] == havePositions[haveIdx] ||
+			desiredPositions[i] == sibling(havePositions[haveIdx]) {
+
+			desiredPositions = append(desiredPositions[:i], desiredPositions[i+1:]...)
+			i--
+		} else if desiredPositions[i] < havePositions[haveIdx] {
+			continue
+		} else if desiredPositions[i] > havePositions[haveIdx] {
+			haveIdx++
+			i--
+		}
+	}
+
+	return desiredPositions
+}
