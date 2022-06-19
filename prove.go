@@ -476,19 +476,19 @@ func proofAfterDeletion(numLeaves uint64, proof Proof) ([]Hash, Proof) {
 
 // GetMissingPositions returns the positions missing in the proof to proof the desiredTargets.
 //
-// The proof being passed in MUST be a valid proof. No validity checks are done so the caller
-// must make sure the proof is valid.
+// The proofTargets being passed in MUST be a from a valid proof. Having an invalid proof may
+// result in errors.
 //
 // The passed in desiredTargets also MUST be a valid position in the accumulator. There are
 // no checks to make sure the desiredTargets exist in the accumulator so the caller must
 // check that they indeed do exist.
-func GetMissingPositions(numLeaves uint64, proof Proof, desiredTargets []uint64) []uint64 {
+func GetMissingPositions(numLeaves uint64, proofTargets, desiredTargets []uint64) []uint64 {
 	forestRows := treeRows(numLeaves)
 
 	// Copy the targets to avoid mutating the original. Then detwin it
 	// to prep for deletion.
-	targets := make([]uint64, len(proof.Targets))
-	copy(targets, proof.Targets)
+	targets := make([]uint64, len(proofTargets))
+	copy(targets, proofTargets)
 
 	// Targets and the desiredTargets need to be sorted.
 	sort.Slice(targets, func(a, b int) bool { return targets[a] < targets[b] })
