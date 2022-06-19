@@ -213,7 +213,7 @@ func FuzzGetMissingPositions(f *testing.F) {
 		}
 
 		// Call GetMissingPositions and get all the positions that we need to prove desiredPositions.
-		missingPositions := GetMissingPositions(p.numLeaves, proof, desiredPositions)
+		missingPositions := GetMissingPositions(p.numLeaves, proof.Targets, desiredPositions)
 
 		// Create a new proof from missingPositions and verify to make sure it's correct.
 		newProof, newDelHashes, err := calcDelHashAndProof(&p, proof, missingPositions, desiredPositions, leftOutLeaves, leafSubset)
