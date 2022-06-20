@@ -366,6 +366,33 @@ func removeDuplicateInt(uint64Slice []uint64) []uint64 {
 	return list
 }
 
+// subtractSortedSlice removes all elements of b from a. It returns a slice of a-b.
+// Both slices MUST be sorted.
+func subtractSortedSlice[E, F any](a []E, b []F, cmp func(E, F) int) []E {
+	bIdx := 0
+	for i := 0; i < len(a); i++ {
+		if bIdx >= len(b) {
+			break
+		}
+		res := cmp(a[i], b[bIdx])
+		// If a[i] == b[bIdx], remove the element from a.
+		if res == 0 {
+			a = append(a[:i], a[i+1:]...)
+			bIdx++
+			i--
+		} else if res == -1 {
+			// a[i] < b[bIdx]
+			continue
+		} else if res == 1 {
+			// a[i] > b[bIdx]
+			bIdx++
+			i--
+		}
+	}
+
+	return a
+}
+
 // proofAfterDeletion modifies the proof so that it proves the siblings of the targets
 // in this proof. Having this information allows for the calculation of roots after the
 // deletion has happened.
@@ -494,22 +521,8 @@ func GetMissingPositions(numLeaves uint64, proof Proof, desiredTargets []uint64)
 	sort.Slice(targets, func(a, b int) bool { return targets[a] < targets[b] })
 	sort.Slice(desiredTargets, func(a, b int) bool { return desiredTargets[a] < desiredTargets[b] })
 
-	// Check for the targets that we already have.
-	targIdx := 0
-	for i := 0; i < len(desiredTargets); i++ {
-		if targIdx >= len(targets) {
-			break
-		}
-		if desiredTargets[i] == targets[targIdx] {
-			desiredTargets = append(desiredTargets[:i], desiredTargets[i+1:]...)
-			i--
-		} else if desiredTargets[i] < targets[targIdx] {
-			continue
-		} else if desiredTargets[i] > targets[targIdx] {
-			targIdx++
-			i--
-		}
-	}
+	// Check for the targets that we already have and remove them from the desiredTargets.
+	desiredTargets = subtractSortedSlice(desiredTargets, targets, uint64Cmp)
 
 	// Return early if we don't have any targets to prove.
 	if len(desiredTargets) <= 0 {
@@ -528,23 +541,7 @@ func GetMissingPositions(numLeaves uint64, proof Proof, desiredTargets []uint64)
 	sort.Slice(havePositions, func(a, b int) bool { return havePositions[a] < havePositions[b] })
 
 	// Get rid of any positions that we already have.
-	haveIdx := 0
-	for i := 0; i < len(desiredPositions); i++ {
-		if haveIdx >= len(havePositions) {
-			break
-		}
-		if desiredPositions[i] == havePositions[haveIdx] ||
-			desiredPositions[i] == sibling(havePositions[haveIdx]) {
-
-			desiredPositions = append(desiredPositions[:i], desiredPositions[i+1:]...)
-			i--
-		} else if desiredPositions[i] < havePositions[haveIdx] {
-			continue
-		} else if desiredPositions[i] > havePositions[haveIdx] {
-			haveIdx++
-			i--
-		}
-	}
+	desiredPositions = subtractSortedSlice(desiredPositions, havePositions, uint64Cmp)
 
 	return desiredPositions
 }
