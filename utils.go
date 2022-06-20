@@ -838,3 +838,13 @@ func hashAndPosToString(hnps []hashAndPos) string {
 
 	return str
 }
+
+// uint64Cmp compares two uint64 values.
+func uint64Cmp(a, b uint64) int {
+	if a < b {
+		return -1
+	} else if a > b {
+		return 1
+	}
+	return 0
+}
