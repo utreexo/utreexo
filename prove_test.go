@@ -323,3 +323,40 @@ func FuzzRemoveTargets(f *testing.F) {
 		}
 	})
 }
+
+func TestModifyProof(t *testing.T) {
+	// Create the starting off pollard.
+	adds := make([]Leaf, 8)
+	for i := range adds {
+		adds[i].Hash[0] = uint8(i + 1)
+	}
+	p := NewAccumulator(true)
+
+	err := p.Modify(adds, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fmt.Println(p.String())
+
+	proof1, err := p.Prove([]Hash{{8}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fmt.Println("cached proof:\n", proof1.String())
+
+	modifyProof, err := p.Prove([]Hash{{1}, {3}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = p.Modify(nil, []Hash{{1}, {3}}, []uint64{0, 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println(p.String())
+
+	proof2 := ModifyProof(proof1, modifyProof, []Hash{{8}}, p.numLeaves)
+	fmt.Println("after modify:\n", proof2.String())
+}

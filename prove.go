@@ -727,3 +727,82 @@ func RemoveTargets(numLeaves uint64, delHashes []Hash, proof Proof, remTargets [
 
 	return Proof{targets, hashes}
 }
+
+// AddProof adds the newProof onto the existing proof and return the new delHashes and proof. Newly calculateable
+// positions and duplicates are excluded in the returned proof.
+func AddProof(proof, newProof Proof, delHashes, newDelHashes []Hash, numLeaves uint64) ([]Hash, Proof) {
+	totalRows := treeRows(numLeaves)
+
+	// Copy the targets to avoid mutating the original.
+	targets := make([]uint64, len(proof.Targets))
+	copy(targets, proof.Targets)
+	sort.Slice(targets, func(a, b int) bool { return targets[a] < targets[b] })
+	proofPos, origCalculateable := proofPositions(targets, numLeaves, totalRows)
+
+	origProofs := toHashAndPos(proofPos, proof.Proof)
+
+	// Copy the targets to avoid mutating the original.
+	targets = make([]uint64, len(newProof.Targets))
+	copy(targets, newProof.Targets)
+	sort.Slice(targets, func(a, b int) bool { return targets[a] < targets[b] })
+	proofPos, newCalculateable := proofPositions(targets, numLeaves, totalRows)
+
+	newProofs := toHashAndPos(proofPos, newProof.Proof)
+
+	origProofs = append(origProofs, newProofs...)
+	sort.Slice(origProofs, func(a, b int) bool { return origProofs[a].pos < origProofs[b].pos })
+
+	origCalculateable = append(origCalculateable, newCalculateable...)
+	origProofs = subtractSortedSlice(origProofs, origCalculateable,
+		func(a hashAndPos, b uint64) int {
+			if a.pos < b {
+				return -1
+			} else if a.pos > b {
+				return 1
+			}
+			return 0
+		})
+
+	hashes := make([]Hash, len(origProofs))
+	for i := range hashes {
+		hashes[i] = origProofs[i].hash
+	}
+
+	targets = make([]uint64, 0, len(proof.Targets)+len(newProof.Targets))
+	targets = append(targets, proof.Targets...)
+	targets = append(targets, newProof.Targets...)
+	sort.Slice(targets, func(a, b int) bool { return targets[a] < targets[b] })
+
+	delHashAndPos := toHashAndPos(proof.Targets, delHashes)
+	newDelHashAndPos := toHashAndPos(newProof.Targets, newDelHashes)
+
+	delHashAndPos = mergeSortedSlicesFunc(delHashAndPos, newDelHashAndPos, hashAndPosCmp)
+
+	retDelHashes := make([]Hash, len(delHashAndPos))
+	for i := range retDelHashes {
+		retDelHashes[i] = delHashAndPos[i].hash
+	}
+
+	return retDelHashes, Proof{targets, hashes}
+}
+
+// ModifyProof modifies the cached hashes in the cachedProofs based on the new hashes from the newProof.
+//
+// Example:
+//
+// In this below tree, let's say that the cached proof holds 04 and the newProof has 00 to be deleted.
+// When 00 is deleted, the hash of 12 is updated as it's now the parentHash of 01 and 09. The new hash
+// value of 12 will be updated accordingly in the cached proof by ModifyProof.
+//
+// 14
+// |---------------\
+// 12              13
+// |-------\       |-------\
+// 08      09      10      11
+// |---\   |---\   |---\   |---\
+// 00  01  02  03  04  05  06  07
+func ModifyProof(proof, newProof Proof, delHashes []Hash, numLeaves uint64) Proof {
+	afterDelHashes, origAfterProof := proofAfterDeletion(numLeaves, newProof)
+	afterDelHashes, afterProof := AddProof(origAfterProof, proof, afterDelHashes, delHashes, numLeaves)
+	return RemoveTargets(numLeaves, afterDelHashes, afterProof, origAfterProof.Targets)
+}
