@@ -305,15 +305,7 @@ func FuzzRemoveTargets(f *testing.F) {
 		}
 
 		// Delete the targets from the proof and verify the modified proof.
-		newproof := RemoveTargets(p.numLeaves, leafHashes, proof, positions)
-		newDelHashes := make([]Hash, len(newproof.Targets))
-		for i := range newDelHashes {
-			newDelHashes[i] = p.getHash(newproof.Targets[i])
-			if newDelHashes[i] == empty {
-				t.Fatalf("FuzzRemoveTargets fail: Couldn't grab the hash "+
-					"for target %d", newproof.Targets[i])
-			}
-		}
+		newDelHashes, newproof := RemoveTargets(p.numLeaves, leafHashes, proof, positions)
 
 		err = p.Verify(newDelHashes, newproof)
 		if err != nil {
