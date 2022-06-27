@@ -238,10 +238,14 @@ func mergeSortedSlicesFunc[E any](a, b []E, cmp func(E, E) int) (c []E) {
 
 	// shortcuts:
 	if maxa == 0 {
-		return b
+		c = make([]E, maxb)
+		copy(c, b)
+		return c
 	}
 	if maxb == 0 {
-		return a
+		c = make([]E, maxa)
+		copy(c, a)
+		return c
 	}
 
 	// make it (potentially) too long and truncate later
