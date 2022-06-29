@@ -315,3 +315,111 @@ func FuzzRemoveTargets(f *testing.F) {
 		}
 	})
 }
+
+func FuzzAddProof(f *testing.F) {
+	var tests = []struct {
+		startLeaves uint32
+		delCount    uint32
+		seed        int64
+	}{
+		{
+			16,
+			2,
+			12,
+		},
+	}
+	for _, test := range tests {
+		f.Add(test.startLeaves, test.delCount, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, startLeaves uint32, delCount uint32, seed int64) {
+		rand.Seed(seed)
+
+		// It'll error out if we try to delete more than we have. >= since we want
+		// at least 2 leftOver leaf to test.
+		if int(delCount) >= int(startLeaves)-2 {
+			return
+		}
+
+		// Get leaves and dels.
+		leaves, delHashes, delPos := getAddsAndDels(0, startLeaves, delCount)
+
+		// Create the starting off pollard.
+		p := NewAccumulator(true)
+		err := p.Modify(leaves, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = p.Modify(nil, delHashes, delPos)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Grab the current leaves that exist in the accumulator.
+		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
+		for _, node := range p.nodeMap {
+			currentLeaves = append(currentLeaves,
+				hashAndPos{node.data, p.calculatePosition(node)})
+		}
+		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
+		// guaranteed to have the same order, we need to do this.
+		sort.Slice(currentLeaves, func(a, b int) bool { return currentLeaves[a].pos < currentLeaves[b].pos })
+
+		// Randomly grab some leaves.
+		indexesA := randomIndexes(len(currentLeaves), 2)
+		leafSubsetA := make([]hashAndPos, len(indexesA))
+		for i := range leafSubsetA {
+			leafSubsetA[i] = currentLeaves[indexesA[i]]
+		}
+
+		indexesB := randomIndexes(len(currentLeaves), 2)
+		leafSubsetB := make([]hashAndPos, len(indexesB))
+		for i := range leafSubsetB {
+			leafSubsetB[i] = currentLeaves[indexesB[i]]
+		}
+
+		// Generate a proof of the leafSubset.
+		leafHashesA := make([]Hash, len(leafSubsetA))
+		for i := range leafHashesA {
+			leafHashesA[i] = leafSubsetA[i].hash
+		}
+		proofA, err := p.Prove(leafHashesA)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		leafHashesB := make([]Hash, len(leafSubsetB))
+		for i := range leafHashesB {
+			leafHashesB[i] = leafSubsetB[i].hash
+		}
+		proofB, err := p.Prove(leafHashesB)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Add the proof.
+		leafHashesC, proofC := AddProof(proofA, proofB, leafHashesA, leafHashesB, p.numLeaves)
+
+		// These are the targets that we want to prove.
+		sortedProofATargets := copySortedFunc(proofA.Targets, intLess)
+		sortedProofBTargets := copySortedFunc(proofB.Targets, intLess)
+		expectedTargets := mergeSortedSlicesFunc(sortedProofATargets, sortedProofBTargets, uint64Cmp)
+
+		// This is the targets that we got from AddProof.
+		sortedProofCTargets := copySortedFunc(proofC.Targets, intLess)
+
+		// When we subtract the slice, we should get nothing since sortedProofCTargets and expectedTargets should
+		// be the same.
+		shouldBeEmpty := subtractSortedSlice(sortedProofCTargets, expectedTargets, uint64Cmp)
+		if len(shouldBeEmpty) > 0 {
+			t.Fatalf("FuzzAddProof Fail. Not all wanted targets were added. Expected %v, got %v",
+				expectedTargets, proofC.Targets)
+		}
+
+		// Check that the proof verifies.
+		err = p.Verify(leafHashesC, proofC)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+}

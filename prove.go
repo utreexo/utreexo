@@ -744,3 +744,84 @@ func RemoveTargets(numLeaves uint64, delHashes []Hash, proof Proof, remTargets [
 
 	return targetHashes, Proof{targets, proofHashes}
 }
+
+// AddProof adds the newProof onto the existing proof and return the new cachedDelHashes and proof. Newly calculateable
+// positions and duplicates are excluded in the returned proof.
+func AddProof(proofA, proofB Proof, targetHashesA, targetHashesB []Hash, numLeaves uint64) ([]Hash, Proof) {
+	totalRows := treeRows(numLeaves)
+
+	// Calculate proof hashes for proof A and add positions to the proof hashes.
+	targetsA := copySortedFunc(proofA.Targets, intLess)
+	proofPosA, calculateableA := proofPositions(targetsA, numLeaves, totalRows)
+	proofAndPosA := toHashAndPos(proofPosA, proofA.Proof)
+
+	// Calculate proof hashes for proof B and add positions to the proof hashes.
+	targetsB := copySortedFunc(proofB.Targets, intLess)
+	proofPosB, calculateableB := proofPositions(targetsB, numLeaves, totalRows)
+	proofAndPosB := toHashAndPos(proofPosB, proofB.Proof)
+
+	// Add the proof hashes of proofA and proofB.
+	proofAndPosC := mergeSortedSlicesFunc(proofAndPosA, proofAndPosB, hashAndPosCmp)
+
+	// All the calculateables are proofs that we'll get rid of as we don't need them.
+	// In the below tree, a proof for only [02, 03] would be [04]. But if we add targets
+	// [00, 01] to this proof, then we don't need [04] anymore since it's calculateable.
+	//
+	// 06
+	// |-------\
+	// 04      05
+	// |---\   |---\
+	// 00  01  02  03
+	calculateableC := mergeSortedSlicesFunc(calculateableA, calculateableB, uint64Cmp)
+	proofAndPosC = subtractSortedSlice(proofAndPosC, calculateableC,
+		func(a hashAndPos, b uint64) int {
+			if a.pos < b {
+				return -1
+			} else if a.pos > b {
+				return 1
+			}
+			return 0
+		})
+
+	// Subtract all the targets from the proof.
+	//
+	// For trees like the one below, a target may be a proof for another target.
+	// With the below tree, 05 is a target but it's also a proof for 00 and 01.
+	// If we have a proof where we have targets [00, 05], then 05 should not be
+	// in the proof since we already have it.
+	//
+	// 06
+	// |-------\
+	// 04      05
+	// |---\   |---\
+	// 00  01
+	targetsC := mergeSortedSlicesFunc(targetsA, targetsB, uint64Cmp)
+	proofAndPosC = subtractSortedSlice(proofAndPosC, targetsC,
+		func(a hashAndPos, b uint64) int {
+			if a.pos < b {
+				return -1
+			} else if a.pos > b {
+				return 1
+			}
+			return 0
+		})
+
+	// Extract the proof hashes.
+	proofHashes := make([]Hash, len(proofAndPosC))
+	for i := range proofHashes {
+		proofHashes[i] = proofAndPosC[i].hash
+	}
+	retProof := Proof{targetsC, proofHashes}
+
+	// Get the hashes for the targets.
+	cachedDelHashAndPosA := toHashAndPos(proofA.Targets, targetHashesA)
+	cachedDelHashAndPosB := toHashAndPos(proofB.Targets, targetHashesB)
+	cachedDelHashAndPosC := mergeSortedSlicesFunc(cachedDelHashAndPosA, cachedDelHashAndPosB, hashAndPosCmp)
+
+	retDelHashes := make([]Hash, len(cachedDelHashAndPosC))
+	for i := range retDelHashes {
+		retDelHashes[i] = cachedDelHashAndPosC[i].hash
+	}
+
+	return retDelHashes, retProof
+}
