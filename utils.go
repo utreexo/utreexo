@@ -848,3 +848,17 @@ func uint64Cmp(a, b uint64) int {
 	}
 	return 0
 }
+
+// intLess is a helper function that is useful for using sort.Slice().
+func intLess(a, b int) bool {
+	return a < b
+}
+
+// copySortedFunc returns a copy of the slice passed in that's sorted.
+func copySortedFunc[E any](slice []E, cmp func(a, b int) bool) []E {
+	sliceCopy := make([]E, len(slice))
+	copy(sliceCopy, slice)
+
+	sort.Slice(sliceCopy, cmp)
+	return sliceCopy
+}
