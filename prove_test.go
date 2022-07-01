@@ -401,12 +401,12 @@ func FuzzAddProof(f *testing.F) {
 		leafHashesC, proofC := AddProof(proofA, proofB, leafHashesA, leafHashesB, p.numLeaves)
 
 		// These are the targets that we want to prove.
-		sortedProofATargets := copySortedFunc(proofA.Targets, intLess)
-		sortedProofBTargets := copySortedFunc(proofB.Targets, intLess)
+		sortedProofATargets := copySortedFunc(proofA.Targets, uint64Less)
+		sortedProofBTargets := copySortedFunc(proofB.Targets, uint64Less)
 		expectedTargets := mergeSortedSlicesFunc(sortedProofATargets, sortedProofBTargets, uint64Cmp)
 
 		// This is the targets that we got from AddProof.
-		sortedProofCTargets := copySortedFunc(proofC.Targets, intLess)
+		sortedProofCTargets := copySortedFunc(proofC.Targets, uint64Less)
 
 		// When we subtract the slice, we should get nothing since sortedProofCTargets and expectedTargets should
 		// be the same.
