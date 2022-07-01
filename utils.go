@@ -7,6 +7,8 @@ import (
 	"math"
 	"math/bits"
 	"sort"
+
+	"golang.org/x/exp/slices"
 )
 
 // parentHash returns the hash of the left and right hashes passed in.
@@ -849,16 +851,21 @@ func uint64Cmp(a, b uint64) int {
 	return 0
 }
 
-// intLess is a helper function that is useful for using sort.Slice().
+// intLess is a helper function that is useful for using sorting.
 func intLess(a, b int) bool {
 	return a < b
 }
 
+// uint64Less is a helper function that is useful for using sorting.
+func uint64Less(a, b uint64) bool {
+	return a < b
+}
+
 // copySortedFunc returns a copy of the slice passed in that's sorted.
-func copySortedFunc[E any](slice []E, cmp func(a, b int) bool) []E {
+func copySortedFunc[E any](slice []E, less func(a, b E) bool) []E {
 	sliceCopy := make([]E, len(slice))
 	copy(sliceCopy, slice)
 
-	sort.Slice(sliceCopy, cmp)
+	slices.SortFunc(sliceCopy, less)
 	return sliceCopy
 }

@@ -751,12 +751,12 @@ func AddProof(proofA, proofB Proof, targetHashesA, targetHashesB []Hash, numLeav
 	totalRows := treeRows(numLeaves)
 
 	// Calculate proof hashes for proof A and add positions to the proof hashes.
-	targetsA := copySortedFunc(proofA.Targets, intLess)
+	targetsA := copySortedFunc(proofA.Targets, uint64Less)
 	proofPosA, calculateableA := proofPositions(targetsA, numLeaves, totalRows)
 	proofAndPosA := toHashAndPos(proofPosA, proofA.Proof)
 
 	// Calculate proof hashes for proof B and add positions to the proof hashes.
-	targetsB := copySortedFunc(proofB.Targets, intLess)
+	targetsB := copySortedFunc(proofB.Targets, uint64Less)
 	proofPosB, calculateableB := proofPositions(targetsB, numLeaves, totalRows)
 	proofAndPosB := toHashAndPos(proofPosB, proofB.Proof)
 
