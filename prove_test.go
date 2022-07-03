@@ -531,3 +531,154 @@ func FuzzProofAfterDeletion(f *testing.F) {
 		}
 	})
 }
+
+func FuzzUpdateProofRemove(f *testing.F) {
+	var tests = []struct {
+		startLeaves uint32
+		delCount    uint32
+		seed        int64
+	}{
+		{
+			16,
+			2,
+			12,
+		},
+	}
+	for _, test := range tests {
+		f.Add(test.startLeaves, test.delCount, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, startLeaves uint32, delCount uint32, seed int64) {
+		rand.Seed(seed)
+
+		// It'll error out if we try to delete more than we have. >= since we want
+		// at least 2 leftOver leaf to test.
+		if int(delCount) >= int(startLeaves)-2 {
+			return
+		}
+
+		// Get leaves and dels.
+		leaves, delHashes, delPos := getAddsAndDels(0, startLeaves, delCount)
+
+		// Create the starting off pollard.
+		p := NewAccumulator(true)
+		err := p.Modify(leaves, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = p.Modify(nil, delHashes, delPos)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pollardBeforeStr := p.String()
+
+		// Grab the current leaves that exist in the accumulator.
+		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
+		for _, node := range p.nodeMap {
+			currentLeaves = append(currentLeaves,
+				hashAndPos{node.data, p.calculatePosition(node)})
+		}
+		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
+		// guaranteed to have the same order, we need to do this.
+		sort.Slice(currentLeaves, func(a, b int) bool { return currentLeaves[a].pos < currentLeaves[b].pos })
+
+		// Randomly grab some leaves.
+		indexes := randomIndexes(len(currentLeaves), 2)
+		leafSubset := make([]hashAndPos, len(indexes))
+		for i := range leafSubset {
+			leafSubset[i] = currentLeaves[indexes[i]]
+		}
+		// Generate a proof of the leafSubset.
+		leafHashes := make([]Hash, len(leafSubset))
+		for i := range leafHashes {
+			leafHashes[i] = leafSubset[i].hash
+		}
+		cachedProof, err := p.Prove(leafHashes)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Randomly generate some positions to delete.
+		delIndexes := randomIndexes(len(currentLeaves), 1)
+		delLeaves := make([]hashAndPos, len(delIndexes))
+		for i := range delLeaves {
+			delLeaves[i] = currentLeaves[delIndexes[i]]
+		}
+
+		delPositions := make([]uint64, len(delLeaves))
+		for i := range delPositions {
+			delPositions[i] = delLeaves[i].pos
+		}
+
+		// Fetch hashes.
+		blockDelHashes := make([]Hash, len(delPositions))
+		for i := range blockDelHashes {
+			blockDelHashes[i] = p.getHash(delPositions[i])
+			if blockDelHashes[i] == empty {
+				t.Fatal("FuzzUpdateProofRemove Fail. Couldn't fetch hash for position", delPositions[i])
+			}
+		}
+
+		// Generate the proof of the targets being deleted.
+		blockProof, err := p.Prove(blockDelHashes)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// origTargetsAndHash is only for the error message.
+		origTargetsAndHash := toHashAndPos(cachedProof.Targets, leafHashes)
+
+		// Delete the block hashes from the cached hashes. We'll use this to make
+		// sure that the proof proves what we want to prove.
+		cachedTargetsAndHash := toHashAndPos(cachedProof.Targets, leafHashes)
+		blockDelTargetsAndHash := toHashAndPos(blockProof.Targets, blockDelHashes)
+		cachedTargetsAndHash = subtractSortedSlice(cachedTargetsAndHash, blockDelTargetsAndHash, hashAndPosCmp)
+
+		// Update the cached proof with the block proof.
+		leafHashes, cachedProof = UpdateProofRemove(cachedProof, blockProof, leafHashes, blockDelHashes, p.numLeaves)
+
+		// Modify the pollard.
+		err = p.Modify(nil, blockDelHashes, delPositions)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Check that we have enough targets as we expect.
+		if len(cachedProof.Targets) != len(cachedTargetsAndHash) {
+			t.Fatalf("FuzzUpdateProofRemove Fail. Expected %d targets but got %d."+
+				"\nDeleted targets:\n%v.\nOriginal cached targets:\n%v\nExpected old targets:\n%v\n"+
+				"Got targets:\n%v\nPollard before:\n%s\nPollard after:\n%s\n",
+				len(cachedTargetsAndHash), len(cachedProof.Targets), blockProof.Targets,
+				hashAndPosToString(origTargetsAndHash), hashAndPosToString(cachedTargetsAndHash),
+				cachedProof.Targets, pollardBeforeStr, p.String())
+		}
+
+		shouldBeEmpty := make([]hashAndPos, len(cachedTargetsAndHash))
+		copy(shouldBeEmpty, cachedTargetsAndHash)
+		leafHashesAndPos := toHashAndPos(cachedProof.Targets, leafHashes)
+
+		// Check that all the hashes we expect to be cached are all there.
+		shouldBeEmpty = removeHashes(shouldBeEmpty, leafHashesAndPos, func(elem hashAndPos) Hash { return elem.hash })
+		if len(shouldBeEmpty) > 0 {
+			expectedHashes := make([]Hash, len(cachedTargetsAndHash))
+			for i, cachedTargetAndHash := range cachedTargetsAndHash {
+				expectedHashes[i] = cachedTargetAndHash.hash
+			}
+
+			t.Fatalf("FuzzUpdateProofRemove Fail. Expected hashes:\n%s\nbut got:\n%s\n",
+				printHashes(expectedHashes), printHashes(leafHashes))
+		}
+
+		cachedProofPos, _ := proofPositions(cachedProof.Targets, p.numLeaves, treeRows(p.numLeaves))
+		if len(cachedProofPos) != len(cachedProof.Proof) {
+			t.Fatalf("FuzzUpdateProofRemove Fail. CachedProof hashes:\n%v\nbut want these positions:\n%v.\nPollard:\n%s\n",
+				printHashes(cachedProof.Proof), cachedProofPos, p.String())
+		}
+
+		// And verify that the proof is correct.
+		err = p.Verify(leafHashes, cachedProof)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+}
