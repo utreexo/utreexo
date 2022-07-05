@@ -107,6 +107,9 @@ func isRootPosition(position, numLeaves uint64, forestRows uint8) bool {
 //
 // In the above tree, 12 is an ancestor of 00. 13 is not an ancestor of 00.
 func isAncestor(higherPos, lowerPos uint64, forestRows uint8) bool {
+	if higherPos == lowerPos {
+		return false
+	}
 	lowerRow := detectRow(lowerPos, forestRows)
 	higherRow := detectRow(higherPos, forestRows)
 
