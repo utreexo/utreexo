@@ -370,6 +370,26 @@ func removeDuplicateInt(uint64Slice []uint64) []uint64 {
 	return list
 }
 
+// removeHashes returns a newly allocated slice with all only elements
+// that exist uniquely in slice1 (and not in slice2).
+// Basically returns a new slice that's slice1 - slice2.
+func removeHashes[E any](slice1, slice2 []E, getHash func(elem E) Hash) []E {
+	allKeys := make(map[Hash]bool, len(slice2))
+	for _, elem := range slice2 {
+		allKeys[getHash(elem)] = true
+	}
+
+	retSlice := make([]E, 0, len(slice1))
+	for i := 0; i < len(slice1); i++ {
+		elem := slice1[i]
+
+		if _, val := allKeys[getHash(elem)]; !val {
+			retSlice = append(retSlice, elem)
+		}
+	}
+	return retSlice
+}
+
 // subtractSortedSlice removes all elements of b from a. It returns a slice of a-b.
 // Both slices MUST be sorted.
 func subtractSortedSlice[E, F any](a []E, b []F, cmp func(E, F) int) []E {
@@ -876,4 +896,37 @@ func AddProof(proofA, proofB Proof, targetHashesA, targetHashesB []Hash, numLeav
 	}
 
 	return retDelHashes, retProof
+}
+
+// UpdateProofRemove modifies the cached proof with the deletions that happen in the block proof.
+// It updates the necessary proof hashes and un-caches the targets that are being deleted.
+func UpdateProofRemove(cachedProof, blockProof Proof, cachedDelHashes, blockDelHashes []Hash, numLeaves uint64) ([]Hash, Proof) {
+	// First we calculate which hashes are going to be deleted from the cached hashes.
+	// The resulting desiredHashesWithPos are the hashes that we will be caching after
+	// the deletion.
+	desiredHashesWithPos := toHashAndPos(cachedProof.Targets, cachedDelHashes)
+	blockHashesWithPos := toHashAndPos(blockProof.Targets, blockDelHashes)
+	desiredHashesWithPos = subtractSortedSlice(desiredHashesWithPos, blockHashesWithPos, hashAndPosCmp)
+
+	// Combine the proofs so we have all the data that we need.
+	combinedDelHashes, combinedProof := AddProof(cachedProof, blockProof, cachedDelHashes, blockDelHashes, numLeaves)
+	// Calculate the proof after deleting the blockProof targets.
+	combinedDelHashes, combinedProof = proofAfterPartialDeletion(numLeaves, combinedProof, combinedDelHashes, blockProof.Targets)
+	// Then remove the blockProof targets as these need to be uncached.
+	// This removal process also calculates the proof hashes.
+	blockDelHashes, blockProof = proofAfterDeletion(numLeaves, blockProof)
+
+	// Calculate the positions that should be removed from the combined proof by removing
+	// the desired hashes from the block deletion hashes.
+	blockDelHashesWithPos := toHashAndPos(blockProof.Targets, blockDelHashes)
+	blockDelHashesWithPos = removeHashes(blockDelHashesWithPos, desiredHashesWithPos, func(elem hashAndPos) Hash { return elem.hash })
+	removeTargets := make([]uint64, len(blockDelHashesWithPos))
+	for i, hashWithPos := range blockDelHashesWithPos {
+		removeTargets[i] = hashWithPos.pos
+	}
+
+	// Remove the unnecessary positions from the combined proof.
+	combinedDelHashes, combinedProof = RemoveTargets(numLeaves, combinedDelHashes, combinedProof, removeTargets)
+
+	return combinedDelHashes, combinedProof
 }
