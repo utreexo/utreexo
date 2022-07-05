@@ -930,3 +930,138 @@ func UpdateProofRemove(cachedProof, blockProof Proof, cachedDelHashes, blockDelH
 
 	return combinedDelHashes, combinedProof
 }
+
+// UpdateProofAdd modifies the cached proof with the additions that are passed in.
+// It adds the necessary proof hashes that will be needed to prove the targets in
+// the cached proof.
+//
+// NOTE: the stump passed in to the UpdateProofAdd is assumed to already be modified
+// with the deletion.
+func UpdateProofAdd(cachedProof Proof, adds []Hash, stump Stump) Proof {
+	// Update target positions if the forest has remapped to a higher row.
+	newForestRows := treeRows(stump.NumLeaves + uint64(len(adds)))
+	oldForestRows := treeRows(stump.NumLeaves)
+	if newForestRows > oldForestRows {
+		for i, target := range cachedProof.Targets {
+			row := detectRow(target, treeRows(stump.NumLeaves))
+
+			oldStartPos := startPositionAtRow(row, oldForestRows)
+			newStartPos := startPositionAtRow(row, newForestRows)
+
+			offset := target - oldStartPos
+
+			cachedProof.Targets[i] = offset + newStartPos
+		}
+	}
+
+	// Create a map of all the proof positions and their hashes. We'll use this
+	// map to fetch the needed proof positions after the addition.
+	proofPos, _ := proofPositions(cachedProof.Targets, stump.NumLeaves, newForestRows)
+	newRootsMap := make(map[uint64]Hash)
+	for i, pos := range proofPos {
+		newRootsMap[pos] = cachedProof.Proof[i]
+	}
+
+	roots := stump.Roots
+	for _, add := range adds {
+		// We can tell where the roots are by looking at the binary representation
+		// of the numLeaves. Wherever there's a 1, there's a root.
+		//
+		// numLeaves of 8 will be '1000' in binary, so there will be one root at
+		// row 3. numLeaves of 3 will be '11' in binary, so there's two roots. One at
+		// row 0 and one at row 1.
+		//
+		// In this loop below, we're looking for these roots by checking if there's
+		// a '1'. If there is a '1', we'll hash the root being added with that root
+		// until we hit a '0'.
+		newRoot := add
+		for h := uint8(0); (stump.NumLeaves>>h)&1 == 1; h++ {
+			root := roots[len(roots)-1]
+			roots = roots[:len(roots)-1]
+
+			// If the root that we're gonna hash with is empty, move the current
+			// node up to the position of the parent.
+			//
+			// Example:
+			//
+			// 12
+			// |-------\
+			// 08      09
+			// |---\   |---\
+			// 00  01  02  03  --
+			//
+			// When we add 05 to this tree, 04 is empty so we move 05 to 10.
+			// The resulting tree looks like below. The hash at position 10
+			// is not hash(04 || 05) but just the hash of 05.
+			//
+			// 12
+			// |-------\
+			// 08      09      10
+			// |---\   |---\   |---\
+			// 00  01  02  03  --  --
+			if root == empty {
+				pos := rootPosition(stump.NumLeaves, h, newForestRows)
+
+				sib := sibling(pos)
+				for j := len(cachedProof.Targets) - 1; j >= 0; j-- {
+					ancestor := isAncestor(parent(sib, newForestRows), cachedProof.Targets[j], newForestRows)
+					if ancestor {
+						// We can ignore the error since we've already verified that
+						// the cachedProof.Targets[j] is an ancestor of sib.
+						nextPos, _ := calcNextPosition(cachedProof.Targets[j], sib, newForestRows)
+						cachedProof.Targets[j] = nextPos
+					}
+				}
+				cachedProof.Targets = removeDuplicateInt(cachedProof.Targets)
+
+				tmpMap := make(map[uint64]Hash)
+				for key, hash := range newRootsMap {
+					ancestor := isAncestor(parent(sib, newForestRows), key, newForestRows)
+					if ancestor {
+						// We can ignore the error since we've already verified that
+						// the proofAndPos[j] is an ancestor of sib.
+						nextPos, _ := calcNextPosition(key, sib, newForestRows)
+						tmpMap[nextPos] = hash
+					} else {
+						tmpMap[key] = hash
+					}
+				}
+				newRootsMap = tmpMap
+
+				continue
+			} else {
+				pos := rootPosition(stump.NumLeaves, h, newForestRows)
+
+				if _, found := newRootsMap[pos]; !found {
+					newRootsMap[pos] = root
+				}
+				if _, found := newRootsMap[pos^1]; !found {
+					newRootsMap[pos^1] = newRoot
+				}
+
+				// Calculate the hash of the new root and append it.
+				newRoot = parentHash(root, newRoot)
+				pos = parent(pos, newForestRows)
+
+				if _, found := newRootsMap[pos]; !found {
+					newRootsMap[pos] = newRoot
+				}
+			}
+		}
+		roots = append(roots, newRoot)
+		stump.NumLeaves++
+	}
+	// These are the positions that we'd need after the addition.
+	cachedProofTargets := copySortedFunc(cachedProof.Targets, uint64Less)
+	neededProofPositions, _ := proofPositions(cachedProofTargets, stump.NumLeaves, newForestRows)
+
+	proofHashes := make([]Hash, len(neededProofPositions))
+	for i, neededProofPosition := range neededProofPositions {
+		hash := newRootsMap[neededProofPosition]
+		proofHashes[i] = hash
+	}
+
+	cachedProof.Proof = proofHashes
+
+	return cachedProof
+}

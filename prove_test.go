@@ -682,3 +682,103 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		}
 	})
 }
+
+func FuzzUpdateProofAdd(f *testing.F) {
+	var tests = []struct {
+		startLeaves uint32
+		delCount    uint32
+		addCount    uint32
+		seed        int64
+	}{
+		{
+			16,
+			3,
+			2,
+			12,
+		},
+	}
+	for _, test := range tests {
+		f.Add(test.startLeaves, test.delCount, test.addCount, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, startLeaves, delCount, addCount uint32, seed int64) {
+		rand.Seed(seed)
+
+		// It'll error out if we try to delete more than we have. >= since we want
+		// at least 2 leftOver leaf to test.
+		if int(delCount) >= int(startLeaves)-2 {
+			return
+		}
+
+		// Get leaves and dels.
+		leaves, delHashes, delPos := getAddsAndDels(0, startLeaves, delCount)
+
+		// Create the starting off pollard.
+		p := NewAccumulator(true)
+		err := p.Modify(leaves, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = p.Modify(nil, delHashes, delPos)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Grab the current leaves that exist in the accumulator.
+		currentLeaves := make([]hashAndPos, 0, len(leaves))
+		for _, node := range p.nodeMap {
+			currentLeaves = append(currentLeaves,
+				hashAndPos{node.data, p.calculatePosition(node)})
+		}
+		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
+		// guaranteed to have the same order, we need to do this.
+		sort.Slice(currentLeaves, func(a, b int) bool { return currentLeaves[a].pos < currentLeaves[b].pos })
+
+		// Randomly grab some leaves.
+		indexes := randomIndexes(len(currentLeaves), 2)
+		leafSubset := make([]hashAndPos, len(indexes))
+		for i := range leafSubset {
+			leafSubset[i] = currentLeaves[indexes[i]]
+		}
+		// Generate a proof of the leafSubset.
+		leafHashes := make([]Hash, len(leafSubset))
+		for i := range leafHashes {
+			leafHashes[i] = leafSubset[i].hash
+		}
+		cachedProof, err := p.Prove(leafHashes)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		addLeaves, _, _ := getAddsAndDels(uint32(p.numLeaves), addCount, 0)
+
+		// Update the cached proof with the block proof.
+		addHashes := make([]Hash, len(addLeaves))
+		for i, leaf := range addLeaves {
+			addHashes[i] = leaf.Hash
+		}
+		rootHashes := make([]Hash, len(p.roots))
+		for i, root := range p.roots {
+			rootHashes[i] = root.data
+		}
+		proofBeforeStr := cachedProof.String()
+		cachedProof = UpdateProofAdd(cachedProof, addHashes, Stump{rootHashes, p.numLeaves})
+
+		beforePollardStr := p.String()
+		// Modify the pollard.
+		err = p.Modify(addLeaves, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		afterPollardStr := p.String()
+
+		// And verify that the proof is correct.
+		err = p.Verify(leafHashes, cachedProof)
+		if err != nil {
+			t.Fatalf("FuzzUpdateProofAdd Fail. Error:\n%v\nleafHashes:\n%s\nProof before:\n%s\n"+
+				"Proof:\n%s\nPollard before:\n%s\nPollard after:\n%s\n",
+				err, printHashes(leafHashes), proofBeforeStr, cachedProof.String(),
+				beforePollardStr, afterPollardStr)
+		}
+	})
+}
