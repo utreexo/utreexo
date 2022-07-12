@@ -1065,3 +1065,62 @@ func UpdateProofAdd(cachedProof Proof, adds []Hash, stump Stump) Proof {
 
 	return cachedProof
 }
+
+// rootsAfterDel returns the roots after the deletion in the blockProof has happened.
+// NOTE: This function does not verify the proof. That responsibility is on the caller.
+func rootsAfterDel(blockProof Proof, stump Stump) ([]Hash, error) {
+	// Calculate all the current root positions.
+	rootPositions := []uint64{}
+	for _, root := range stump.Roots {
+		pos := whichRoot(stump.NumLeaves, root, stump.Roots)
+		rootPositions = append(rootPositions, pos)
+	}
+
+	blockHashes, blockProof := proofAfterDeletion(stump.NumLeaves, blockProof)
+	rootCandidates := calculateRoots(stump.NumLeaves, blockHashes, blockProof)
+
+	// Calculate the roots that will be calculated from the proof.
+	calcRootPositions := []uint64{}
+	for _, del := range blockProof.Targets {
+		root, err := getRootPosition(del, stump.NumLeaves, treeRows(stump.NumLeaves))
+		if err != nil {
+			return nil, err
+		}
+		calcRootPositions = mergeSortedSlicesFunc(calcRootPositions, []uint64{root}, uint64Cmp)
+	}
+
+	// Look for the positions that match up and replace the hash with the newly
+	// calculated hash.
+	idx := 0
+	for i := len(rootPositions) - 1; i >= 0; i-- {
+		rootPosition := rootPositions[i]
+
+		if idx < len(rootCandidates) && rootPosition == calcRootPositions[idx] {
+			stump.Roots[i] = rootCandidates[idx]
+			idx++
+		}
+	}
+
+	return stump.Roots, nil
+}
+
+// UpdateProof updates the cachedProof with the given blockProof and adds.
+func UpdateProof(cachedProof, blockProof Proof, cachedDelHashes, blockDelHashes,
+	adds []Hash, stump Stump) ([]Hash, Proof, error) {
+
+	// Remove necessary targets and update proof hashes with the blockProof.
+	cachedDelHashes, cachedProof = UpdateProofRemove(cachedProof, blockProof,
+		cachedDelHashes, blockDelHashes, stump.NumLeaves)
+
+	// Modify the roots with the blockProof.
+	var err error
+	stump.Roots, err = rootsAfterDel(blockProof, stump)
+	if err != nil {
+		return nil, Proof{}, err
+	}
+
+	// Add new proof hashes as needed.
+	cachedProof = UpdateProofAdd(cachedProof, adds, stump)
+
+	return cachedDelHashes, cachedProof, nil
+}

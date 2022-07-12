@@ -782,3 +782,184 @@ func FuzzUpdateProofAdd(f *testing.F) {
 		}
 	})
 }
+
+func FuzzModifyProofChain(f *testing.F) {
+	var tests = []struct {
+		numAdds  uint32
+		duration uint32
+		seed     int64
+	}{
+		{3, 0x07, 0x07},
+	}
+	for _, test := range tests {
+		f.Add(test.numAdds, test.duration, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		// simulate blocks with simchain
+		sc := newSimChainWithSeed(duration, seed)
+
+		p := NewAccumulator(true)
+
+		// We'll store the cached utxos here. This would be the equivalent
+		// of a wallet storing its own utxos.
+		var cachedProof Proof
+		var cachedHashes []Hash
+		for b := 0; b <= 25; b++ {
+			adds, duration, delHashes := sc.NextBlock(numAdds)
+
+			// The blockProof is the proof for the utxos being
+			// spent/deleted.
+			blockProof, err := p.Prove(delHashes)
+			if err != nil {
+				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
+			}
+
+			// Sanity checking.
+			err = p.Verify(delHashes, blockProof)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Sanity checking.
+			for _, target := range blockProof.Targets {
+				n, _, _, err := p.getNode(target)
+				if err != nil {
+					t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
+				}
+				if n == nil {
+					t.Fatalf("FuzzModifyProof fail to read %d at block %d.", target, b)
+				}
+			}
+
+			// For logging.
+			origTargetsAndHash := toHashAndPos(cachedProof.Targets, cachedHashes)
+
+			// cachedTargetsAndHash is the expected hashes after the
+			// modify has happened.
+			cachedTargetsAndHash := toHashAndPos(cachedProof.Targets, cachedHashes)
+			blockDelTargetsAndHash := toHashAndPos(blockProof.Targets, delHashes)
+			cachedTargetsAndHash = subtractSortedSlice(cachedTargetsAndHash, blockDelTargetsAndHash, hashAndPosCmp)
+
+			// Update the proof with the deletions and additions that
+			// happen in this block.
+			rootHashes := make([]Hash, len(p.roots))
+			for i := range rootHashes {
+				rootHashes[i] = p.roots[i].data
+			}
+			addHashes := make([]Hash, len(adds))
+			for i := range addHashes {
+				addHashes[i] = adds[i].Hash
+			}
+			stump := Stump{rootHashes, p.numLeaves}
+			cachedHashes, cachedProof, err = UpdateProof(
+				cachedProof, blockProof, cachedHashes, delHashes, addHashes, stump)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Check that we have enough targets as we expect.
+			if len(cachedProof.Targets) != len(cachedTargetsAndHash) {
+				t.Fatalf("FuzzUpdateProofRemove Fail. Expected %d "+
+					"targets but got %d.\nDeleted targets:\n%v."+
+					"\nOriginal cached targets:\n%v\nExpected "+
+					"old targets:\n%v\nGot targets:\n%v\n",
+					len(cachedTargetsAndHash),
+					len(cachedProof.Targets),
+					blockProof.Targets,
+					hashAndPosToString(origTargetsAndHash),
+					hashAndPosToString(cachedTargetsAndHash),
+					cachedProof.Targets)
+			}
+
+			shouldBeEmpty := make([]hashAndPos, len(cachedTargetsAndHash))
+			copy(shouldBeEmpty, cachedTargetsAndHash)
+			leafHashesAndPos := toHashAndPos(cachedProof.Targets, cachedHashes)
+
+			// Check that all the hashes we expect to be cached are all there.
+			shouldBeEmpty = removeHashes(shouldBeEmpty, leafHashesAndPos, func(elem hashAndPos) Hash { return elem.hash })
+			if len(shouldBeEmpty) > 0 {
+				expectedHashes := make([]Hash, len(cachedTargetsAndHash))
+				for i, cachedTargetAndHash := range cachedTargetsAndHash {
+					expectedHashes[i] = cachedTargetAndHash.hash
+				}
+
+				t.Fatalf("FuzzUpdateProofRemove Fail. Expected hashes:\n%s\nbut got:\n%s\n",
+					printHashes(expectedHashes), printHashes(cachedHashes))
+			}
+			err = p.Modify(adds, delHashes, blockProof.Targets)
+			if err != nil {
+				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
+			}
+
+			// Sanity check that the modified proof verifies with the
+			// modified pollard.
+			err = p.Verify(cachedHashes, cachedProof)
+			if err != nil {
+				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
+			}
+
+			// Cache new utxos that have a duration longer than 3.
+			var newHashesToCache []Hash
+			for i, add := range adds {
+				if duration[i] > 3 {
+					newHashesToCache = append(newHashesToCache, add.Hash)
+				}
+			}
+			newProofToCache, err := p.Prove(newHashesToCache)
+			if err != nil {
+				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
+			}
+			// Sanity check that the new proof to cached is correct.
+			err = p.Verify(newHashesToCache, newProofToCache)
+			if err != nil {
+				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
+			}
+
+			// Save the expectedHashes. We should have exactly these
+			// hashes after AddProof.
+			expectedHashes := make([]Hash, len(cachedHashes)+len(newHashesToCache))
+			expectedHashes = append(expectedHashes, cachedHashes...)
+			expectedHashes = append(expectedHashes, newHashesToCache...)
+
+			// Add the new UTXOs to the proof.
+			cachedHashes, cachedProof = AddProof(cachedProof, newProofToCache,
+				cachedHashes, newHashesToCache, p.numLeaves)
+			// Sanity check that the new cached proof verifies.
+			err = p.Verify(cachedHashes, cachedProof)
+			if err != nil {
+				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
+			}
+
+			// cachedHashes - expectedHashes should be empty.
+			// If it's not empty, we're missing some hashes.
+			expectedEmpty := make([]Hash, len(cachedHashes))
+			copy(expectedEmpty, cachedHashes)
+			expectedEmpty = removeHashes(expectedEmpty, expectedHashes, func(elem Hash) Hash { return elem })
+			if len(expectedEmpty) > 0 {
+				t.Fatalf("FuzzModifyProof fail at block %d. Expected hashes:\n%s\nGot hashes:\n%s\n",
+					b, printHashes(expectedHashes), printHashes(cachedHashes))
+			}
+
+			// Sanity checking.
+			if b%10 == 0 {
+				err = p.checkHashes()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			err = p.posMapSanity()
+			if err != nil {
+				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v",
+					b, err)
+			}
+			if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
+				err := fmt.Errorf("FuzzModifyProof fail at block %d: "+
+					"have %d leaves in map but only %d leaves in total",
+					b, len(p.nodeMap), p.numLeaves-p.numDels)
+				t.Fatal(err)
+			}
+		}
+	})
+}
