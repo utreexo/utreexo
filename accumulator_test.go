@@ -1,6 +1,7 @@
 package utreexo
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -1025,4 +1026,188 @@ func FuzzUndoChain(f *testing.F) {
 			}
 		}
 	})
+}
+
+func FuzzWriteAndRead(f *testing.F) {
+	var tests = []struct {
+		numAdds  uint32
+		duration uint32
+		seed     int64
+	}{
+		{3, 0x07, 0x07},
+	}
+	for _, test := range tests {
+		f.Add(test.numAdds, test.duration, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		rand.Seed(seed)
+
+		// simulate blocks with simchain
+		sc := newSimChainWithSeed(duration, seed)
+
+		p := NewAccumulator(true)
+		var totalAdds, totalDels int
+		for b := 0; b <= 100; b++ {
+			adds, _, delHashes := sc.NextBlock(numAdds)
+			totalAdds += len(adds)
+			totalDels += len(delHashes)
+
+			proof, err := p.Prove(delHashes)
+			if err != nil {
+				t.Fatalf("FuzzWriteAndRead fail at block %d. Error: %v", b, err)
+			}
+
+			err = p.Modify(adds, delHashes, proof.Targets)
+			if err != nil {
+				t.Fatalf("FuzzWriteAndRead fail at block %d. Error: %v", b, err)
+			}
+		}
+		err := p.checkHashes()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Write to the buffer.
+		size := p.SerializeSize()
+		buf := bytes.NewBuffer(make([]byte, 0, size))
+		wroteBytes, err := p.WriteTo(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if wroteBytes != int64(size) {
+			t.Fatalf("FuzzWriteAndRead Fail. Wrote %d but serializeSize got %d", wroteBytes, size)
+		}
+
+		// Copy and mutate the buffer and attempt to restore from that. Should error out.
+		copyBytes := make([]byte, size)
+		copy(copyBytes, buf.Bytes())
+		copyBytes[0], copyBytes[1] = 0xff, 0xff
+		copyBuf := bytes.NewBuffer(copyBytes)
+		_, _, err = RestorePollardFrom(copyBuf)
+		if err == nil {
+			t.Fatalf("FuzzWriteAndRead Fail. Expected an error from reading a corrupted buffer but got nil")
+		}
+
+		// Restore from the buffer.
+		readBytes, newP, err := RestorePollardFrom(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if readBytes != wroteBytes {
+			t.Fatalf("FuzzWriteAndRead Fail. Wrote %d but read %d", readBytes, wroteBytes)
+		}
+
+		// Check that the node maps are equal.
+		err = compareNodeMap(p.nodeMap, newP.nodeMap)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = newP.posMapSanity()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = newP.positionSanity()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Check that the hashes of the roots are correct.
+		err = newP.checkHashes()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Compare the roots.
+		for i, root := range p.roots {
+			if newP.roots[i].data != root.data {
+				t.Fatalf("FuzzReadAndWrite Fail. Roots don't equal.\nOrig roots:\n%s\nNew roots:\n%s\n",
+					printPolNodes(p.roots), printPolNodes(newP.roots))
+			}
+		}
+	})
+}
+
+// compareNodeMap compares the two maps and returns an error if the two maps do not
+// include the same keys and values for those keys.
+func compareNodeMap(mapA, mapB map[miniHash]*polNode) error {
+	mapAUnique := []*polNode{}
+	mapBUnique := []*polNode{}
+
+	mapADiffer := [][]*polNode{}
+	mapBDiffer := [][]*polNode{}
+
+	for key, value := range mapA {
+		node, found := mapB[key]
+		if !found {
+			mapAUnique = append(mapAUnique, node)
+			continue
+		}
+
+		if value.data != node.data {
+			mapADiffer = append(mapADiffer, []*polNode{value, node})
+		}
+	}
+
+	for key, value := range mapB {
+		node, found := mapA[key]
+		if !found {
+			mapBUnique = append(mapBUnique, node)
+			continue
+		}
+
+		if value.data != node.data {
+			mapBDiffer = append(mapBDiffer, []*polNode{value, node})
+		}
+	}
+
+	// Return early if the maps are the same.
+	if len(mapAUnique) <= 0 && len(mapBUnique) <= 0 && len(mapADiffer) <= 0 && len(mapBDiffer) <= 0 {
+		return nil
+	}
+
+	var str string
+	if len(mapAUnique) > 0 {
+		str += fmt.Sprintf("Following nodes exist in mapA but does not in mapB:\n%s\n",
+			printPolNodes(mapAUnique))
+	}
+	if len(mapBUnique) > 0 {
+		str += fmt.Sprintf("Following nodes exist in mapB but does not in mapA:\n%s\n",
+			printPolNodes(mapBUnique))
+	}
+	if len(mapADiffer) > 0 {
+		keyStr := ""
+		mapANodes := make([]*polNode, len(mapADiffer))
+		mapBNodes := make([]*polNode, len(mapADiffer))
+		for i, nodes := range mapADiffer {
+			mHash := nodes[0].data.mini()
+			keyStr += hex.EncodeToString(mHash[:])
+
+			mapANodes[i] = nodes[0]
+			mapBNodes[i] = nodes[1]
+		}
+
+		str += fmt.Sprintf("Keys:\n%s\nare differnt in mapA and mapB.\nMapA:\n%s\nMapB:\n%s\n",
+			keyStr, printPolNodes(mapANodes), printPolNodes(mapBNodes))
+	}
+	if len(mapBDiffer) > 0 {
+		keyStr := ""
+		mapBNodes := make([]*polNode, len(mapADiffer))
+		mapANodes := make([]*polNode, len(mapADiffer))
+		for i, nodes := range mapADiffer {
+			mHash := nodes[0].data.mini()
+			keyStr += hex.EncodeToString(mHash[:])
+
+			mapBNodes[i] = nodes[0]
+			mapANodes[i] = nodes[1]
+		}
+
+		str += fmt.Sprintf("Keys:\n%s\nare differnt in mapB and mapA.\nMapB:\n%s\nMapA:\n%s\n",
+			keyStr, printPolNodes(mapBNodes), printPolNodes(mapANodes))
+	}
+
+	return fmt.Errorf(str)
 }

@@ -1,8 +1,10 @@
 package utreexo
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"sort"
 )
 
@@ -528,4 +530,209 @@ func (p *Pollard) GetTotalCount() int64 {
 	}
 
 	return size
+}
+
+// SerializeSize returns how many bytes it'd take to serialize the pollard.
+func (p *Pollard) SerializeSize() int {
+	count := p.GetTotalCount()
+	// 32 byte hashes + 8 byte numLeaves + 8 byte numDels +
+	// 1 byte leaf-ness + 1 byte niece-ness
+	return int((count * 32) + 16 + (count * 2))
+}
+
+// Write to writes all the data of the pollard to the writer.
+func (p *Pollard) WriteTo(w io.Writer) (int64, error) {
+	totalBytes := int64(0)
+
+	// First write the num leaves.
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], p.numLeaves)
+	bytes, err := w.Write(buf[:])
+	if err != nil {
+		return totalBytes, err
+	}
+	totalBytes += int64(bytes)
+
+	// Then write the number of dels.
+	binary.LittleEndian.PutUint64(buf[:], p.numDels)
+	bytes, err = w.Write(buf[:])
+	if err != nil {
+		return totalBytes, err
+	}
+	totalBytes += int64(bytes)
+
+	// Then write the entire pollard to the writer.
+	for _, root := range p.roots {
+		bytes, err := writeOne(root, w)
+		if err != nil {
+			return totalBytes, err
+		}
+
+		totalBytes += bytes
+	}
+
+	return totalBytes, nil
+}
+
+func writeOne(n *polNode, w io.Writer) (int64, error) {
+	totalBytes := int64(0)
+
+	if n == nil {
+		return totalBytes, nil
+	}
+	wroteBytes, err := w.Write(n.data[:])
+	if err != nil {
+		return totalBytes, err
+	}
+	totalBytes += int64(wroteBytes)
+
+	// Mark leaf-ness. If we don't have any children, we're a leaf.
+	lChild, rChild, err := n.getChildren()
+	if err != nil {
+		return totalBytes, err
+	}
+	if lChild == nil && rChild == nil {
+		wroteBytes, err := w.Write([]byte{1})
+		if err != nil {
+			return totalBytes, err
+		}
+		totalBytes += int64(wroteBytes)
+	} else {
+		wroteBytes, err := w.Write([]byte{0})
+		if err != nil {
+			return totalBytes, err
+		}
+		totalBytes += int64(wroteBytes)
+	}
+
+	// If nieces are present, then call writeOne on those nieces as well and
+	// mark as nieces being present. If they don't exist, just mark as nieces
+	// missing and move on.
+	if n.lNiece != nil && n.rNiece != nil {
+		wroteBytes, err := w.Write([]byte{1})
+		if err != nil {
+			return totalBytes, err
+		}
+		totalBytes += int64(wroteBytes)
+
+		leftBytes, err := writeOne(n.lNiece, w)
+		if err != nil {
+			return totalBytes, err
+		}
+		totalBytes += leftBytes
+
+		rightBytes, err := writeOne(n.rNiece, w)
+		if err != nil {
+			return totalBytes, err
+		}
+		totalBytes += rightBytes
+	} else {
+		wroteBytes, err := w.Write([]byte{0})
+		if err != nil {
+			return totalBytes, err
+		}
+		totalBytes += int64(wroteBytes)
+	}
+
+	return totalBytes, nil
+}
+
+// RestorePollardFrom restores the pollard from the reader.
+func RestorePollardFrom(r io.Reader) (int64, *Pollard, error) {
+	p := NewAccumulator(true)
+	totalBytes := int64(0)
+
+	// Read numleaves.
+	var buf [8]byte
+	readBytes, err := r.Read(buf[:])
+	if err != nil {
+		return totalBytes, nil, err
+	}
+	totalBytes += int64(readBytes)
+	p.numLeaves = binary.LittleEndian.Uint64(buf[:])
+
+	// Read numDels.
+	readBytes, err = r.Read(buf[:])
+	if err != nil {
+		return totalBytes, nil, err
+	}
+	totalBytes += int64(readBytes)
+	p.numDels = binary.LittleEndian.Uint64(buf[:])
+
+	// For each of the roots that we have, initialize the polnodes
+	// with readOne.
+	p.roots = make([]*polNode, numRoots(p.numLeaves))
+	for i := range p.roots {
+		p.roots[i] = new(polNode)
+		readBytes, err := p.readOne(p.roots[i], r)
+		if err != nil {
+			return totalBytes, nil, err
+		}
+
+		totalBytes += readBytes
+	}
+
+	// Sanity check.
+	if len(p.nodeMap) != int(p.numLeaves-p.numDels) {
+		err = fmt.Errorf("RestorePollard fail. Expect a total or %d "+
+			"leaves but only have %d leaves in the map", p.numLeaves-p.numDels, len(p.nodeMap))
+		return totalBytes, nil, err
+	}
+
+	return totalBytes, &p, nil
+}
+
+func (p *Pollard) readOne(n *polNode, r io.Reader) (int64, error) {
+	totalBytes := int64(0)
+
+	// Read from the reader. If we're at EOF, we've finished restoring
+	// the pollard.
+	readBytes, err := r.Read(n.data[:])
+	if err != nil {
+		if err == io.EOF {
+			return int64(readBytes), nil
+		}
+		return totalBytes, err
+	}
+	totalBytes += int64(readBytes)
+
+	// Read leaf-ness. If this node is a leaf, then we need to store it in
+	// the map.
+	var buf [1]byte
+	readBytes, err = r.Read(buf[:])
+	if err != nil {
+		return totalBytes, err
+	}
+	totalBytes += int64(readBytes)
+	if buf[0] == 1 {
+		if n.data != empty {
+			p.nodeMap[n.data.mini()] = n
+		}
+	}
+
+	// Read if the node has nieces. If the node does have nieces, then we call readOne
+	// for the nieces as well.
+	readBytes, err = r.Read(buf[:])
+	if err != nil {
+		return totalBytes, err
+	}
+	totalBytes += int64(readBytes)
+
+	if buf[0] == 1 {
+		n.lNiece = &polNode{aunt: n}
+		leftBytes, err := p.readOne(n.lNiece, r)
+		if err != nil {
+			return totalBytes, err
+		}
+		totalBytes += leftBytes
+
+		n.rNiece = &polNode{aunt: n}
+		rightBytes, err := p.readOne(n.rNiece, r)
+		if err != nil {
+			return totalBytes, err
+		}
+		totalBytes += rightBytes
+	}
+
+	return totalBytes, nil
 }
