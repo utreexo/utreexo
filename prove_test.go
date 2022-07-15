@@ -757,8 +757,8 @@ func FuzzUpdateProofAdd(f *testing.F) {
 		for i, leaf := range addLeaves {
 			addHashes[i] = leaf.Hash
 		}
-		rootHashes := make([]Hash, len(p.roots))
-		for i, root := range p.roots {
+		rootHashes := make([]Hash, len(p.Roots))
+		for i, root := range p.Roots {
 			rootHashes[i] = root.data
 		}
 		proofBeforeStr := cachedProof.String()
@@ -843,9 +843,9 @@ func FuzzModifyProofChain(f *testing.F) {
 
 			// Update the proof with the deletions and additions that
 			// happen in this block.
-			rootHashes := make([]Hash, len(p.roots))
+			rootHashes := make([]Hash, len(p.Roots))
 			for i := range rootHashes {
-				rootHashes[i] = p.roots[i].data
+				rootHashes[i] = p.Roots[i].data
 			}
 			addHashes := make([]Hash, len(adds))
 			for i := range addHashes {

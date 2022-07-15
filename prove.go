@@ -146,18 +146,18 @@ func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
 	}
 
 	rootMatches := 0
-	for i := range p.roots {
+	for i := range p.Roots {
 		if len(rootCandidates) > rootMatches &&
-			p.roots[len(p.roots)-(i+1)].data == rootCandidates[rootMatches] {
+			p.Roots[len(p.Roots)-(i+1)].data == rootCandidates[rootMatches] {
 			rootMatches++
 		}
 	}
 	// Error out if all the rootCandidates do not have a corresponding
 	// polnode with the same hash.
 	if len(rootCandidates) != rootMatches {
-		rootHashes := make([]Hash, len(p.roots))
+		rootHashes := make([]Hash, len(p.Roots))
 		for i := range rootHashes {
-			rootHashes[i] = p.roots[i].data
+			rootHashes[i] = p.Roots[i].data
 		}
 		// The proof is invalid because some root candidates were not
 		// included in `roots`.

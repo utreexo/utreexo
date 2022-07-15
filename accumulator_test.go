@@ -305,7 +305,7 @@ func checkHashes(node, sibling *polNode, p *Pollard) error {
 // checkHashes is a wrapper around the checkHashes function. Provides an easy function to
 // check that the pollard has correct hashes.
 func (p *Pollard) checkHashes() error {
-	for _, root := range p.roots {
+	for _, root := range p.Roots {
 		if root.lNiece != nil && root.rNiece != nil {
 			// First check the root hash.
 			calculatedHash := parentHash(root.lNiece.data, root.rNiece.data)
@@ -1122,10 +1122,10 @@ func FuzzWriteAndRead(f *testing.F) {
 		}
 
 		// Compare the roots.
-		for i, root := range p.roots {
-			if newP.roots[i].data != root.data {
+		for i, root := range p.Roots {
+			if newP.Roots[i].data != root.data {
 				t.Fatalf("FuzzReadAndWrite Fail. Roots don't equal.\nOrig roots:\n%s\nNew roots:\n%s\n",
-					printPolNodes(p.roots), printPolNodes(newP.roots))
+					printPolNodes(p.Roots), printPolNodes(newP.Roots))
 			}
 		}
 	})

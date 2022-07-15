@@ -124,14 +124,14 @@ func (p *Pollard) getNode(pos uint64) (n, sibling, parent *polNode, err error) {
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if tree >= uint8(len(p.roots)) {
+	if tree >= uint8(len(p.Roots)) {
 		return nil, nil, nil, fmt.Errorf("getNode error: couldn't fetch %d, "+
 			"calculated root index of %d but only have %d roots",
-			pos, tree, len(p.roots))
+			pos, tree, len(p.Roots))
 	}
 
 	// Initialize.
-	n, sibling, parent = p.roots[tree], p.roots[tree], nil
+	n, sibling, parent = p.Roots[tree], p.Roots[tree], nil
 
 	// Go down the tree to find the node we're looking for.
 	for h := int(branchLen) - 1; h >= 0; h-- {
@@ -200,7 +200,7 @@ func (p *Pollard) calculatePosition(node *polNode) uint64 {
 	// Calculate which row the root is on.
 	rootRow := -1
 	// Start from the lowest root.
-	rootIdx := len(p.roots) - 1
+	rootIdx := len(p.Roots) - 1
 	for h := 0; h <= int(forestRows); h++ {
 		// Because every root represents a perfect tree of every leaf
 		// we ever added, each root position will be a power of 2.
@@ -210,7 +210,7 @@ func (p *Pollard) calculatePosition(node *polNode) uint64 {
 		if (p.numLeaves>>h)&1 == 1 {
 			// If we found the root, save the row to rootRow
 			// and return.
-			if p.roots[rootIdx].data == polNode.data {
+			if p.Roots[rootIdx].data == polNode.data {
 				rootRow = h
 				break
 			}

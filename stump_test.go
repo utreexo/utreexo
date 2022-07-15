@@ -70,16 +70,16 @@ func FuzzStump(f *testing.F) {
 		}
 
 		// Check that the roots are the same after the addition.
-		if len(p.roots) != len(stump.Roots) {
+		if len(p.Roots) != len(stump.Roots) {
 			t.Fatalf("FuzzStump fail: jHave %d roots for pollard and %d roots for stump."+
-				"\nStump:\n%s\nPollard:\n%s\n", len(p.roots), len(stump.Roots),
-				printHashes(stump.Roots), printPolNodes(p.roots))
+				"\nStump:\n%s\nPollard:\n%s\n", len(p.Roots), len(stump.Roots),
+				printHashes(stump.Roots), printPolNodes(p.Roots))
 		}
-		for i := range p.roots {
-			if p.roots[i].data != stump.Roots[i] {
+		for i := range p.Roots {
+			if p.Roots[i].data != stump.Roots[i] {
 				t.Fatalf("FuzzStump fail: Roots do not equal between pollard and stump."+
 					"\nStump:\n%s\nPollard:\n%s\n%s\n",
-					printHashes(stump.Roots), printPolNodes(p.roots), p.String())
+					printHashes(stump.Roots), printPolNodes(p.Roots), p.String())
 			}
 		}
 
@@ -105,16 +105,16 @@ func FuzzStump(f *testing.F) {
 		}
 
 		// Check that the roots are the same after addition/deletion.
-		if len(p.roots) != len(stump.Roots) {
+		if len(p.Roots) != len(stump.Roots) {
 			t.Fatalf("FuzzStump fail: jHave %d roots for pollard and %d roots for stump."+
-				"\nStump:\n%s\nPollard:\n%s\n", len(p.roots), len(stump.Roots),
-				printHashes(stump.Roots), printPolNodes(p.roots))
+				"\nStump:\n%s\nPollard:\n%s\n", len(p.Roots), len(stump.Roots),
+				printHashes(stump.Roots), printPolNodes(p.Roots))
 		}
-		for i := range p.roots {
-			if p.roots[i].data != stump.Roots[i] {
+		for i := range p.Roots {
+			if p.Roots[i].data != stump.Roots[i] {
 				t.Fatalf("FuzzStump fail: Roots do not equal between pollard and stump."+
 					"\nStump:\n%s\nPollard:\n%s\n%s\n",
-					printHashes(stump.Roots), printPolNodes(p.roots), p.String())
+					printHashes(stump.Roots), printPolNodes(p.Roots), p.String())
 			}
 		}
 	})
@@ -165,16 +165,16 @@ func FuzzStumpChain(f *testing.F) {
 			}
 
 			// Check that the roots are the same after addition/deletion.
-			if len(p.roots) != len(stump.Roots) {
+			if len(p.Roots) != len(stump.Roots) {
 				t.Fatalf("FuzzStumpChain fail at block %d: Have %d roots for pollard and %d roots for stump."+
-					"\nStump:\n%s\nPollard:\n%s\n", b, len(p.roots), len(stump.Roots),
-					printHashes(stump.Roots), printPolNodes(p.roots))
+					"\nStump:\n%s\nPollard:\n%s\n", b, len(p.Roots), len(stump.Roots),
+					printHashes(stump.Roots), printPolNodes(p.Roots))
 			}
-			for i := range p.roots {
-				if p.roots[i].data != stump.Roots[i] {
+			for i := range p.Roots {
+				if p.Roots[i].data != stump.Roots[i] {
 					t.Fatalf("FuzzStumpChain fail at block %d: Roots do not equal between pollard and stump."+
 						"\nStump:\n%s\nPollard:\n%s\n%s\n", b,
-						printHashes(stump.Roots), printPolNodes(p.roots), p.String())
+						printHashes(stump.Roots), printPolNodes(p.Roots), p.String())
 				}
 			}
 		}
