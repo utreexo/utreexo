@@ -11,13 +11,13 @@ import (
 )
 
 func (p *Pollard) posMapSanity() error {
-	if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
+	if uint64(len(p.NodeMap)) != p.numLeaves-p.numDels {
 		err := fmt.Errorf("Have %d leaves in map but only %d leaves in total",
-			len(p.nodeMap), p.numLeaves-p.numDels)
+			len(p.NodeMap), p.numLeaves-p.numDels)
 		return err
 	}
 
-	for mHash, node := range p.nodeMap {
+	for mHash, node := range p.NodeMap {
 		if node == nil {
 			return fmt.Errorf("Node in nodemap is nil. Key: %s",
 				hex.EncodeToString(mHash[:]))
@@ -570,7 +570,7 @@ func FuzzModify(f *testing.F) {
 			t.Fatal(err)
 		}
 		beforeStr := p.String()
-		beforeMap := nodeMapToString(p.nodeMap)
+		beforeMap := nodeMapToString(p.NodeMap)
 
 		modifyLeaves, _, _ := getAddsAndDels(uint32(p.numLeaves), modifyAdds, 0)
 		err = p.Modify(modifyLeaves, delHashes, delTargets)
@@ -578,7 +578,7 @@ func FuzzModify(f *testing.F) {
 			t.Fatal(err)
 		}
 		afterStr := p.String()
-		afterMap := nodeMapToString(p.nodeMap)
+		afterMap := nodeMapToString(p.NodeMap)
 
 		err = p.checkHashes()
 		if err != nil {
@@ -681,10 +681,10 @@ func FuzzModifyChain(f *testing.F) {
 				t.Fatalf("FuzzModifyChain fail at block %d. Error: %v",
 					b, err)
 			}
-			if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
+			if uint64(len(p.NodeMap)) != p.numLeaves-p.numDels {
 				err := fmt.Errorf("FuzzModifyChain fail at block %d: "+
 					"have %d leaves in map but only %d leaves in total",
-					b, len(p.nodeMap), p.numLeaves-p.numDels)
+					b, len(p.NodeMap), p.numLeaves-p.numDels)
 				t.Fatal(err)
 			}
 
@@ -738,7 +738,7 @@ func FuzzUndo(f *testing.F) {
 		beforeStr := p.String()
 
 		beforeRoots := p.GetRoots()
-		beforeMap := nodeMapToString(p.nodeMap)
+		beforeMap := nodeMapToString(p.NodeMap)
 
 		bp, err := p.Prove(dels)
 		if err != nil {
@@ -762,7 +762,7 @@ func FuzzUndo(f *testing.F) {
 			t.Fatal(err)
 		}
 		afterStr := p.String()
-		afterMap := nodeMapToString(p.nodeMap)
+		afterMap := nodeMapToString(p.NodeMap)
 
 		err = p.Undo(uint64(modifyAdds), bp.Targets, dels, beforeRoots)
 		if err != nil {
@@ -798,7 +798,7 @@ func FuzzUndo(f *testing.F) {
 			t.Fatal(err)
 		}
 		undoStr := p.String()
-		undoMap := nodeMapToString(p.nodeMap)
+		undoMap := nodeMapToString(p.NodeMap)
 
 		// Check that all the parent hashes are correct after the undo.
 		err = p.checkHashes()
@@ -806,7 +806,7 @@ func FuzzUndo(f *testing.F) {
 			t.Fatal(err)
 		}
 
-		if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
+		if uint64(len(p.NodeMap)) != p.numLeaves-p.numDels {
 			startHashes := make([]Hash, len(leaves))
 			for i, leaf := range leaves {
 				startHashes[i] = leaf.Hash
@@ -828,7 +828,7 @@ func FuzzUndo(f *testing.F) {
 				"\nnodemap before modify:\n %s"+
 				"\nnodemap after modify:\n %s"+
 				"\nnodemap after undo:\n %s",
-				len(p.nodeMap), p.numLeaves-p.numDels,
+				len(p.NodeMap), p.numLeaves-p.numDels,
 				beforeStr,
 				afterStr,
 				undoStr,
@@ -872,7 +872,7 @@ func FuzzUndo(f *testing.F) {
 				printHashes(modifyHashes),
 				printHashes(dels),
 				bp.Targets,
-				nodeMapToString(p.nodeMap)))
+				nodeMapToString(p.NodeMap)))
 		}
 
 		afterRoots := p.GetRoots()
@@ -954,7 +954,7 @@ func FuzzUndoChain(f *testing.F) {
 			// We'll be comparing 3 things. Roots, nodeMap and leaf count.
 			beforeRoot := p.GetRoots()
 			beforeMap := make(map[miniHash]polNode)
-			for key, value := range p.nodeMap {
+			for key, value := range p.NodeMap {
 				beforeMap[key] = *value
 			}
 			beforeLeaves := p.numLeaves
@@ -987,14 +987,14 @@ func FuzzUndoChain(f *testing.F) {
 					t.Fatal(err)
 				}
 
-				if len(p.nodeMap) != len(beforeMap) {
+				if len(p.NodeMap) != len(beforeMap) {
 					err := fmt.Errorf("FuzzUndoChain fail at block %d, map length mismatch. "+
-						"before %d, after %d", b, len(beforeMap), len(p.nodeMap))
+						"before %d, after %d", b, len(beforeMap), len(p.NodeMap))
 					t.Fatal(err)
 				}
 
 				for key, value := range beforeMap {
-					node, found := p.nodeMap[key]
+					node, found := p.NodeMap[key]
 					if !found {
 						err := fmt.Errorf("FuzzUndoChain fail at block %d, hash %s not found after undo",
 							b, hex.EncodeToString(key[:]))
@@ -1100,7 +1100,7 @@ func FuzzWriteAndRead(f *testing.F) {
 		}
 
 		// Check that the node maps are equal.
-		err = compareNodeMap(p.nodeMap, newP.nodeMap)
+		err = compareNodeMap(p.NodeMap, newP.NodeMap)
 		if err != nil {
 			t.Fatal(err)
 		}

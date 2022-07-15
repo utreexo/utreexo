@@ -11,11 +11,11 @@ import (
 // Pollard is a representation of the utreexo forest using a collection of
 // binary trees. It may or may not contain the entire set.
 type Pollard struct {
-	// nodeMap maps hashes to polNodes. Used during proving individual elements
+	// NodeMap maps hashes to polNodes. Used during proving individual elements
 	// in the accumulator.
-	nodeMap map[miniHash]*polNode
+	NodeMap map[miniHash]*polNode
 
-	// roots are the roots of each tree in the forest.
+	// Roots are the roots of each tree in the forest.
 	//
 	// NOTE: Since roots don't have nieces, they point to children.
 	// In the below tree, 06 is the root and it points to its children,
@@ -45,7 +45,7 @@ type Pollard struct {
 // for all elements, set full to true.
 func NewAccumulator(full bool) Pollard {
 	var p Pollard
-	p.nodeMap = make(map[miniHash]*polNode)
+	p.NodeMap = make(map[miniHash]*polNode)
 	p.full = full
 
 	return p
@@ -88,7 +88,7 @@ func (p *Pollard) add(adds []Leaf) {
 
 		// Add the hash to the map if this node is supposed to be remembered.
 		if node.remember {
-			p.nodeMap[add.mini()] = node
+			p.NodeMap[add.mini()] = node
 		}
 
 		newRoot := p.calculateNewRoot(node)
@@ -201,7 +201,7 @@ func (p *Pollard) deleteRoot(del uint64) error {
 	}
 
 	// Delete from map.
-	delete(p.nodeMap, p.roots[tree].data.mini())
+	delete(p.NodeMap, p.roots[tree].data.mini())
 
 	if p.roots[tree].lNiece != nil {
 		p.roots[tree].lNiece.aunt = nil
@@ -254,14 +254,14 @@ func (p *Pollard) deleteSingle(del uint64) error {
 		delNode(fromNode)
 
 		// If the node was a leaf, update the map to point to the root.
-		_, found := p.nodeMap[toNode.data.mini()]
+		_, found := p.NodeMap[toNode.data.mini()]
 		if found {
-			p.nodeMap[toNode.data.mini()] = toNode
+			p.NodeMap[toNode.data.mini()] = toNode
 		}
 	}
 
 	// Delete the node from the map.
-	delete(p.nodeMap, fromNodeSib.data.mini())
+	delete(p.NodeMap, fromNodeSib.data.mini())
 	delNode(fromNodeSib)
 
 	// If to position is a root, there's no parent hash to be calculated so
@@ -301,7 +301,7 @@ func (p *Pollard) deleteSingle(del uint64) error {
 // deleteFromMap deletes the hashes passed in from the node map.
 func (p *Pollard) deleteFromMap(delHashes []Hash) {
 	for _, del := range delHashes {
-		delete(p.nodeMap, del.mini())
+		delete(p.NodeMap, del.mini())
 	}
 }
 
@@ -395,7 +395,7 @@ func (p *Pollard) undoSingleAdd() {
 			row = -1
 		}
 
-		delete(p.nodeMap, lowestRoot.data.mini())
+		delete(p.NodeMap, lowestRoot.data.mini())
 		delNode(lowestRoot)
 	}
 	p.numLeaves--
@@ -412,7 +412,7 @@ func (p *Pollard) undoDels(dels []uint64, delHashes []Hash) error {
 		pn := &polNode{data: delHashes[i], remember: p.full}
 		pnps[i] = nodeAndPos{pn, dels[i]}
 
-		p.nodeMap[delHashes[i].mini()] = pn
+		p.NodeMap[delHashes[i].mini()] = pn
 	}
 	sort.Slice(pnps, func(a, b int) bool { return pnps[a].pos < pnps[b].pos })
 
@@ -495,9 +495,9 @@ func (p *Pollard) undoSingleDel(node *polNode, pos uint64) error {
 
 		swapNieces(parent.lNiece, parent.rNiece)
 
-		_, found := p.nodeMap[sibling.data.mini()]
+		_, found := p.NodeMap[sibling.data.mini()]
 		if found {
-			p.nodeMap[sibling.data.mini()] = sibling
+			p.NodeMap[sibling.data.mini()] = sibling
 		}
 
 		return nil
@@ -673,9 +673,9 @@ func RestorePollardFrom(r io.Reader) (int64, *Pollard, error) {
 	}
 
 	// Sanity check.
-	if len(p.nodeMap) != int(p.numLeaves-p.numDels) {
+	if len(p.NodeMap) != int(p.numLeaves-p.numDels) {
 		err = fmt.Errorf("RestorePollard fail. Expect a total or %d "+
-			"leaves but only have %d leaves in the map", p.numLeaves-p.numDels, len(p.nodeMap))
+			"leaves but only have %d leaves in the map", p.numLeaves-p.numDels, len(p.NodeMap))
 		return totalBytes, nil, err
 	}
 
@@ -706,7 +706,7 @@ func (p *Pollard) readOne(n *polNode, r io.Reader) (int64, error) {
 	totalBytes += int64(readBytes)
 	if buf[0] == 1 {
 		if n.data != empty {
-			p.nodeMap[n.data.mini()] = n
+			p.NodeMap[n.data.mini()] = n
 		}
 	}
 

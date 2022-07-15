@@ -159,7 +159,7 @@ func FuzzGetMissingPositions(f *testing.F) {
 
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
-		for _, node := range p.nodeMap {
+		for _, node := range p.NodeMap {
 			currentLeaves = append(currentLeaves,
 				hashAndPos{node.data, p.calculatePosition(node)})
 		}
@@ -268,7 +268,7 @@ func FuzzRemoveTargets(f *testing.F) {
 
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
-		for _, node := range p.nodeMap {
+		for _, node := range p.NodeMap {
 			currentLeaves = append(currentLeaves,
 				hashAndPos{node.data, p.calculatePosition(node)})
 		}
@@ -357,7 +357,7 @@ func FuzzAddProof(f *testing.F) {
 
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
-		for _, node := range p.nodeMap {
+		for _, node := range p.NodeMap {
 			currentLeaves = append(currentLeaves,
 				hashAndPos{node.data, p.calculatePosition(node)})
 		}
@@ -465,7 +465,7 @@ func FuzzProofAfterDeletion(f *testing.F) {
 
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
-		for _, node := range p.nodeMap {
+		for _, node := range p.NodeMap {
 			currentLeaves = append(currentLeaves,
 				hashAndPos{node.data, p.calculatePosition(node)})
 		}
@@ -574,7 +574,7 @@ func FuzzUpdateProofRemove(f *testing.F) {
 
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
-		for _, node := range p.nodeMap {
+		for _, node := range p.NodeMap {
 			currentLeaves = append(currentLeaves,
 				hashAndPos{node.data, p.calculatePosition(node)})
 		}
@@ -726,7 +726,7 @@ func FuzzUpdateProofAdd(f *testing.F) {
 
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := make([]hashAndPos, 0, len(leaves))
-		for _, node := range p.nodeMap {
+		for _, node := range p.NodeMap {
 			currentLeaves = append(currentLeaves,
 				hashAndPos{node.data, p.calculatePosition(node)})
 		}
@@ -954,10 +954,10 @@ func FuzzModifyProofChain(f *testing.F) {
 				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v",
 					b, err)
 			}
-			if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
+			if uint64(len(p.NodeMap)) != p.numLeaves-p.numDels {
 				err := fmt.Errorf("FuzzModifyProof fail at block %d: "+
 					"have %d leaves in map but only %d leaves in total",
-					b, len(p.nodeMap), p.numLeaves-p.numDels)
+					b, len(p.NodeMap), p.numLeaves-p.numDels)
 				t.Fatal(err)
 			}
 		}

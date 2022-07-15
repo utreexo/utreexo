@@ -63,7 +63,7 @@ func (p *Pollard) Prove(hashes []Hash) (Proof, error) {
 
 	// Grab the positions of the hashes that are to be proven.
 	for i, wanted := range hashes {
-		node, ok := p.nodeMap[wanted.mini()]
+		node, ok := p.NodeMap[wanted.mini()]
 		if !ok {
 			return proof, fmt.Errorf("Prove error: hash %s not found",
 				hex.EncodeToString(wanted[:]))
