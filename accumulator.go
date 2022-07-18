@@ -32,8 +32,8 @@ type Pollard struct {
 	// NumLeaves is the number of all leaves that were ever added to the accumulator.
 	NumLeaves uint64
 
-	// numDels is the number of all elements that were deleted from the accumulator.
-	numDels uint64
+	// NumDels is the number of all elements that were deleted from the accumulator.
+	NumDels uint64
 
 	// full indicates that this pollard will keep all the leaves in the accumulator.
 	// Only Pollards that have the full value set to true will be able to prove all
@@ -69,7 +69,7 @@ func (p *Pollard) Modify(adds []Leaf, delHashes []Hash, origDels []uint64) error
 	if err != nil {
 		return err
 	}
-	p.numDels += uint64(delCount)
+	p.NumDels += uint64(delCount)
 
 	p.add(adds)
 
@@ -438,7 +438,7 @@ func (p *Pollard) undoDels(dels []uint64, delHashes []Hash) error {
 		}
 	}
 
-	p.numDels -= uint64(len(delHashes))
+	p.NumDels -= uint64(len(delHashes))
 
 	return nil
 }
@@ -535,7 +535,7 @@ func (p *Pollard) GetTotalCount() int64 {
 // SerializeSize returns how many bytes it'd take to serialize the pollard.
 func (p *Pollard) SerializeSize() int {
 	count := p.GetTotalCount()
-	// 32 byte hashes + 8 byte NumLeaves + 8 byte numDels +
+	// 32 byte hashes + 8 byte NumLeaves + 8 byte NumDels +
 	// 1 byte leaf-ness + 1 byte niece-ness
 	return int((count * 32) + 16 + (count * 2))
 }
@@ -554,7 +554,7 @@ func (p *Pollard) WriteTo(w io.Writer) (int64, error) {
 	totalBytes += int64(bytes)
 
 	// Then write the number of dels.
-	binary.LittleEndian.PutUint64(buf[:], p.numDels)
+	binary.LittleEndian.PutUint64(buf[:], p.NumDels)
 	bytes, err = w.Write(buf[:])
 	if err != nil {
 		return totalBytes, err
@@ -651,13 +651,13 @@ func RestorePollardFrom(r io.Reader) (int64, *Pollard, error) {
 	totalBytes += int64(readBytes)
 	p.NumLeaves = binary.LittleEndian.Uint64(buf[:])
 
-	// Read numDels.
+	// Read NumDels.
 	readBytes, err = r.Read(buf[:])
 	if err != nil {
 		return totalBytes, nil, err
 	}
 	totalBytes += int64(readBytes)
-	p.numDels = binary.LittleEndian.Uint64(buf[:])
+	p.NumDels = binary.LittleEndian.Uint64(buf[:])
 
 	// For each of the roots that we have, initialize the polnodes
 	// with readOne.
@@ -673,9 +673,9 @@ func RestorePollardFrom(r io.Reader) (int64, *Pollard, error) {
 	}
 
 	// Sanity check.
-	if len(p.NodeMap) != int(p.NumLeaves-p.numDels) {
+	if len(p.NodeMap) != int(p.NumLeaves-p.NumDels) {
 		err = fmt.Errorf("RestorePollard fail. Expect a total or %d "+
-			"leaves but only have %d leaves in the map", p.NumLeaves-p.numDels, len(p.NodeMap))
+			"leaves but only have %d leaves in the map", p.NumLeaves-p.NumDels, len(p.NodeMap))
 		return totalBytes, nil, err
 	}
 

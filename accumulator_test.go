@@ -11,9 +11,9 @@ import (
 )
 
 func (p *Pollard) posMapSanity() error {
-	if uint64(len(p.NodeMap)) != p.NumLeaves-p.numDels {
+	if uint64(len(p.NodeMap)) != p.NumLeaves-p.NumDels {
 		err := fmt.Errorf("Have %d leaves in map but only %d leaves in total",
-			len(p.NodeMap), p.NumLeaves-p.numDels)
+			len(p.NodeMap), p.NumLeaves-p.NumDels)
 		return err
 	}
 
@@ -681,10 +681,10 @@ func FuzzModifyChain(f *testing.F) {
 				t.Fatalf("FuzzModifyChain fail at block %d. Error: %v",
 					b, err)
 			}
-			if uint64(len(p.NodeMap)) != p.NumLeaves-p.numDels {
+			if uint64(len(p.NodeMap)) != p.NumLeaves-p.NumDels {
 				err := fmt.Errorf("FuzzModifyChain fail at block %d: "+
 					"have %d leaves in map but only %d leaves in total",
-					b, len(p.NodeMap), p.NumLeaves-p.numDels)
+					b, len(p.NodeMap), p.NumLeaves-p.NumDels)
 				t.Fatal(err)
 			}
 
@@ -806,7 +806,7 @@ func FuzzUndo(f *testing.F) {
 			t.Fatal(err)
 		}
 
-		if uint64(len(p.NodeMap)) != p.NumLeaves-p.numDels {
+		if uint64(len(p.NodeMap)) != p.NumLeaves-p.NumDels {
 			startHashes := make([]Hash, len(leaves))
 			for i, leaf := range leaves {
 				startHashes[i] = leaf.Hash
@@ -828,7 +828,7 @@ func FuzzUndo(f *testing.F) {
 				"\nnodemap before modify:\n %s"+
 				"\nnodemap after modify:\n %s"+
 				"\nnodemap after undo:\n %s",
-				len(p.NodeMap), p.NumLeaves-p.numDels,
+				len(p.NodeMap), p.NumLeaves-p.NumDels,
 				beforeStr,
 				afterStr,
 				undoStr,

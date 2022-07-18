@@ -954,10 +954,10 @@ func FuzzModifyProofChain(f *testing.F) {
 				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v",
 					b, err)
 			}
-			if uint64(len(p.NodeMap)) != p.NumLeaves-p.numDels {
+			if uint64(len(p.NodeMap)) != p.NumLeaves-p.NumDels {
 				err := fmt.Errorf("FuzzModifyProof fail at block %d: "+
 					"have %d leaves in map but only %d leaves in total",
-					b, len(p.NodeMap), p.NumLeaves-p.numDels)
+					b, len(p.NodeMap), p.NumLeaves-p.NumDels)
 				t.Fatal(err)
 			}
 		}
