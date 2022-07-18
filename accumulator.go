@@ -35,18 +35,18 @@ type Pollard struct {
 	// NumDels is the number of all elements that were deleted from the accumulator.
 	NumDels uint64
 
-	// full indicates that this pollard will keep all the leaves in the accumulator.
-	// Only Pollards that have the full value set to true will be able to prove all
+	// Full indicates that this pollard will keep all the leaves in the accumulator.
+	// Only Pollards that have the Full value set to true will be able to prove all
 	// the elements.
-	full bool
+	Full bool
 }
 
 // NewAccumulator returns a initialized accumulator. To enable the generating proofs
-// for all elements, set full to true.
+// for all elements, set Full to true.
 func NewAccumulator(full bool) Pollard {
 	var p Pollard
 	p.NodeMap = make(map[miniHash]*polNode)
-	p.full = full
+	p.Full = full
 
 	return p
 }
@@ -79,10 +79,10 @@ func (p *Pollard) Modify(adds []Leaf, delHashes []Hash, origDels []uint64) error
 // add adds all the passed in leaves to the accumulator.
 func (p *Pollard) add(adds []Leaf) {
 	for _, add := range adds {
-		// Create a node from the hash. If the pollard is full, then remember
+		// Create a node from the hash. If the pollard is Full, then remember
 		// every node.
 		node := &polNode{data: add.Hash, remember: add.Remember}
-		if p.full {
+		if p.Full {
 			node.remember = true
 		}
 
@@ -148,7 +148,7 @@ func (p *Pollard) calculateNewRoot(node *polNode) *polNode {
 		nHash := parentHash(root.data, node.data)
 
 		newRoot := &polNode{data: nHash, lNiece: root, rNiece: node}
-		if p.full {
+		if p.Full {
 			newRoot.remember = true
 		}
 
@@ -333,12 +333,12 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []
 	for i, prevRoot := range prevRoots {
 		if prevRoot == empty {
 			if i >= len(p.Roots) {
-				p.Roots = append(p.Roots, &polNode{remember: p.full})
+				p.Roots = append(p.Roots, &polNode{remember: p.Full})
 			}
 			if p.Roots[i].data != empty {
 				p.Roots = append(p.Roots, nil)
 				copy(p.Roots[i+1:], p.Roots[i:])
-				p.Roots[i] = &polNode{data: prevRoot, remember: p.full}
+				p.Roots[i] = &polNode{data: prevRoot, remember: p.Full}
 			}
 		}
 	}
@@ -360,7 +360,7 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []
 				return err
 			}
 			if int(tree) == len(p.Roots) {
-				p.Roots = append(p.Roots, &polNode{data: empty, remember: p.full})
+				p.Roots = append(p.Roots, &polNode{data: empty, remember: p.Full})
 			}
 			if int(tree) > len(p.Roots) {
 				return fmt.Errorf("undoEmptyRoots error: calculated root index of %d "+
@@ -370,7 +370,7 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []
 			if p.Roots[tree].data != empty {
 				p.Roots = append(p.Roots, nil)
 				copy(p.Roots[tree+1:], p.Roots[tree:])
-				p.Roots[tree] = &polNode{data: empty, remember: p.full}
+				p.Roots[tree] = &polNode{data: empty, remember: p.Full}
 			}
 		}
 	}
@@ -409,7 +409,7 @@ func (p *Pollard) undoDels(dels []uint64, delHashes []Hash) error {
 
 	pnps := make([]nodeAndPos, len(dels))
 	for i := range dels {
-		pn := &polNode{data: delHashes[i], remember: p.full}
+		pn := &polNode{data: delHashes[i], remember: p.Full}
 		pnps[i] = nodeAndPos{pn, dels[i]}
 
 		p.NodeMap[delHashes[i].mini()] = pn
@@ -454,7 +454,7 @@ func (p *Pollard) undoSingleDel(node *polNode, pos uint64) error {
 	}
 
 	pHash := calculateParentHash(pos, node, sibling)
-	parent := &polNode{data: pHash, remember: p.full}
+	parent := &polNode{data: pHash, remember: p.Full}
 
 	// If the original parent of the deleted node is not a root.
 	if sibling.aunt != nil {
