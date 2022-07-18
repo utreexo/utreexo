@@ -75,7 +75,7 @@ func TestCalculatePosition(t *testing.T) {
 		}
 
 		for hash, pos := range test.expected {
-			node, found := p.nodeMap[hash.mini()]
+			node, found := p.NodeMap[hash.mini()]
 			if !found {
 				err := fmt.Errorf("TestCalculatePosition error: "+
 					"expected node with hash of %s not found",

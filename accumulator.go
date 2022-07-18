@@ -11,11 +11,11 @@ import (
 // Pollard is a representation of the utreexo forest using a collection of
 // binary trees. It may or may not contain the entire set.
 type Pollard struct {
-	// nodeMap maps hashes to polNodes. Used during proving individual elements
+	// NodeMap maps hashes to polNodes. Used during proving individual elements
 	// in the accumulator.
-	nodeMap map[miniHash]*polNode
+	NodeMap map[miniHash]*polNode
 
-	// roots are the roots of each tree in the forest.
+	// Roots are the roots of each tree in the forest.
 	//
 	// NOTE: Since roots don't have nieces, they point to children.
 	// In the below tree, 06 is the root and it points to its children,
@@ -27,26 +27,26 @@ type Pollard struct {
 	// 04      05
 	// |---\   |---\
 	// 00  01  02  03
-	roots []*polNode
+	Roots []*polNode
 
-	// numLeaves is the number of all leaves that were ever added to the accumulator.
-	numLeaves uint64
+	// NumLeaves is the number of all leaves that were ever added to the accumulator.
+	NumLeaves uint64
 
-	// numDels is the number of all elements that were deleted from the accumulator.
-	numDels uint64
+	// NumDels is the number of all elements that were deleted from the accumulator.
+	NumDels uint64
 
-	// full indicates that this pollard will keep all the leaves in the accumulator.
-	// Only Pollards that have the full value set to true will be able to prove all
+	// Full indicates that this pollard will keep all the leaves in the accumulator.
+	// Only Pollards that have the Full value set to true will be able to prove all
 	// the elements.
-	full bool
+	Full bool
 }
 
 // NewAccumulator returns a initialized accumulator. To enable the generating proofs
-// for all elements, set full to true.
+// for all elements, set Full to true.
 func NewAccumulator(full bool) Pollard {
 	var p Pollard
-	p.nodeMap = make(map[miniHash]*polNode)
-	p.full = full
+	p.NodeMap = make(map[miniHash]*polNode)
+	p.Full = full
 
 	return p
 }
@@ -69,7 +69,7 @@ func (p *Pollard) Modify(adds []Leaf, delHashes []Hash, origDels []uint64) error
 	if err != nil {
 		return err
 	}
-	p.numDels += uint64(delCount)
+	p.NumDels += uint64(delCount)
 
 	p.add(adds)
 
@@ -79,43 +79,43 @@ func (p *Pollard) Modify(adds []Leaf, delHashes []Hash, origDels []uint64) error
 // add adds all the passed in leaves to the accumulator.
 func (p *Pollard) add(adds []Leaf) {
 	for _, add := range adds {
-		// Create a node from the hash. If the pollard is full, then remember
+		// Create a node from the hash. If the pollard is Full, then remember
 		// every node.
 		node := &polNode{data: add.Hash, remember: add.Remember}
-		if p.full {
+		if p.Full {
 			node.remember = true
 		}
 
 		// Add the hash to the map if this node is supposed to be remembered.
 		if node.remember {
-			p.nodeMap[add.mini()] = node
+			p.NodeMap[add.mini()] = node
 		}
 
 		newRoot := p.calculateNewRoot(node)
-		p.roots = append(p.roots, newRoot)
+		p.Roots = append(p.Roots, newRoot)
 
 		// Increment as we added a leaf.
-		p.numLeaves++
+		p.NumLeaves++
 	}
 }
 
 // calculateNewRoot adds the node to the accumulator and calculates the new root.
 func (p *Pollard) calculateNewRoot(node *polNode) *polNode {
 	// We can tell where the roots are by looking at the binary representation
-	// of the numLeaves. Wherever there's a 1, there's a root.
+	// of the NumLeaves. Wherever there's a 1, there's a root.
 	//
-	// numLeaves of 8 will be '1000' in binary, so there will be one root at
-	// row 3. numLeaves of 3 will be '11' in binary, so there's two roots. One at
+	// NumLeaves of 8 will be '1000' in binary, so there will be one root at
+	// row 3. NumLeaves of 3 will be '11' in binary, so there's two roots. One at
 	// row 0 and one at row 1.
 	//
 	// In this loop below, we're looking for these roots by checking if there's
 	// a '1'. If there is a '1', we'll hash the root being added with that root
 	// until we hit a '0'.
-	for h := uint8(0); (p.numLeaves>>h)&1 == 1; h++ {
+	for h := uint8(0); (p.NumLeaves>>h)&1 == 1; h++ {
 		// Grab and pop off the root that will become a node.
 		// NOTE Explicitly not niling out the polNode for GC as we still need it.
-		root := p.roots[len(p.roots)-1]
-		p.roots = p.roots[:len(p.roots)-1]
+		root := p.Roots[len(p.Roots)-1]
+		p.Roots = p.Roots[:len(p.Roots)-1]
 
 		// If the root that we're gonna hash with is empty, move the current
 		// node up to the position of the parent.
@@ -148,7 +148,7 @@ func (p *Pollard) calculateNewRoot(node *polNode) *polNode {
 		nHash := parentHash(root.data, node.data)
 
 		newRoot := &polNode{data: nHash, lNiece: root, rNiece: node}
-		if p.full {
+		if p.Full {
 			newRoot.remember = true
 		}
 
@@ -165,13 +165,13 @@ func (p *Pollard) calculateNewRoot(node *polNode) *polNode {
 func (p *Pollard) remove(dels []uint64) error {
 	sort.Slice(dels, func(a, b int) bool { return dels[a] < dels[b] })
 
-	totalRows := treeRows(p.numLeaves)
+	totalRows := treeRows(p.NumLeaves)
 	dels = deTwin(dels, totalRows)
 
 	for _, del := range dels {
 		// If a root is being deleted, then we mark it and all the leaves below
 		// it to be deleted.
-		if isRootPosition(del, p.numLeaves, totalRows) {
+		if isRootPosition(del, p.NumLeaves, totalRows) {
 			err := p.deleteRoot(del)
 			if err != nil {
 				return err
@@ -190,28 +190,28 @@ func (p *Pollard) remove(dels []uint64) error {
 // delete root removes all the pointers to and from this root and places an
 // empty hash at this root.
 func (p *Pollard) deleteRoot(del uint64) error {
-	tree, _, _, err := detectOffset(del, p.numLeaves)
+	tree, _, _, err := detectOffset(del, p.NumLeaves)
 	if err != nil {
 		return err
 	}
-	if tree > uint8(len(p.roots)-1) {
+	if tree > uint8(len(p.Roots)-1) {
 		return fmt.Errorf("getNode error: couldn't fetch %d, "+
 			"calculated root index of %d but only have %d roots",
-			del, tree, len(p.roots))
+			del, tree, len(p.Roots))
 	}
 
 	// Delete from map.
-	delete(p.nodeMap, p.roots[tree].data.mini())
+	delete(p.NodeMap, p.Roots[tree].data.mini())
 
-	if p.roots[tree].lNiece != nil {
-		p.roots[tree].lNiece.aunt = nil
+	if p.Roots[tree].lNiece != nil {
+		p.Roots[tree].lNiece.aunt = nil
 	}
-	if p.roots[tree].rNiece != nil {
-		p.roots[tree].rNiece.aunt = nil
+	if p.Roots[tree].rNiece != nil {
+		p.Roots[tree].rNiece.aunt = nil
 	}
-	p.roots[tree].chop()
-	p.roots[tree].aunt = nil
-	p.roots[tree].data = empty
+	p.Roots[tree].chop()
+	p.Roots[tree].aunt = nil
+	p.Roots[tree].data = empty
 
 	return nil
 }
@@ -254,21 +254,21 @@ func (p *Pollard) deleteSingle(del uint64) error {
 		delNode(fromNode)
 
 		// If the node was a leaf, update the map to point to the root.
-		_, found := p.nodeMap[toNode.data.mini()]
+		_, found := p.NodeMap[toNode.data.mini()]
 		if found {
-			p.nodeMap[toNode.data.mini()] = toNode
+			p.NodeMap[toNode.data.mini()] = toNode
 		}
 	}
 
 	// Delete the node from the map.
-	delete(p.nodeMap, fromNodeSib.data.mini())
+	delete(p.NodeMap, fromNodeSib.data.mini())
 	delNode(fromNodeSib)
 
 	// If to position is a root, there's no parent hash to be calculated so
 	// return early.
-	totalRows := treeRows(p.numLeaves)
+	totalRows := treeRows(p.NumLeaves)
 	to := parent(del, totalRows)
-	if isRootPosition(to, p.numLeaves, totalRows) {
+	if isRootPosition(to, p.NumLeaves, totalRows) {
 		toNode.aunt = nil
 		return nil
 	}
@@ -301,7 +301,7 @@ func (p *Pollard) deleteSingle(del uint64) error {
 // deleteFromMap deletes the hashes passed in from the node map.
 func (p *Pollard) deleteFromMap(delHashes []Hash) {
 	for _, del := range delHashes {
-		delete(p.nodeMap, del.mini())
+		delete(p.NodeMap, del.mini())
 	}
 }
 
@@ -325,20 +325,20 @@ func (p *Pollard) Undo(numAdds uint64, dels []uint64, delHashes []Hash, prevRoot
 
 // undoEmptyRoots places empty roots back in after undoing the additions.
 func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []Hash) error {
-	if len(p.roots) >= int(numRoots(p.numLeaves)) {
+	if len(p.Roots) >= int(numRoots(p.NumLeaves)) {
 		return nil
 	}
 
 	// Add empty roots that was present in the previous roots.
 	for i, prevRoot := range prevRoots {
 		if prevRoot == empty {
-			if i >= len(p.roots) {
-				p.roots = append(p.roots, &polNode{remember: p.full})
+			if i >= len(p.Roots) {
+				p.Roots = append(p.Roots, &polNode{remember: p.Full})
 			}
-			if p.roots[i].data != empty {
-				p.roots = append(p.roots, nil)
-				copy(p.roots[i+1:], p.roots[i:])
-				p.roots[i] = &polNode{data: prevRoot, remember: p.full}
+			if p.Roots[i].data != empty {
+				p.Roots = append(p.Roots, nil)
+				copy(p.Roots[i+1:], p.Roots[i:])
+				p.Roots[i] = &polNode{data: prevRoot, remember: p.Full}
 			}
 		}
 	}
@@ -348,29 +348,29 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []
 
 	// Sort before detwining.
 	sort.Slice(dels, func(a, b int) bool { return dels[a] < dels[b] })
-	dels = deTwin(dels, treeRows(p.numLeaves))
+	dels = deTwin(dels, treeRows(p.NumLeaves))
 
 	// Add empty roots that were destroyed during the additions. Need to do this
 	// separate step before the deletions are undo-ed.
 	for i := len(dels) - 1; i >= 0; i-- {
 		del := dels[i]
-		if isRootPosition(del, p.numLeaves, treeRows(p.numLeaves)) {
-			tree, _, _, err := detectOffset(del, p.numLeaves)
+		if isRootPosition(del, p.NumLeaves, treeRows(p.NumLeaves)) {
+			tree, _, _, err := detectOffset(del, p.NumLeaves)
 			if err != nil {
 				return err
 			}
-			if int(tree) == len(p.roots) {
-				p.roots = append(p.roots, &polNode{data: empty, remember: p.full})
+			if int(tree) == len(p.Roots) {
+				p.Roots = append(p.Roots, &polNode{data: empty, remember: p.Full})
 			}
-			if int(tree) > len(p.roots) {
+			if int(tree) > len(p.Roots) {
 				return fmt.Errorf("undoEmptyRoots error: calculated root index of %d "+
 					"for position %d but only have %d roots",
-					tree, del, len(p.roots))
+					tree, del, len(p.Roots))
 			}
-			if p.roots[tree].data != empty {
-				p.roots = append(p.roots, nil)
-				copy(p.roots[tree+1:], p.roots[tree:])
-				p.roots[tree] = &polNode{data: empty, remember: p.full}
+			if p.Roots[tree].data != empty {
+				p.Roots = append(p.Roots, nil)
+				copy(p.Roots[tree+1:], p.Roots[tree:])
+				p.Roots[tree] = &polNode{data: empty, remember: p.Full}
 			}
 		}
 	}
@@ -380,25 +380,25 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []
 
 // undoSingleAdd undoes one leaf that was added to the accumulator.
 func (p *Pollard) undoSingleAdd() {
-	lowestRootRow := getLowestRoot(p.numLeaves)
+	lowestRootRow := getLowestRoot(p.NumLeaves)
 	for row := int(lowestRootRow); row >= 0; row-- {
-		lowestRoot := p.roots[len(p.roots)-1]
-		p.roots = p.roots[:len(p.roots)-1]
+		lowestRoot := p.Roots[len(p.Roots)-1]
+		p.Roots = p.Roots[:len(p.Roots)-1]
 
 		lNiece, rNiece := lowestRoot.lNiece, lowestRoot.rNiece
 
 		if lNiece != nil {
 			swapNieces(lNiece, rNiece)
 			lNiece.aunt, rNiece.aunt = nil, nil
-			p.roots = append(p.roots, lNiece, rNiece)
+			p.Roots = append(p.Roots, lNiece, rNiece)
 		} else {
 			row = -1
 		}
 
-		delete(p.nodeMap, lowestRoot.data.mini())
+		delete(p.NodeMap, lowestRoot.data.mini())
 		delNode(lowestRoot)
 	}
-	p.numLeaves--
+	p.NumLeaves--
 }
 
 func (p *Pollard) undoDels(dels []uint64, delHashes []Hash) error {
@@ -409,26 +409,26 @@ func (p *Pollard) undoDels(dels []uint64, delHashes []Hash) error {
 
 	pnps := make([]nodeAndPos, len(dels))
 	for i := range dels {
-		pn := &polNode{data: delHashes[i], remember: p.full}
+		pn := &polNode{data: delHashes[i], remember: p.Full}
 		pnps[i] = nodeAndPos{pn, dels[i]}
 
-		p.nodeMap[delHashes[i].mini()] = pn
+		p.NodeMap[delHashes[i].mini()] = pn
 	}
 	sort.Slice(pnps, func(a, b int) bool { return pnps[a].pos < pnps[b].pos })
 
-	totalRows := treeRows(p.numLeaves)
+	totalRows := treeRows(p.NumLeaves)
 	pnps = deTwinPolNode(pnps, totalRows)
 
 	// Go through all the de-twined nodes and all from the highest position first.
 	for i := len(pnps) - 1; i >= 0; i-- {
 		pnp := pnps[i]
 
-		if isRootPosition(pnp.pos, p.numLeaves, treeRows(p.numLeaves)) {
-			tree, _, _, err := detectOffset(pnp.pos, p.numLeaves)
+		if isRootPosition(pnp.pos, p.NumLeaves, treeRows(p.NumLeaves)) {
+			tree, _, _, err := detectOffset(pnp.pos, p.NumLeaves)
 			if err != nil {
 				return err
 			}
-			p.roots[tree] = pnp.node
+			p.Roots[tree] = pnp.node
 			continue
 		} else {
 			err := p.undoSingleDel(pnp.node, pnp.pos)
@@ -438,13 +438,13 @@ func (p *Pollard) undoDels(dels []uint64, delHashes []Hash) error {
 		}
 	}
 
-	p.numDels -= uint64(len(delHashes))
+	p.NumDels -= uint64(len(delHashes))
 
 	return nil
 }
 
 func (p *Pollard) undoSingleDel(node *polNode, pos uint64) error {
-	totalRows := treeRows(p.numLeaves)
+	totalRows := treeRows(p.NumLeaves)
 
 	siblingPos := parent(pos, totalRows)
 	sibling, aunt, _, err := p.getNode(siblingPos)
@@ -454,7 +454,7 @@ func (p *Pollard) undoSingleDel(node *polNode, pos uint64) error {
 	}
 
 	pHash := calculateParentHash(pos, node, sibling)
-	parent := &polNode{data: pHash, remember: p.full}
+	parent := &polNode{data: pHash, remember: p.Full}
 
 	// If the original parent of the deleted node is not a root.
 	if sibling.aunt != nil {
@@ -495,9 +495,9 @@ func (p *Pollard) undoSingleDel(node *polNode, pos uint64) error {
 
 		swapNieces(parent.lNiece, parent.rNiece)
 
-		_, found := p.nodeMap[sibling.data.mini()]
+		_, found := p.NodeMap[sibling.data.mini()]
 		if found {
-			p.nodeMap[sibling.data.mini()] = sibling
+			p.NodeMap[sibling.data.mini()] = sibling
 		}
 
 		return nil
@@ -513,9 +513,9 @@ func (p *Pollard) undoSingleDel(node *polNode, pos uint64) error {
 
 // GetRoots returns the hashes of all the roots.
 func (p *Pollard) GetRoots() []Hash {
-	roots := make([]Hash, 0, len(p.roots))
+	roots := make([]Hash, 0, len(p.Roots))
 
-	for _, root := range p.roots {
+	for _, root := range p.Roots {
 		roots = append(roots, root.data)
 	}
 
@@ -525,7 +525,7 @@ func (p *Pollard) GetRoots() []Hash {
 // GetTotalCount returns the count of all the polNodes in the pollard.
 func (p *Pollard) GetTotalCount() int64 {
 	var size int64
-	for _, root := range p.roots {
+	for _, root := range p.Roots {
 		size += getCount(root)
 	}
 
@@ -535,7 +535,7 @@ func (p *Pollard) GetTotalCount() int64 {
 // SerializeSize returns how many bytes it'd take to serialize the pollard.
 func (p *Pollard) SerializeSize() int {
 	count := p.GetTotalCount()
-	// 32 byte hashes + 8 byte numLeaves + 8 byte numDels +
+	// 32 byte hashes + 8 byte NumLeaves + 8 byte NumDels +
 	// 1 byte leaf-ness + 1 byte niece-ness
 	return int((count * 32) + 16 + (count * 2))
 }
@@ -546,7 +546,7 @@ func (p *Pollard) WriteTo(w io.Writer) (int64, error) {
 
 	// First write the num leaves.
 	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], p.numLeaves)
+	binary.LittleEndian.PutUint64(buf[:], p.NumLeaves)
 	bytes, err := w.Write(buf[:])
 	if err != nil {
 		return totalBytes, err
@@ -554,7 +554,7 @@ func (p *Pollard) WriteTo(w io.Writer) (int64, error) {
 	totalBytes += int64(bytes)
 
 	// Then write the number of dels.
-	binary.LittleEndian.PutUint64(buf[:], p.numDels)
+	binary.LittleEndian.PutUint64(buf[:], p.NumDels)
 	bytes, err = w.Write(buf[:])
 	if err != nil {
 		return totalBytes, err
@@ -562,7 +562,7 @@ func (p *Pollard) WriteTo(w io.Writer) (int64, error) {
 	totalBytes += int64(bytes)
 
 	// Then write the entire pollard to the writer.
-	for _, root := range p.roots {
+	for _, root := range p.Roots {
 		bytes, err := writeOne(root, w)
 		if err != nil {
 			return totalBytes, err
@@ -649,22 +649,22 @@ func RestorePollardFrom(r io.Reader) (int64, *Pollard, error) {
 		return totalBytes, nil, err
 	}
 	totalBytes += int64(readBytes)
-	p.numLeaves = binary.LittleEndian.Uint64(buf[:])
+	p.NumLeaves = binary.LittleEndian.Uint64(buf[:])
 
-	// Read numDels.
+	// Read NumDels.
 	readBytes, err = r.Read(buf[:])
 	if err != nil {
 		return totalBytes, nil, err
 	}
 	totalBytes += int64(readBytes)
-	p.numDels = binary.LittleEndian.Uint64(buf[:])
+	p.NumDels = binary.LittleEndian.Uint64(buf[:])
 
 	// For each of the roots that we have, initialize the polnodes
 	// with readOne.
-	p.roots = make([]*polNode, numRoots(p.numLeaves))
-	for i := range p.roots {
-		p.roots[i] = new(polNode)
-		readBytes, err := p.readOne(p.roots[i], r)
+	p.Roots = make([]*polNode, numRoots(p.NumLeaves))
+	for i := range p.Roots {
+		p.Roots[i] = new(polNode)
+		readBytes, err := p.readOne(p.Roots[i], r)
 		if err != nil {
 			return totalBytes, nil, err
 		}
@@ -673,9 +673,9 @@ func RestorePollardFrom(r io.Reader) (int64, *Pollard, error) {
 	}
 
 	// Sanity check.
-	if len(p.nodeMap) != int(p.numLeaves-p.numDels) {
+	if len(p.NodeMap) != int(p.NumLeaves-p.NumDels) {
 		err = fmt.Errorf("RestorePollard fail. Expect a total or %d "+
-			"leaves but only have %d leaves in the map", p.numLeaves-p.numDels, len(p.nodeMap))
+			"leaves but only have %d leaves in the map", p.NumLeaves-p.NumDels, len(p.NodeMap))
 		return totalBytes, nil, err
 	}
 
@@ -706,7 +706,7 @@ func (p *Pollard) readOne(n *polNode, r io.Reader) (int64, error) {
 	totalBytes += int64(readBytes)
 	if buf[0] == 1 {
 		if n.data != empty {
-			p.nodeMap[n.data.mini()] = n
+			p.NodeMap[n.data.mini()] = n
 		}
 	}
 

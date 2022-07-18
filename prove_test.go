@@ -67,14 +67,14 @@ func calcDelHashAndProof(p *Pollard, proof Proof, missingPositions, desiredPosit
 	}
 
 	// Attach positions to the proof hashes.
-	proofPos, _ := proofPositions(proof.Targets, p.numLeaves, treeRows(p.numLeaves))
+	proofPos, _ := proofPositions(proof.Targets, p.NumLeaves, treeRows(p.NumLeaves))
 	currentHashes := toHashAndPos(proofPos, proof.Proof)
 	// Append the needed hashes to the proof.
 	currentHashes = append(currentHashes, neededHashes...)
 
 	// As new targets are added, we're able to calulate positions that we couldn't before. These positions
 	// may already exist as proofs. Remove these as duplicates are not expected during proof verification.
-	_, calculateables := proofPositions(desiredPositions, p.numLeaves, treeRows(p.numLeaves))
+	_, calculateables := proofPositions(desiredPositions, p.NumLeaves, treeRows(p.NumLeaves))
 	for _, cal := range calculateables {
 		idx := slices.IndexFunc(currentHashes, func(hnp hashAndPos) bool { return hnp.pos == cal })
 		if idx != -1 {
@@ -147,7 +147,7 @@ func FuzzGetMissingPositions(f *testing.F) {
 
 		// Create the starting off pollard.
 		p := NewAccumulator(true)
-		leaves, delHashes, delPos := getAddsAndDels(uint32(p.numLeaves), startLeaves, delCount)
+		leaves, delHashes, delPos := getAddsAndDels(uint32(p.NumLeaves), startLeaves, delCount)
 		err := p.Modify(leaves, nil, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -159,7 +159,7 @@ func FuzzGetMissingPositions(f *testing.F) {
 
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
-		for _, node := range p.nodeMap {
+		for _, node := range p.NodeMap {
 			currentLeaves = append(currentLeaves,
 				hashAndPos{node.data, p.calculatePosition(node)})
 		}
@@ -213,7 +213,7 @@ func FuzzGetMissingPositions(f *testing.F) {
 		}
 
 		// Call GetMissingPositions and get all the positions that we need to prove desiredPositions.
-		missingPositions := GetMissingPositions(p.numLeaves, proof.Targets, desiredPositions)
+		missingPositions := GetMissingPositions(p.NumLeaves, proof.Targets, desiredPositions)
 
 		// Create a new proof from missingPositions and verify to make sure it's correct.
 		newProof, newDelHashes, err := calcDelHashAndProof(&p, proof, missingPositions, desiredPositions, leftOutLeaves, leafSubset)
@@ -268,7 +268,7 @@ func FuzzRemoveTargets(f *testing.F) {
 
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
-		for _, node := range p.nodeMap {
+		for _, node := range p.NodeMap {
 			currentLeaves = append(currentLeaves,
 				hashAndPos{node.data, p.calculatePosition(node)})
 		}
@@ -305,7 +305,7 @@ func FuzzRemoveTargets(f *testing.F) {
 		}
 
 		// Delete the targets from the proof and verify the modified proof.
-		newDelHashes, newproof := RemoveTargets(p.numLeaves, leafHashes, proof, positions)
+		newDelHashes, newproof := RemoveTargets(p.NumLeaves, leafHashes, proof, positions)
 
 		err = p.Verify(newDelHashes, newproof)
 		if err != nil {
@@ -357,7 +357,7 @@ func FuzzAddProof(f *testing.F) {
 
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
-		for _, node := range p.nodeMap {
+		for _, node := range p.NodeMap {
 			currentLeaves = append(currentLeaves,
 				hashAndPos{node.data, p.calculatePosition(node)})
 		}
@@ -398,7 +398,7 @@ func FuzzAddProof(f *testing.F) {
 		}
 
 		// Add the proof.
-		leafHashesC, proofC := AddProof(proofA, proofB, leafHashesA, leafHashesB, p.numLeaves)
+		leafHashesC, proofC := AddProof(proofA, proofB, leafHashesA, leafHashesB, p.NumLeaves)
 
 		// These are the targets that we want to prove.
 		sortedProofATargets := copySortedFunc(proofA.Targets, uint64Less)
@@ -465,7 +465,7 @@ func FuzzProofAfterDeletion(f *testing.F) {
 
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
-		for _, node := range p.nodeMap {
+		for _, node := range p.NodeMap {
 			currentLeaves = append(currentLeaves,
 				hashAndPos{node.data, p.calculatePosition(node)})
 		}
@@ -501,9 +501,9 @@ func FuzzProofAfterDeletion(f *testing.F) {
 		}
 
 		// Delete the positions from the cached proof.
-		leafHashes, proof = proofAfterPartialDeletion(p.numLeaves, proof, leafHashes, positions)
+		leafHashes, proof = proofAfterPartialDeletion(p.NumLeaves, proof, leafHashes, positions)
 
-		proofPos, _ := proofPositions(proof.Targets, p.numLeaves, treeRows(p.numLeaves))
+		proofPos, _ := proofPositions(proof.Targets, p.NumLeaves, treeRows(p.NumLeaves))
 		if len(proofPos) != len(proof.Proof) {
 			t.Fatalf("FuzzProofAfterDeletion Fail. Have %v proofs but want %v.\nPollard:\n%s\n",
 				printHashes(proof.Proof), proofPos, p.String())
@@ -574,7 +574,7 @@ func FuzzUpdateProofRemove(f *testing.F) {
 
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
-		for _, node := range p.nodeMap {
+		for _, node := range p.NodeMap {
 			currentLeaves = append(currentLeaves,
 				hashAndPos{node.data, p.calculatePosition(node)})
 		}
@@ -635,7 +635,7 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		cachedTargetsAndHash = subtractSortedSlice(cachedTargetsAndHash, blockDelTargetsAndHash, hashAndPosCmp)
 
 		// Update the cached proof with the block proof.
-		leafHashes, cachedProof = UpdateProofRemove(cachedProof, blockProof, leafHashes, blockDelHashes, p.numLeaves)
+		leafHashes, cachedProof = UpdateProofRemove(cachedProof, blockProof, leafHashes, blockDelHashes, p.NumLeaves)
 
 		// Modify the pollard.
 		err = p.Modify(nil, blockDelHashes, delPositions)
@@ -669,7 +669,7 @@ func FuzzUpdateProofRemove(f *testing.F) {
 				printHashes(expectedHashes), printHashes(leafHashes))
 		}
 
-		cachedProofPos, _ := proofPositions(cachedProof.Targets, p.numLeaves, treeRows(p.numLeaves))
+		cachedProofPos, _ := proofPositions(cachedProof.Targets, p.NumLeaves, treeRows(p.NumLeaves))
 		if len(cachedProofPos) != len(cachedProof.Proof) {
 			t.Fatalf("FuzzUpdateProofRemove Fail. CachedProof hashes:\n%v\nbut want these positions:\n%v.\nPollard:\n%s\n",
 				printHashes(cachedProof.Proof), cachedProofPos, p.String())
@@ -726,7 +726,7 @@ func FuzzUpdateProofAdd(f *testing.F) {
 
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := make([]hashAndPos, 0, len(leaves))
-		for _, node := range p.nodeMap {
+		for _, node := range p.NodeMap {
 			currentLeaves = append(currentLeaves,
 				hashAndPos{node.data, p.calculatePosition(node)})
 		}
@@ -750,19 +750,19 @@ func FuzzUpdateProofAdd(f *testing.F) {
 			t.Fatal(err)
 		}
 
-		addLeaves, _, _ := getAddsAndDels(uint32(p.numLeaves), addCount, 0)
+		addLeaves, _, _ := getAddsAndDels(uint32(p.NumLeaves), addCount, 0)
 
 		// Update the cached proof with the block proof.
 		addHashes := make([]Hash, len(addLeaves))
 		for i, leaf := range addLeaves {
 			addHashes[i] = leaf.Hash
 		}
-		rootHashes := make([]Hash, len(p.roots))
-		for i, root := range p.roots {
+		rootHashes := make([]Hash, len(p.Roots))
+		for i, root := range p.Roots {
 			rootHashes[i] = root.data
 		}
 		proofBeforeStr := cachedProof.String()
-		cachedProof = UpdateProofAdd(cachedProof, addHashes, Stump{rootHashes, p.numLeaves})
+		cachedProof = UpdateProofAdd(cachedProof, addHashes, Stump{rootHashes, p.NumLeaves})
 
 		beforePollardStr := p.String()
 		// Modify the pollard.
@@ -843,15 +843,15 @@ func FuzzModifyProofChain(f *testing.F) {
 
 			// Update the proof with the deletions and additions that
 			// happen in this block.
-			rootHashes := make([]Hash, len(p.roots))
+			rootHashes := make([]Hash, len(p.Roots))
 			for i := range rootHashes {
-				rootHashes[i] = p.roots[i].data
+				rootHashes[i] = p.Roots[i].data
 			}
 			addHashes := make([]Hash, len(adds))
 			for i := range addHashes {
 				addHashes[i] = adds[i].Hash
 			}
-			stump := Stump{rootHashes, p.numLeaves}
+			stump := Stump{rootHashes, p.NumLeaves}
 			cachedHashes, cachedProof, err = UpdateProof(
 				cachedProof, blockProof, cachedHashes, delHashes, addHashes, stump)
 			if err != nil {
@@ -924,7 +924,7 @@ func FuzzModifyProofChain(f *testing.F) {
 
 			// Add the new UTXOs to the proof.
 			cachedHashes, cachedProof = AddProof(cachedProof, newProofToCache,
-				cachedHashes, newHashesToCache, p.numLeaves)
+				cachedHashes, newHashesToCache, p.NumLeaves)
 			// Sanity check that the new cached proof verifies.
 			err = p.Verify(cachedHashes, cachedProof)
 			if err != nil {
@@ -954,10 +954,10 @@ func FuzzModifyProofChain(f *testing.F) {
 				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v",
 					b, err)
 			}
-			if uint64(len(p.nodeMap)) != p.numLeaves-p.numDels {
+			if uint64(len(p.NodeMap)) != p.NumLeaves-p.NumDels {
 				err := fmt.Errorf("FuzzModifyProof fail at block %d: "+
 					"have %d leaves in map but only %d leaves in total",
-					b, len(p.nodeMap), p.numLeaves-p.numDels)
+					b, len(p.NodeMap), p.NumLeaves-p.NumDels)
 				t.Fatal(err)
 			}
 		}
