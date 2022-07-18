@@ -579,11 +579,11 @@ func proofPositions(targets []uint64, numLeaves uint64, forestRows uint8) ([]uin
 
 // String prints out the whole thing. Only viable for forest that have height of 5 and less.
 func (p *Pollard) String() string {
-	fh := treeRows(p.numLeaves)
+	fh := treeRows(p.NumLeaves)
 
 	// The accumulator should be less than 6 rows.
 	if fh > 6 {
-		s := fmt.Sprintf("Can't print %d leaves. roots:\n", p.numLeaves)
+		s := fmt.Sprintf("Can't print %d leaves. roots:\n", p.NumLeaves)
 		roots := p.GetRoots()
 		for i, r := range roots {
 			s += fmt.Sprintf("\t%d %x\n", i, r.mini())
@@ -598,7 +598,7 @@ func (p *Pollard) String() string {
 
 		for j := uint8(0); j < rowlen; j++ {
 			var valstring string
-			max, err := maxPositionAtRow(h, fh, p.numLeaves)
+			max, err := maxPositionAtRow(h, fh, p.NumLeaves)
 			ok := max >= uint64(pos)
 			if ok && err == nil {
 				val := p.getHash(uint64(pos))
@@ -675,10 +675,10 @@ func getRootPosition(position uint64, numLeaves uint64, forestRows uint8) (uint6
 // AllSubTreesToString returns a string of all the individual subtrees in the accumulator.
 func (p *Pollard) AllSubTreesToString() string {
 	str := ""
-	totalRows := treeRows(p.numLeaves)
+	totalRows := treeRows(p.NumLeaves)
 	for h := uint8(0); h < totalRows; h++ {
-		rootPos := rootPosition(p.numLeaves, h, totalRows)
-		if isRootPosition(rootPos, p.numLeaves, totalRows) {
+		rootPos := rootPosition(p.NumLeaves, h, totalRows)
+		if isRootPosition(rootPos, p.NumLeaves, totalRows) {
 			str += fmt.Sprintf(p.SubTreeToString(rootPos, false))
 			str += "\n"
 		}
@@ -689,11 +689,11 @@ func (p *Pollard) AllSubTreesToString() string {
 
 // SubTreeToString returns a string of the subtree that the position is in.
 func (p *Pollard) SubTreeToString(position uint64, inHex bool) string {
-	rootPosition, err := getRootPosition(position, p.numLeaves, treeRows(p.numLeaves))
+	rootPosition, err := getRootPosition(position, p.NumLeaves, treeRows(p.NumLeaves))
 	if err != nil {
 		return fmt.Sprintf("SubTreeToString error: %v", err.Error())
 	}
-	subTreeRow := detectRow(rootPosition, treeRows(p.numLeaves))
+	subTreeRow := detectRow(rootPosition, treeRows(p.NumLeaves))
 
 	if subTreeRow > 7 {
 		s := fmt.Sprintf("Can't print subtree with rows %d. roots:\n", subTreeRow)
@@ -748,7 +748,7 @@ func (p *Pollard) SubTreeToString(position uint64, inHex bool) string {
 				}
 			}
 
-			leftChild := leftChild(position, treeRows(p.numLeaves))
+			leftChild := leftChild(position, treeRows(p.NumLeaves))
 			rightChild := rightSib(leftChild)
 			nextPositions = append(nextPositions, leftChild)
 			nextPositions = append(nextPositions, rightChild)

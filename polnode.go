@@ -116,11 +116,11 @@ func (p *Pollard) getNode(pos uint64) (n, sibling, parent *polNode, err error) {
 	// Tree is the root the position is located under.
 	// branchLen denotes how far down the root the position is.
 	// bits tell us if we should go down to the left child or the right child.
-	if pos >= maxPosition(treeRows(p.numLeaves)) {
+	if pos >= maxPosition(treeRows(p.NumLeaves)) {
 		return nil, nil, nil,
-			fmt.Errorf("Position %d does not exist in tree of %d leaves", pos, p.numLeaves)
+			fmt.Errorf("Position %d does not exist in tree of %d leaves", pos, p.NumLeaves)
 	}
-	tree, branchLen, bits, err := detectOffset(pos, p.numLeaves)
+	tree, branchLen, bits, err := detectOffset(pos, p.NumLeaves)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -195,7 +195,7 @@ func (p *Pollard) calculatePosition(node *polNode) uint64 {
 		}
 		rowsToTop++
 	}
-	forestRows := treeRows(p.numLeaves)
+	forestRows := treeRows(p.NumLeaves)
 
 	// Calculate which row the root is on.
 	rootRow := -1
@@ -205,9 +205,9 @@ func (p *Pollard) calculatePosition(node *polNode) uint64 {
 		// Because every root represents a perfect tree of every leaf
 		// we ever added, each root position will be a power of 2.
 		//
-		// Go through the bits of numLeaves. Every bit that is on
+		// Go through the bits of NumLeaves. Every bit that is on
 		// represents a root.
-		if (p.numLeaves>>h)&1 == 1 {
+		if (p.NumLeaves>>h)&1 == 1 {
 			// If we found the root, save the row to rootRow
 			// and return.
 			if p.Roots[rootIdx].data == polNode.data {
@@ -221,7 +221,7 @@ func (p *Pollard) calculatePosition(node *polNode) uint64 {
 	}
 
 	// Start from the root and work our way down the position that we want.
-	retPos := rootPosition(p.numLeaves, uint8(rootRow), forestRows)
+	retPos := rootPosition(p.NumLeaves, uint8(rootRow), forestRows)
 
 	for i := 0; i < rowsToTop; i++ {
 		isRight := uint64(1) << i

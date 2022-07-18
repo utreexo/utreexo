@@ -11,9 +11,9 @@ import (
 )
 
 func (p *Pollard) posMapSanity() error {
-	if uint64(len(p.NodeMap)) != p.numLeaves-p.numDels {
+	if uint64(len(p.NodeMap)) != p.NumLeaves-p.numDels {
 		err := fmt.Errorf("Have %d leaves in map but only %d leaves in total",
-			len(p.NodeMap), p.numLeaves-p.numDels)
+			len(p.NodeMap), p.NumLeaves-p.numDels)
 		return err
 	}
 
@@ -333,11 +333,11 @@ func (p *Pollard) checkHashes() error {
 // calculates its position. Returns an error if the position calculated does
 // not match the position used to fetch the node.
 func (p *Pollard) positionSanity() error {
-	totalRows := treeRows(p.numLeaves)
+	totalRows := treeRows(p.NumLeaves)
 
 	for row := uint8(0); row < totalRows; row++ {
 		pos := startPositionAtRow(row, totalRows)
-		maxPosAtRow, err := maxPositionAtRow(row, totalRows, p.numLeaves)
+		maxPosAtRow, err := maxPositionAtRow(row, totalRows, p.NumLeaves)
 		if err != nil {
 			return fmt.Errorf("positionSanity fail. Error %v", err)
 		}
@@ -471,7 +471,7 @@ func (s *simChain) NextBlock(numAdds uint32) ([]Leaf, []int32, []Hash) {
 // leaves to be deleted.
 //
 // NOTE if getAddsAndDels are called multiple times for the same pollard, pass in
-// p.numLeaves into getAddsAndDels after the pollard has been modified with the
+// p.NumLeaves into getAddsAndDels after the pollard has been modified with the
 // previous set of adds and deletions. The leaves genereated are not random and
 // are just the next leaf encoded to a 32 byte hash.
 func getAddsAndDels(currentLeaves, addCount, delCount uint32) ([]Leaf, []Hash, []uint64) {
@@ -564,7 +564,7 @@ func FuzzModify(f *testing.F) {
 		}
 
 		p := NewAccumulator(true)
-		leaves, delHashes, delTargets := getAddsAndDels(uint32(p.numLeaves), startLeaves, delCount)
+		leaves, delHashes, delTargets := getAddsAndDels(uint32(p.NumLeaves), startLeaves, delCount)
 		err := p.Modify(leaves, nil, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -572,7 +572,7 @@ func FuzzModify(f *testing.F) {
 		beforeStr := p.String()
 		beforeMap := nodeMapToString(p.NodeMap)
 
-		modifyLeaves, _, _ := getAddsAndDels(uint32(p.numLeaves), modifyAdds, 0)
+		modifyLeaves, _, _ := getAddsAndDels(uint32(p.NumLeaves), modifyAdds, 0)
 		err = p.Modify(modifyLeaves, delHashes, delTargets)
 		if err != nil {
 			t.Fatal(err)
@@ -681,10 +681,10 @@ func FuzzModifyChain(f *testing.F) {
 				t.Fatalf("FuzzModifyChain fail at block %d. Error: %v",
 					b, err)
 			}
-			if uint64(len(p.NodeMap)) != p.numLeaves-p.numDels {
+			if uint64(len(p.NodeMap)) != p.NumLeaves-p.numDels {
 				err := fmt.Errorf("FuzzModifyChain fail at block %d: "+
 					"have %d leaves in map but only %d leaves in total",
-					b, len(p.NodeMap), p.numLeaves-p.numDels)
+					b, len(p.NodeMap), p.NumLeaves-p.numDels)
 				t.Fatal(err)
 			}
 
@@ -729,7 +729,7 @@ func FuzzUndo(f *testing.F) {
 
 		// Create the starting off pollard.
 		p := NewAccumulator(true)
-		leaves, dels, _ := getAddsAndDels(uint32(p.numLeaves), uint32(startLeaves), uint32(delCount))
+		leaves, dels, _ := getAddsAndDels(uint32(p.NumLeaves), uint32(startLeaves), uint32(delCount))
 		err := p.Modify(leaves, nil, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -750,13 +750,13 @@ func FuzzUndo(f *testing.F) {
 			t.Fatal(err)
 		}
 
-		if p.numLeaves != 1 && len(bp.Targets) != len(dels) {
+		if p.NumLeaves != 1 && len(bp.Targets) != len(dels) {
 			err := fmt.Errorf("Have %d targets but %d target hashes",
 				len(bp.Targets), len(dels))
 			t.Fatal(err)
 		}
 
-		modifyLeaves, _, _ := getAddsAndDels(uint32(p.numLeaves), uint32(modifyAdds), 0)
+		modifyLeaves, _, _ := getAddsAndDels(uint32(p.NumLeaves), uint32(modifyAdds), 0)
 		err = p.Modify(modifyLeaves, dels, bp.Targets)
 		if err != nil {
 			t.Fatal(err)
@@ -806,7 +806,7 @@ func FuzzUndo(f *testing.F) {
 			t.Fatal(err)
 		}
 
-		if uint64(len(p.NodeMap)) != p.numLeaves-p.numDels {
+		if uint64(len(p.NodeMap)) != p.NumLeaves-p.numDels {
 			startHashes := make([]Hash, len(leaves))
 			for i, leaf := range leaves {
 				startHashes[i] = leaf.Hash
@@ -828,7 +828,7 @@ func FuzzUndo(f *testing.F) {
 				"\nnodemap before modify:\n %s"+
 				"\nnodemap after modify:\n %s"+
 				"\nnodemap after undo:\n %s",
-				len(p.NodeMap), p.numLeaves-p.numDels,
+				len(p.NodeMap), p.NumLeaves-p.numDels,
 				beforeStr,
 				afterStr,
 				undoStr,
@@ -957,17 +957,17 @@ func FuzzUndoChain(f *testing.F) {
 			for key, value := range p.NodeMap {
 				beforeMap[key] = *value
 			}
-			beforeLeaves := p.numLeaves
+			beforeLeaves := p.NumLeaves
 
 			err = p.Modify(adds, delHashes, bp.Targets)
 			if err != nil {
 				t.Fatalf("FuzzUndoChain fail at block %d. Error: %v", b, err)
 			}
 
-			if p.numLeaves-uint64(len(adds)) != beforeLeaves {
+			if p.NumLeaves-uint64(len(adds)) != beforeLeaves {
 				err := fmt.Errorf("FuzzUndoChain fail at block %d. "+
 					"Added %d leaves but have %d leaves after modify",
-					b, len(adds), p.numLeaves)
+					b, len(adds), p.NumLeaves)
 				t.Fatal(err)
 			}
 

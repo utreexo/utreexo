@@ -50,11 +50,11 @@ func (p *Proof) String() string {
 func (p *Pollard) Prove(hashes []Hash) (Proof, error) {
 	// No hashes to prove means that the proof is empty. An empty
 	// pollard also has an empty proof.
-	if len(hashes) == 0 || p.numLeaves == 0 {
+	if len(hashes) == 0 || p.NumLeaves == 0 {
 		return Proof{}, nil
 	}
 	// A Pollard with 1 leaf has no proof and only 1 target.
-	if p.numLeaves == 1 {
+	if p.NumLeaves == 1 {
 		return Proof{Targets: []uint64{0}}, nil
 	}
 
@@ -80,7 +80,7 @@ func (p *Pollard) Prove(hashes []Hash) (Proof, error) {
 	sort.Slice(sortedTargets, func(a, b int) bool { return sortedTargets[a] < sortedTargets[b] })
 
 	// Get the positions of all the hashes that are needed to prove the targets
-	proofPositions, _ := proofPositions(sortedTargets, p.numLeaves, treeRows(p.numLeaves))
+	proofPositions, _ := proofPositions(sortedTargets, p.NumLeaves, treeRows(p.NumLeaves))
 
 	// Fetch all the proofs from the accumulator.
 	proof.Proof = make([]Hash, len(proofPositions))
@@ -139,7 +139,7 @@ func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
 			len(proof.Targets), len(delHashes))
 	}
 
-	rootCandidates := calculateRoots(p.numLeaves, delHashes, proof)
+	rootCandidates := calculateRoots(p.NumLeaves, delHashes, proof)
 	if len(rootCandidates) == 0 {
 		return fmt.Errorf("Pollard.Verify fail. No roots calculated "+
 			"but have %d deletions", len(delHashes))
