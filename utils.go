@@ -875,6 +875,20 @@ func hashAndPosToString(hnps []hashAndPos) string {
 	return str
 }
 
+// polNodeAndPosToString turns a slice of polNode and pos into readable string.
+func polNodeAndPosToString(nodes []nodeAndPos) string {
+	str := ""
+	for i, node := range nodes {
+		str += fmt.Sprintf("pos:%d, node:%s", node.pos, node.node.String())
+
+		if i != len(nodes)-1 {
+			str += "\n"
+		}
+	}
+
+	return str
+}
+
 // uint64Cmp compares two uint64 values.
 func uint64Cmp(a, b uint64) int {
 	if a < b {
