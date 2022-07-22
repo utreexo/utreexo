@@ -358,12 +358,13 @@ func extractRowNode(toProve []nodeAndPos, forestRows, rowToExtract uint8) []node
 	return row
 }
 
-func removeDuplicateInt(uint64Slice []uint64) []uint64 {
+// removeDuplicateUint64Func removes duplicates from the slice.
+func removeDuplicateUint64Func[E any](slice []E, get func(E) uint64) []E {
 	allKeys := make(map[uint64]bool)
-	list := []uint64{}
-	for _, item := range uint64Slice {
-		if _, value := allKeys[item]; !value {
-			allKeys[item] = true
+	list := []E{}
+	for _, item := range slice {
+		if _, value := allKeys[get(item)]; !value {
+			allKeys[get(item)] = true
 			list = append(list, item)
 		}
 	}
@@ -954,9 +955,32 @@ func UpdateProofAdd(cachedProof Proof, adds []Hash, stump Stump) Proof {
 		}
 	}
 
+	cachedProof, newRootsMap := getNewPositionsAfterAdd(cachedProof, stump, adds, newForestRows)
+	stump.NumLeaves += uint64(len(adds))
+
+	// These are the positions that we'd need after the addition.
+	cachedProofTargets := copySortedFunc(cachedProof.Targets, uint64Less)
+	neededProofPositions, _ := proofPositions(cachedProofTargets, stump.NumLeaves, newForestRows)
+
+	proofHashes := make([]Hash, len(neededProofPositions))
+	for i, neededProofPosition := range neededProofPositions {
+		hash := newRootsMap[neededProofPosition]
+		proofHashes[i] = hash
+	}
+
+	cachedProof.Proof = proofHashes
+
+	return cachedProof
+}
+
+// getNewPositionsAfterAdd returns updated proof positions and the newly created
+// positions in the map.
+func getNewPositionsAfterAdd(cachedProof Proof, stump Stump, adds []Hash, forestRows uint8) (
+	Proof, map[uint64]Hash) {
+
 	// Create a map of all the proof positions and their hashes. We'll use this
 	// map to fetch the needed proof positions after the addition.
-	proofPos, _ := proofPositions(cachedProof.Targets, stump.NumLeaves, newForestRows)
+	proofPos, _ := proofPositions(cachedProof.Targets, stump.NumLeaves, forestRows)
 	newRootsMap := make(map[uint64]Hash)
 	for i, pos := range proofPos {
 		newRootsMap[pos] = cachedProof.Proof[i]
@@ -1000,27 +1024,20 @@ func UpdateProofAdd(cachedProof Proof, adds []Hash, stump Stump) Proof {
 			// |---\   |---\   |---\
 			// 00  01  02  03  --  --
 			if root == empty {
-				pos := rootPosition(stump.NumLeaves, h, newForestRows)
+				pos := rootPosition(stump.NumLeaves, h, forestRows)
 
 				sib := sibling(pos)
-				for j := len(cachedProof.Targets) - 1; j >= 0; j-- {
-					ancestor := isAncestor(parent(sib, newForestRows), cachedProof.Targets[j], newForestRows)
-					if ancestor {
-						// We can ignore the error since we've already verified that
-						// the cachedProof.Targets[j] is an ancestor of sib.
-						nextPos, _ := calcNextPosition(cachedProof.Targets[j], sib, newForestRows)
-						cachedProof.Targets[j] = nextPos
-					}
-				}
-				cachedProof.Targets = removeDuplicateInt(cachedProof.Targets)
+				cachedProof.Targets = updatePositions(cachedProof.Targets, sib, forestRows,
+					func(e uint64) uint64 { return e },
+					func(i int, pos uint64) { cachedProof.Targets[i] = pos })
 
 				tmpMap := make(map[uint64]Hash)
 				for key, hash := range newRootsMap {
-					ancestor := isAncestor(parent(sib, newForestRows), key, newForestRows)
+					ancestor := isAncestor(parent(sib, forestRows), key, forestRows)
 					if ancestor {
 						// We can ignore the error since we've already verified that
 						// the proofAndPos[j] is an ancestor of sib.
-						nextPos, _ := calcNextPosition(key, sib, newForestRows)
+						nextPos, _ := calcNextPosition(key, sib, forestRows)
 						tmpMap[nextPos] = hash
 					} else {
 						tmpMap[key] = hash
@@ -1030,8 +1047,10 @@ func UpdateProofAdd(cachedProof Proof, adds []Hash, stump Stump) Proof {
 
 				continue
 			} else {
-				pos := rootPosition(stump.NumLeaves, h, newForestRows)
+				pos := rootPosition(stump.NumLeaves, h, forestRows)
 
+				// Check if positions will be updated and update
+				// if they will be.
 				if _, found := newRootsMap[pos]; !found {
 					newRootsMap[pos] = root
 				}
@@ -1041,7 +1060,7 @@ func UpdateProofAdd(cachedProof Proof, adds []Hash, stump Stump) Proof {
 
 				// Calculate the hash of the new root and append it.
 				newRoot = parentHash(root, newRoot)
-				pos = parent(pos, newForestRows)
+				pos = parent(pos, forestRows)
 
 				if _, found := newRootsMap[pos]; !found {
 					newRootsMap[pos] = newRoot
@@ -1051,19 +1070,8 @@ func UpdateProofAdd(cachedProof Proof, adds []Hash, stump Stump) Proof {
 		roots = append(roots, newRoot)
 		stump.NumLeaves++
 	}
-	// These are the positions that we'd need after the addition.
-	cachedProofTargets := copySortedFunc(cachedProof.Targets, uint64Less)
-	neededProofPositions, _ := proofPositions(cachedProofTargets, stump.NumLeaves, newForestRows)
 
-	proofHashes := make([]Hash, len(neededProofPositions))
-	for i, neededProofPosition := range neededProofPositions {
-		hash := newRootsMap[neededProofPosition]
-		proofHashes[i] = hash
-	}
-
-	cachedProof.Proof = proofHashes
-
-	return cachedProof
+	return cachedProof, newRootsMap
 }
 
 // rootsAfterDel returns the roots after the deletion in the blockProof has happened.
