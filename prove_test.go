@@ -762,7 +762,7 @@ func FuzzUpdateProofAdd(f *testing.F) {
 			rootHashes[i] = root.data
 		}
 		proofBeforeStr := cachedProof.String()
-		cachedProof = UpdateProofAdd(cachedProof, addHashes, Stump{rootHashes, p.NumLeaves})
+		leafHashes, cachedProof = UpdateProofAdd(cachedProof, nil, addHashes, nil, Stump{rootHashes, p.NumLeaves})
 
 		beforePollardStr := p.String()
 		// Modify the pollard.
@@ -800,6 +800,7 @@ func FuzzModifyProofChain(f *testing.F) {
 		sc := newSimChainWithSeed(duration, seed)
 
 		p := NewAccumulator(true)
+		stump := Stump{}
 
 		// We'll store the cached utxos here. This would be the equivalent
 		// of a wallet storing its own utxos.
@@ -833,13 +834,25 @@ func FuzzModifyProofChain(f *testing.F) {
 			}
 
 			// For logging.
-			origTargetsAndHash := toHashAndPos(cachedProof.Targets, cachedHashes)
+			origCachedHashes := make([]Hash, len(cachedHashes))
+			copy(origCachedHashes, cachedHashes)
 
-			// cachedTargetsAndHash is the expected hashes after the
+			// Cache new utxos that have a duration longer than 3.
+			var remembers []uint32
+			var newHashesToCache []Hash
+			for i, add := range adds {
+				if duration[i] > 3 {
+					remembers = append(remembers, uint32(i))
+					newHashesToCache = append(newHashesToCache, add.Hash)
+				}
+			}
+
+			// expectedCachedHashes is the expected hashes after the
 			// modify has happened.
-			cachedTargetsAndHash := toHashAndPos(cachedProof.Targets, cachedHashes)
-			blockDelTargetsAndHash := toHashAndPos(blockProof.Targets, delHashes)
-			cachedTargetsAndHash = subtractSortedSlice(cachedTargetsAndHash, blockDelTargetsAndHash, hashAndPosCmp)
+			expectedCachedHashes := make([]Hash, len(cachedHashes))
+			copy(expectedCachedHashes, cachedHashes)
+			expectedCachedHashes = removeHashes(expectedCachedHashes, delHashes, func(elem Hash) Hash { return elem })
+			expectedCachedHashes = append(expectedCachedHashes, newHashesToCache...)
 
 			// Update the proof with the deletions and additions that
 			// happen in this block.
@@ -851,41 +864,45 @@ func FuzzModifyProofChain(f *testing.F) {
 			for i := range addHashes {
 				addHashes[i] = adds[i].Hash
 			}
-			stump := Stump{rootHashes, p.NumLeaves}
+
+			newStump := Stump{make([]Hash, len(stump.Roots)), stump.NumLeaves}
+			copy(newStump.Roots, stump.Roots)
 			cachedHashes, cachedProof, err = UpdateProof(
-				cachedProof, blockProof, cachedHashes, delHashes, addHashes, stump)
+				cachedProof, blockProof, cachedHashes, delHashes, addHashes, remembers, newStump)
+			if err != nil {
+				t.Fatal(err)
+			}
+			blockProof, err = p.Prove(delHashes)
+			if err != nil {
+				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
+			}
+			stump, err = UpdateStump(delHashes, addHashes, blockProof, stump)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			// Check that we have enough targets as we expect.
-			if len(cachedProof.Targets) != len(cachedTargetsAndHash) {
+			if len(cachedProof.Targets) != len(cachedHashes) {
 				t.Fatalf("FuzzUpdateProofRemove Fail. Expected %d "+
-					"targets but got %d.\nDeleted targets:\n%v."+
-					"\nOriginal cached targets:\n%v\nExpected "+
-					"old targets:\n%v\nGot targets:\n%v\n",
-					len(cachedTargetsAndHash),
+					"targets but got %d.\nDeleted hashes:\n%v."+
+					"\nOriginal cached hashes:\n%v\nExpected "+
+					"hashes:\n%v\nGot hashes:\n%v\n",
+					len(cachedHashes),
 					len(cachedProof.Targets),
-					blockProof.Targets,
-					hashAndPosToString(origTargetsAndHash),
-					hashAndPosToString(cachedTargetsAndHash),
-					cachedProof.Targets)
+					printHashes(delHashes),
+					printHashes(origCachedHashes),
+					printHashes(expectedCachedHashes),
+					printHashes(cachedHashes))
 			}
 
-			shouldBeEmpty := make([]hashAndPos, len(cachedTargetsAndHash))
-			copy(shouldBeEmpty, cachedTargetsAndHash)
-			leafHashesAndPos := toHashAndPos(cachedProof.Targets, cachedHashes)
+			shouldBeEmpty := make([]Hash, len(cachedHashes))
+			copy(shouldBeEmpty, cachedHashes)
 
 			// Check that all the hashes we expect to be cached are all there.
-			shouldBeEmpty = removeHashes(shouldBeEmpty, leafHashesAndPos, func(elem hashAndPos) Hash { return elem.hash })
+			shouldBeEmpty = removeHashes(shouldBeEmpty, cachedHashes, func(elem Hash) Hash { return elem })
 			if len(shouldBeEmpty) > 0 {
-				expectedHashes := make([]Hash, len(cachedTargetsAndHash))
-				for i, cachedTargetAndHash := range cachedTargetsAndHash {
-					expectedHashes[i] = cachedTargetAndHash.hash
-				}
-
 				t.Fatalf("FuzzUpdateProofRemove Fail. Expected hashes:\n%s\nbut got:\n%s\n",
-					printHashes(expectedHashes), printHashes(cachedHashes))
+					printHashes(expectedCachedHashes), printHashes(cachedHashes))
 			}
 			err = p.Modify(adds, delHashes, blockProof.Targets)
 			if err != nil {
@@ -897,48 +914,6 @@ func FuzzModifyProofChain(f *testing.F) {
 			err = p.Verify(cachedHashes, cachedProof)
 			if err != nil {
 				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
-			}
-
-			// Cache new utxos that have a duration longer than 3.
-			var newHashesToCache []Hash
-			for i, add := range adds {
-				if duration[i] > 3 {
-					newHashesToCache = append(newHashesToCache, add.Hash)
-				}
-			}
-			newProofToCache, err := p.Prove(newHashesToCache)
-			if err != nil {
-				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
-			}
-			// Sanity check that the new proof to cached is correct.
-			err = p.Verify(newHashesToCache, newProofToCache)
-			if err != nil {
-				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
-			}
-
-			// Save the expectedHashes. We should have exactly these
-			// hashes after AddProof.
-			expectedHashes := make([]Hash, len(cachedHashes)+len(newHashesToCache))
-			expectedHashes = append(expectedHashes, cachedHashes...)
-			expectedHashes = append(expectedHashes, newHashesToCache...)
-
-			// Add the new UTXOs to the proof.
-			cachedHashes, cachedProof = AddProof(cachedProof, newProofToCache,
-				cachedHashes, newHashesToCache, p.NumLeaves)
-			// Sanity check that the new cached proof verifies.
-			err = p.Verify(cachedHashes, cachedProof)
-			if err != nil {
-				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
-			}
-
-			// cachedHashes - expectedHashes should be empty.
-			// If it's not empty, we're missing some hashes.
-			expectedEmpty := make([]Hash, len(cachedHashes))
-			copy(expectedEmpty, cachedHashes)
-			expectedEmpty = removeHashes(expectedEmpty, expectedHashes, func(elem Hash) Hash { return elem })
-			if len(expectedEmpty) > 0 {
-				t.Fatalf("FuzzModifyProof fail at block %d. Expected hashes:\n%s\nGot hashes:\n%s\n",
-					b, printHashes(expectedHashes), printHashes(cachedHashes))
 			}
 
 			// Sanity checking.

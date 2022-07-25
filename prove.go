@@ -938,7 +938,7 @@ func UpdateProofRemove(cachedProof, blockProof Proof, cachedDelHashes, blockDelH
 //
 // NOTE: the stump passed in to the UpdateProofAdd is assumed to already be modified
 // with the deletion.
-func UpdateProofAdd(cachedProof Proof, adds []Hash, stump Stump) Proof {
+func UpdateProofAdd(cachedProof Proof, cachedHashes, adds []Hash, remembers []uint32, stump Stump) ([]Hash, Proof) {
 	// Update target positions if the forest has remapped to a higher row.
 	newForestRows := treeRows(stump.NumLeaves + uint64(len(adds)))
 	oldForestRows := treeRows(stump.NumLeaves)
@@ -955,7 +955,8 @@ func UpdateProofAdd(cachedProof Proof, adds []Hash, stump Stump) Proof {
 		}
 	}
 
-	cachedProof, newRootsMap := getNewPositionsAfterAdd(cachedProof, stump, adds, newForestRows)
+	cachedHashes, cachedProof, newRootsMap := getNewPositionsAfterAdd(
+		cachedProof, cachedHashes, adds, remembers, stump, newForestRows)
 	stump.NumLeaves += uint64(len(adds))
 
 	// These are the positions that we'd need after the addition.
@@ -970,13 +971,13 @@ func UpdateProofAdd(cachedProof Proof, adds []Hash, stump Stump) Proof {
 
 	cachedProof.Proof = proofHashes
 
-	return cachedProof
+	return cachedHashes, cachedProof
 }
 
 // getNewPositionsAfterAdd returns updated proof positions and the newly created
 // positions in the map.
-func getNewPositionsAfterAdd(cachedProof Proof, stump Stump, adds []Hash, forestRows uint8) (
-	Proof, map[uint64]Hash) {
+func getNewPositionsAfterAdd(cachedProof Proof, cachedHashes, adds []Hash,
+	remembers []uint32, stump Stump, forestRows uint8) ([]Hash, Proof, map[uint64]Hash) {
 
 	// Create a map of all the proof positions and their hashes. We'll use this
 	// map to fetch the needed proof positions after the addition.
@@ -986,8 +987,18 @@ func getNewPositionsAfterAdd(cachedProof Proof, stump Stump, adds []Hash, forest
 		newRootsMap[pos] = cachedProof.Proof[i]
 	}
 
+	cachedTargetsWithHash := toHashAndPos(cachedProof.Targets, cachedHashes)
+
+	remembersIdx := 0
 	roots := stump.Roots
-	for _, add := range adds {
+	for i, add := range adds {
+		if len(remembers) > 0 && remembersIdx < len(remembers) &&
+			remembers[remembersIdx] == uint32(i) {
+
+			cachedTargetsWithHash = mergeSortedSlicesFunc(cachedTargetsWithHash,
+				[]hashAndPos{{add, stump.NumLeaves}}, hashAndPosCmp)
+			remembersIdx++
+		}
 		// We can tell where the roots are by looking at the binary representation
 		// of the numLeaves. Wherever there's a 1, there's a root.
 		//
@@ -1027,9 +1038,9 @@ func getNewPositionsAfterAdd(cachedProof Proof, stump Stump, adds []Hash, forest
 				pos := rootPosition(stump.NumLeaves, h, forestRows)
 
 				sib := sibling(pos)
-				cachedProof.Targets = updatePositions(cachedProof.Targets, sib, forestRows,
-					func(e uint64) uint64 { return e },
-					func(i int, pos uint64) { cachedProof.Targets[i] = pos })
+				cachedTargetsWithHash = updatePositions(cachedTargetsWithHash, sib, forestRows,
+					func(e hashAndPos) uint64 { return e.pos },
+					func(i int, pos uint64) { cachedTargetsWithHash[i].pos = pos })
 
 				tmpMap := make(map[uint64]Hash)
 				for key, hash := range newRootsMap {
@@ -1071,7 +1082,15 @@ func getNewPositionsAfterAdd(cachedProof Proof, stump Stump, adds []Hash, forest
 		stump.NumLeaves++
 	}
 
-	return cachedProof, newRootsMap
+	targets := make([]uint64, len(cachedTargetsWithHash))
+	cachedHashes = make([]Hash, len(cachedTargetsWithHash))
+	for i, targetWithHash := range cachedTargetsWithHash {
+		targets[i] = targetWithHash.pos
+		cachedHashes[i] = targetWithHash.hash
+	}
+	cachedProof.Targets = targets
+
+	return cachedHashes, cachedProof, newRootsMap
 }
 
 // rootsAfterDel returns the roots after the deletion in the blockProof has happened.
@@ -1114,7 +1133,7 @@ func rootsAfterDel(blockProof Proof, stump Stump) ([]Hash, error) {
 
 // UpdateProof updates the cachedProof with the given blockProof and adds.
 func UpdateProof(cachedProof, blockProof Proof, cachedDelHashes, blockDelHashes,
-	adds []Hash, stump Stump) ([]Hash, Proof, error) {
+	adds []Hash, remembers []uint32, stump Stump) ([]Hash, Proof, error) {
 
 	// Remove necessary targets and update proof hashes with the blockProof.
 	cachedDelHashes, cachedProof = UpdateProofRemove(cachedProof, blockProof,
@@ -1128,7 +1147,7 @@ func UpdateProof(cachedProof, blockProof Proof, cachedDelHashes, blockDelHashes,
 	}
 
 	// Add new proof hashes as needed.
-	cachedProof = UpdateProofAdd(cachedProof, adds, stump)
+	cachedDelHashes, cachedProof = UpdateProofAdd(cachedProof, cachedDelHashes, adds, remembers, stump)
 
 	return cachedDelHashes, cachedProof, nil
 }
