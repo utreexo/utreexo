@@ -52,10 +52,10 @@ func randomIndexes(length, minimum int) []int {
 // calcDelHashAndProof returns a proof with the missingPositions filled in and the deletion hashes
 // with the hashes of the desired positions.
 func calcDelHashAndProof(p *Pollard, proof Proof, missingPositions, desiredPositions []uint64,
-	leftOutLeaves, leaves []hashAndPos) (Proof, []Hash, error) {
+	leftOutLeaves, leaves hashAndPos) (Proof, []Hash, error) {
 
 	// Grab all the hashes that are needed from the pollard.
-	neededHashes := []hashAndPos{}
+	neededHashes := hashAndPos{}
 	sort.Slice(missingPositions, func(a, b int) bool { return missingPositions[a] < missingPositions[b] })
 	for _, pos := range missingPositions {
 		hash := p.getHash(pos)
@@ -63,31 +63,31 @@ func calcDelHashAndProof(p *Pollard, proof Proof, missingPositions, desiredPosit
 			return Proof{}, nil, fmt.Errorf("Couldn't fetch required hash at position %d", pos)
 		}
 
-		neededHashes = append(neededHashes, hashAndPos{hash, pos})
+		neededHashes.Append(pos, hash)
 	}
 
 	// Attach positions to the proof hashes.
 	proofPos, _ := proofPositions(proof.Targets, p.NumLeaves, treeRows(p.NumLeaves))
 	currentHashes := toHashAndPos(proofPos, proof.Proof)
 	// Append the needed hashes to the proof.
-	currentHashes = append(currentHashes, neededHashes...)
+	currentHashes.AppendMany(neededHashes.positions, neededHashes.hashes)
 
 	// As new targets are added, we're able to calulate positions that we couldn't before. These positions
 	// may already exist as proofs. Remove these as duplicates are not expected during proof verification.
 	_, calculateables := proofPositions(desiredPositions, p.NumLeaves, treeRows(p.NumLeaves))
 	for _, cal := range calculateables {
-		idx := slices.IndexFunc(currentHashes, func(hnp hashAndPos) bool { return hnp.pos == cal })
+		idx := slices.IndexFunc(currentHashes.positions, func(elem uint64) bool { return elem == cal })
 		if idx != -1 {
-			currentHashes = append(currentHashes[:idx], currentHashes[idx+1:]...)
+			currentHashes.Delete(idx)
 		}
 	}
 
 	// The newly added targets may be used as proofs. Remove existing duplicates from the proof as these
 	// are not expected during proof verification.
-	for _, leaf := range leftOutLeaves {
-		idx := slices.IndexFunc(currentHashes, func(hnp hashAndPos) bool { return hnp.hash == leaf.hash })
+	for _, leaf := range leftOutLeaves.hashes {
+		idx := slices.IndexFunc(currentHashes.hashes, func(elem Hash) bool { return elem == leaf })
 		if idx != -1 {
-			currentHashes = append(currentHashes[:idx], currentHashes[idx+1:]...)
+			currentHashes.Delete(idx)
 		}
 	}
 
@@ -98,21 +98,14 @@ func calcDelHashAndProof(p *Pollard, proof Proof, missingPositions, desiredPosit
 	sort.Slice(newProof.Targets, func(a, b int) bool { return newProof.Targets[a] < newProof.Targets[b] })
 
 	// We need to sort the proof hashes as those are expected to be in order during proof verificatin.
-	sort.Slice(currentHashes, func(a, b int) bool { return currentHashes[a].pos < currentHashes[b].pos })
-	newProof.Proof = make([]Hash, len(currentHashes))
-	for i := range newProof.Proof {
-		newProof.Proof[i] = currentHashes[i].hash
-	}
+	sort.Sort(currentHashes)
+	newProof.Proof = currentHashes.hashes
 
 	// The deletion hashes are leaves + leftOutLeaves. We sort them to match the ordering of the targets.
-	leaves = append(leaves, leftOutLeaves...)
-	sort.Slice(leaves, func(a, b int) bool { return leaves[a].pos < leaves[b].pos })
-	newDelHashes := make([]Hash, len(leaves))
-	for i := range leaves {
-		newDelHashes[i] = leaves[i].hash
-	}
+	leaves.AppendMany(leftOutLeaves.positions, leftOutLeaves.hashes)
+	sort.Sort(leaves)
 
-	return newProof, newDelHashes, nil
+	return newProof, leaves.hashes, nil
 }
 
 func FuzzGetMissingPositions(f *testing.F) {
@@ -158,59 +151,53 @@ func FuzzGetMissingPositions(f *testing.F) {
 		}
 
 		// Grab the current leaves that exist in the accumulator.
-		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
+		currentLeaves := hashAndPos{make([]uint64, 0, len(leaves)-len(delHashes)), make([]Hash, 0, len(leaves)-len(delHashes))}
 		for _, node := range p.NodeMap {
-			currentLeaves = append(currentLeaves,
-				hashAndPos{node.data, p.calculatePosition(node)})
+			currentLeaves.Append(p.calculatePosition(node), node.data)
 		}
 		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
 		// guaranteed to have the same order, we need to do this.
-		sort.Slice(currentLeaves, func(a, b int) bool { return currentLeaves[a].pos < currentLeaves[b].pos })
+		sort.Sort(currentLeaves)
 
 		// Sanity check.
-		if len(currentLeaves) != len(leaves)-len(delHashes) {
+		if currentLeaves.Len() != len(leaves)-len(delHashes) {
 			t.Fatalf("FuzzGetMissingPositions fail. Expected %d leaves but have %d in the pollard map",
-				len(leaves)-len(delHashes), len(currentLeaves))
+				len(leaves)-len(delHashes), currentLeaves.Len())
 		}
 
 		// Randomly grab some leaves.
-		indexes := randomIndexes(len(currentLeaves), 2)
-		leafSubset := make([]hashAndPos, len(indexes))
-		for i := range leafSubset {
-			leafSubset[i] = currentLeaves[indexes[i]]
+		indexes := randomIndexes(currentLeaves.Len(), 2)
+		leafSubset := hashAndPos{make([]uint64, 0, len(indexes)), make([]Hash, 0, len(indexes))}
+		for i := 0; i < len(indexes); i++ {
+			leafSubset.Append(currentLeaves.positions[indexes[i]],
+				currentLeaves.hashes[indexes[i]])
 		}
 
 		// Grab at least 1 leaf to leave out.
-		leaveOutCount := rand.Intn(len(leafSubset)-1) + 1
-		for leaveOutCount <= len(leafSubset)-1 && leaveOutCount < 1 {
+		leaveOutCount := rand.Intn(leafSubset.Len()-1) + 1
+		for leaveOutCount <= leafSubset.Len()-1 && leaveOutCount < 1 {
 			leaveOutCount++
 		}
 		// Randomly select leaves to leave out.
-		leftOutLeaves := make([]hashAndPos, leaveOutCount)
-		for i := range leftOutLeaves {
+		leftOutLeaves := hashAndPos{make([]uint64, 0, leaveOutCount), make([]Hash, 0, leaveOutCount)}
+		for i := 0; i < leaveOutCount; i++ {
 			// Randomly select a leaf to leave out.
-			hashIdx := rand.Intn(len(leafSubset) - 1)
-			leftOutLeaves[i] = leafSubset[hashIdx]
+			hashIdx := rand.Intn(leafSubset.Len() - 1)
+			leftOutLeaves.Append(leafSubset.positions[hashIdx], leafSubset.hashes[hashIdx])
 
 			// Remove the selected leaf from the subset.
-			leafSubset = append(leafSubset[:hashIdx], leafSubset[hashIdx+1:]...)
-		}
-		hashes := make([]Hash, len(leafSubset))
-		for i := range hashes {
-			hashes[i] = leafSubset[i].hash
+			leafSubset.Delete(hashIdx)
 		}
 
 		// Grab the proof of the leaves that we didn't leave out.
-		proof, err := p.Prove(hashes)
+		proof, err := p.Prove(leafSubset.hashes)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		// Grab the positions of the leaves that we left out.
-		desiredPositions := make([]uint64, len(leftOutLeaves))
-		for i := range desiredPositions {
-			desiredPositions[i] = leftOutLeaves[i].pos
-		}
+		desiredPositions := make([]uint64, leftOutLeaves.Len())
+		copy(desiredPositions, leftOutLeaves.positions)
 
 		// Call GetMissingPositions and get all the positions that we need to prove desiredPositions.
 		missingPositions := GetMissingPositions(p.NumLeaves, proof.Targets, desiredPositions)
@@ -267,45 +254,37 @@ func FuzzRemoveTargets(f *testing.F) {
 		}
 
 		// Grab the current leaves that exist in the accumulator.
-		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
+		currentLeaves := hashAndPos{make([]uint64, 0, len(leaves)-len(delHashes)), make([]Hash, 0, len(leaves)-len(delHashes))}
 		for _, node := range p.NodeMap {
-			currentLeaves = append(currentLeaves,
-				hashAndPos{node.data, p.calculatePosition(node)})
+			currentLeaves.Append(p.calculatePosition(node), node.data)
 		}
 		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
 		// guaranteed to have the same order, we need to do this.
-		sort.Slice(currentLeaves, func(a, b int) bool { return currentLeaves[a].pos < currentLeaves[b].pos })
+		sort.Sort(currentLeaves)
 
 		// Randomly grab some leaves.
-		indexes := randomIndexes(len(currentLeaves), 2)
-		leafSubset := make([]hashAndPos, len(indexes))
-		for i := range leafSubset {
-			leafSubset[i] = currentLeaves[indexes[i]]
+		indexes := randomIndexes(currentLeaves.Len(), 2)
+		leafSubset := hashAndPos{make([]uint64, 0, len(indexes)), make([]Hash, 0, len(indexes))}
+		for i := 0; i < len(indexes); i++ {
+			leafSubset.Append(currentLeaves.positions[indexes[i]],
+				currentLeaves.hashes[indexes[i]])
 		}
 
 		// Generate a proof of the leafSubset.
-		leafHashes := make([]Hash, len(leafSubset))
-		for i := range leafHashes {
-			leafHashes[i] = leafSubset[i].hash
-		}
-		proof, err := p.Prove(leafHashes)
+		proof, err := p.Prove(leafSubset.hashes)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		// Randomly generate some positions to delete.
-		leafPositions := make([]uint64, len(leafSubset))
-		for i := range leafPositions {
-			leafPositions[i] = leafSubset[i].pos
-		}
-		indexes = randomIndexes(len(leafPositions), 1)
+		indexes = randomIndexes(leafSubset.Len(), 1)
 		positions := make([]uint64, len(indexes))
 		for i := range positions {
-			positions[i] = leafPositions[indexes[i]]
+			positions[i] = leafSubset.positions[indexes[i]]
 		}
 
 		// Delete the targets from the proof and verify the modified proof.
-		newDelHashes, newproof := RemoveTargets(p.NumLeaves, leafHashes, proof, positions)
+		newDelHashes, newproof := RemoveTargets(p.NumLeaves, leafSubset.hashes, proof, positions)
 
 		err = p.Verify(newDelHashes, newproof)
 		if err != nil {
@@ -356,49 +335,40 @@ func FuzzAddProof(f *testing.F) {
 		}
 
 		// Grab the current leaves that exist in the accumulator.
-		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
+		currentLeaves := hashAndPos{make([]uint64, 0, len(leaves)-len(delHashes)), make([]Hash, 0, len(leaves)-len(delHashes))}
 		for _, node := range p.NodeMap {
-			currentLeaves = append(currentLeaves,
-				hashAndPos{node.data, p.calculatePosition(node)})
+			currentLeaves.Append(p.calculatePosition(node), node.data)
 		}
 		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
 		// guaranteed to have the same order, we need to do this.
-		sort.Slice(currentLeaves, func(a, b int) bool { return currentLeaves[a].pos < currentLeaves[b].pos })
+		sort.Sort(currentLeaves)
 
 		// Randomly grab some leaves.
-		indexesA := randomIndexes(len(currentLeaves), 2)
-		leafSubsetA := make([]hashAndPos, len(indexesA))
-		for i := range leafSubsetA {
-			leafSubsetA[i] = currentLeaves[indexesA[i]]
+		indexesA := randomIndexes(currentLeaves.Len(), 2)
+		leafSubsetA := hashAndPos{make([]uint64, 0, len(indexesA)), make([]Hash, 0, len(indexesA))}
+		for _, idx := range indexesA {
+			leafSubsetA.Append(currentLeaves.positions[idx], currentLeaves.hashes[idx])
 		}
 
-		indexesB := randomIndexes(len(currentLeaves), 2)
-		leafSubsetB := make([]hashAndPos, len(indexesB))
-		for i := range leafSubsetB {
-			leafSubsetB[i] = currentLeaves[indexesB[i]]
+		indexesB := randomIndexes(currentLeaves.Len(), 2)
+		leafSubsetB := hashAndPos{make([]uint64, 0, len(indexesB)), make([]Hash, 0, len(indexesB))}
+		for _, idx := range indexesB {
+			leafSubsetB.Append(currentLeaves.positions[idx], currentLeaves.hashes[idx])
 		}
 
 		// Generate a proof of the leafSubset.
-		leafHashesA := make([]Hash, len(leafSubsetA))
-		for i := range leafHashesA {
-			leafHashesA[i] = leafSubsetA[i].hash
-		}
-		proofA, err := p.Prove(leafHashesA)
+		proofA, err := p.Prove(leafSubsetA.hashes)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		leafHashesB := make([]Hash, len(leafSubsetB))
-		for i := range leafHashesB {
-			leafHashesB[i] = leafSubsetB[i].hash
-		}
-		proofB, err := p.Prove(leafHashesB)
+		proofB, err := p.Prove(leafSubsetB.hashes)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		// Add the proof.
-		leafHashesC, proofC := AddProof(proofA, proofB, leafHashesA, leafHashesB, p.NumLeaves)
+		leafHashesC, proofC := AddProof(proofA, proofB, leafSubsetA.hashes, leafSubsetB.hashes, p.NumLeaves)
 
 		// These are the targets that we want to prove.
 		sortedProofATargets := copySortedFunc(proofA.Targets, uint64Less)
@@ -464,44 +434,36 @@ func FuzzProofAfterDeletion(f *testing.F) {
 		}
 
 		// Grab the current leaves that exist in the accumulator.
-		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
+		currentLeaves := hashAndPos{make([]uint64, 0, len(leaves)-len(delHashes)), make([]Hash, 0, len(leaves)-len(delHashes))}
 		for _, node := range p.NodeMap {
-			currentLeaves = append(currentLeaves,
-				hashAndPos{node.data, p.calculatePosition(node)})
+			currentLeaves.Append(p.calculatePosition(node), node.data)
 		}
 		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
 		// guaranteed to have the same order, we need to do this.
-		sort.Slice(currentLeaves, func(a, b int) bool { return currentLeaves[a].pos < currentLeaves[b].pos })
+		sort.Sort(currentLeaves)
 
 		// Randomly grab some leaves.
-		indexes := randomIndexes(len(currentLeaves), 2)
-		leafSubset := make([]hashAndPos, len(indexes))
-		for i := range leafSubset {
-			leafSubset[i] = currentLeaves[indexes[i]]
+		indexes := randomIndexes(currentLeaves.Len(), 2)
+		leafSubset := hashAndPos{make([]uint64, 0, len(indexes)), make([]Hash, 0, len(indexes))}
+		for i := 0; i < len(indexes); i++ {
+			leafSubset.Append(currentLeaves.positions[indexes[i]],
+				currentLeaves.hashes[indexes[i]])
 		}
 		// Generate a proof of the leafSubset.
-		leafHashes := make([]Hash, len(leafSubset))
-		for i := range leafHashes {
-			leafHashes[i] = leafSubset[i].hash
-		}
-		proof, err := p.Prove(leafHashes)
+		proof, err := p.Prove(leafSubset.hashes)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		// Randomly generate some positions to delete.
-		leafPositions := make([]uint64, len(leafSubset))
-		for i := range leafPositions {
-			leafPositions[i] = leafSubset[i].pos
-		}
-		indexes = randomIndexes(len(leafPositions), 1)
+		indexes = randomIndexes(leafSubset.Len(), 1)
 		positions := make([]uint64, len(indexes))
 		for i := range positions {
-			positions[i] = leafPositions[indexes[i]]
+			positions[i] = leafSubset.positions[indexes[i]]
 		}
 
 		// Delete the positions from the cached proof.
-		leafHashes, proof = proofAfterPartialDeletion(p.NumLeaves, proof, leafHashes, positions)
+		leafSubset.hashes, proof = proofAfterPartialDeletion(p.NumLeaves, proof, leafSubset.hashes, positions)
 
 		proofPos, _ := proofPositions(proof.Targets, p.NumLeaves, treeRows(p.NumLeaves))
 		if len(proofPos) != len(proof.Proof) {
@@ -525,7 +487,7 @@ func FuzzProofAfterDeletion(f *testing.F) {
 		}
 
 		// And verify that the proof is correct.
-		err = p.Verify(leafHashes, proof)
+		err = p.Verify(leafSubset.hashes, proof)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -573,41 +535,33 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		pollardBeforeStr := p.String()
 
 		// Grab the current leaves that exist in the accumulator.
-		currentLeaves := make([]hashAndPos, 0, len(leaves)-len(delHashes))
+		currentLeaves := hashAndPos{make([]uint64, 0, len(leaves)-len(delHashes)), make([]Hash, 0, len(leaves)-len(delHashes))}
 		for _, node := range p.NodeMap {
-			currentLeaves = append(currentLeaves,
-				hashAndPos{node.data, p.calculatePosition(node)})
+			currentLeaves.Append(p.calculatePosition(node), node.data)
 		}
 		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
 		// guaranteed to have the same order, we need to do this.
-		sort.Slice(currentLeaves, func(a, b int) bool { return currentLeaves[a].pos < currentLeaves[b].pos })
+		sort.Sort(currentLeaves)
 
 		// Randomly grab some leaves.
-		indexes := randomIndexes(len(currentLeaves), 2)
-		leafSubset := make([]hashAndPos, len(indexes))
-		for i := range leafSubset {
-			leafSubset[i] = currentLeaves[indexes[i]]
+		indexes := randomIndexes(currentLeaves.Len(), 2)
+		leafSubset := hashAndPos{make([]uint64, 0, len(indexes)), make([]Hash, 0, len(indexes))}
+		for i := 0; i < len(indexes); i++ {
+			leafSubset.Append(currentLeaves.positions[indexes[i]],
+				currentLeaves.hashes[indexes[i]])
 		}
 		// Generate a proof of the leafSubset.
-		leafHashes := make([]Hash, len(leafSubset))
-		for i := range leafHashes {
-			leafHashes[i] = leafSubset[i].hash
-		}
-		cachedProof, err := p.Prove(leafHashes)
+		cachedProof, err := p.Prove(leafSubset.hashes)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		// Randomly generate some positions to delete.
-		delIndexes := randomIndexes(len(currentLeaves), 1)
-		delLeaves := make([]hashAndPos, len(delIndexes))
-		for i := range delLeaves {
-			delLeaves[i] = currentLeaves[delIndexes[i]]
-		}
-
-		delPositions := make([]uint64, len(delLeaves))
-		for i := range delPositions {
-			delPositions[i] = delLeaves[i].pos
+		delIndexes := randomIndexes(currentLeaves.Len(), 1)
+		delPositions := make([]uint64, len(delIndexes))
+		for i := range delIndexes {
+			//delPositions[i] = delLeaves[i].pos
+			delPositions[i] = currentLeaves.positions[delIndexes[i]]
 		}
 
 		// Fetch hashes.
@@ -626,16 +580,16 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		}
 
 		// origTargetsAndHash is only for the error message.
-		origTargetsAndHash := toHashAndPos(cachedProof.Targets, leafHashes)
+		origTargetsAndHash := toHashAndPos(cachedProof.Targets, leafSubset.hashes)
 
 		// Delete the block hashes from the cached hashes. We'll use this to make
 		// sure that the proof proves what we want to prove.
-		cachedTargetsAndHash := toHashAndPos(cachedProof.Targets, leafHashes)
+		cachedTargetsAndHash := toHashAndPos(cachedProof.Targets, leafSubset.hashes)
 		blockDelTargetsAndHash := toHashAndPos(blockProof.Targets, blockDelHashes)
-		cachedTargetsAndHash = subtractSortedSlice(cachedTargetsAndHash, blockDelTargetsAndHash, hashAndPosCmp)
+		cachedTargetsAndHash = subtractSortedHashAndPos(cachedTargetsAndHash, blockDelTargetsAndHash.positions, uint64Cmp)
 
 		// Update the cached proof with the block proof.
-		leafHashes, cachedProof = UpdateProofRemove(cachedProof, blockProof, leafHashes, blockDelHashes, p.NumLeaves)
+		leafSubset.hashes, cachedProof = UpdateProofRemove(cachedProof, blockProof, leafSubset.hashes, blockDelHashes, p.NumLeaves)
 
 		// Modify the pollard.
 		err = p.Modify(nil, blockDelHashes, delPositions)
@@ -644,29 +598,25 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		}
 
 		// Check that we have enough targets as we expect.
-		if len(cachedProof.Targets) != len(cachedTargetsAndHash) {
+		if len(cachedProof.Targets) != cachedTargetsAndHash.Len() {
 			t.Fatalf("FuzzUpdateProofRemove Fail. Expected %d targets but got %d."+
 				"\nDeleted targets:\n%v.\nOriginal cached targets:\n%v\nExpected old targets:\n%v\n"+
 				"Got targets:\n%v\nPollard before:\n%s\nPollard after:\n%s\n",
-				len(cachedTargetsAndHash), len(cachedProof.Targets), blockProof.Targets,
-				hashAndPosToString(origTargetsAndHash), hashAndPosToString(cachedTargetsAndHash),
+				cachedTargetsAndHash.Len(), len(cachedProof.Targets), blockProof.Targets,
+				origTargetsAndHash.String(), cachedTargetsAndHash.String(),
 				cachedProof.Targets, pollardBeforeStr, p.String())
 		}
 
-		shouldBeEmpty := make([]hashAndPos, len(cachedTargetsAndHash))
-		copy(shouldBeEmpty, cachedTargetsAndHash)
-		leafHashesAndPos := toHashAndPos(cachedProof.Targets, leafHashes)
+		shouldBeEmpty := hashAndPos{make([]uint64, cachedTargetsAndHash.Len()), make([]Hash, cachedTargetsAndHash.Len())}
+		copy(shouldBeEmpty.positions, cachedTargetsAndHash.positions)
+		copy(shouldBeEmpty.hashes, cachedTargetsAndHash.hashes)
+		leafHashesAndPos := toHashAndPos(cachedProof.Targets, leafSubset.hashes)
 
 		// Check that all the hashes we expect to be cached are all there.
-		shouldBeEmpty = removeHashes(shouldBeEmpty, leafHashesAndPos, func(elem hashAndPos) Hash { return elem.hash })
-		if len(shouldBeEmpty) > 0 {
-			expectedHashes := make([]Hash, len(cachedTargetsAndHash))
-			for i, cachedTargetAndHash := range cachedTargetsAndHash {
-				expectedHashes[i] = cachedTargetAndHash.hash
-			}
-
+		shouldBeEmpty = removeHashesFromHashAndPos(shouldBeEmpty, leafHashesAndPos.hashes, func(elem Hash) Hash { return elem })
+		if shouldBeEmpty.Len() > 0 {
 			t.Fatalf("FuzzUpdateProofRemove Fail. Expected hashes:\n%s\nbut got:\n%s\n",
-				printHashes(expectedHashes), printHashes(leafHashes))
+				printHashes(cachedTargetsAndHash.hashes), printHashes(shouldBeEmpty.hashes))
 		}
 
 		cachedProofPos, _ := proofPositions(cachedProof.Targets, p.NumLeaves, treeRows(p.NumLeaves))
@@ -676,7 +626,7 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		}
 
 		// And verify that the proof is correct.
-		err = p.Verify(leafHashes, cachedProof)
+		err = p.Verify(leafSubset.hashes, cachedProof)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -725,27 +675,23 @@ func FuzzUpdateProofAdd(f *testing.F) {
 		}
 
 		// Grab the current leaves that exist in the accumulator.
-		currentLeaves := make([]hashAndPos, 0, len(leaves))
+		currentLeaves := hashAndPos{make([]uint64, 0, len(leaves)), make([]Hash, 0, len(leaves))}
 		for _, node := range p.NodeMap {
-			currentLeaves = append(currentLeaves,
-				hashAndPos{node.data, p.calculatePosition(node)})
+			currentLeaves.Append(p.calculatePosition(node), node.data)
 		}
 		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
 		// guaranteed to have the same order, we need to do this.
-		sort.Slice(currentLeaves, func(a, b int) bool { return currentLeaves[a].pos < currentLeaves[b].pos })
+		sort.Sort(currentLeaves)
 
 		// Randomly grab some leaves.
-		indexes := randomIndexes(len(currentLeaves), 2)
-		leafSubset := make([]hashAndPos, len(indexes))
-		for i := range leafSubset {
-			leafSubset[i] = currentLeaves[indexes[i]]
+		indexes := randomIndexes(currentLeaves.Len(), 2)
+		leafSubset := hashAndPos{make([]uint64, 0, len(indexes)), make([]Hash, 0, len(indexes))}
+		for i := 0; i < len(indexes); i++ {
+			leafSubset.Append(currentLeaves.positions[indexes[i]],
+				currentLeaves.hashes[indexes[i]])
 		}
 		// Generate a proof of the leafSubset.
-		leafHashes := make([]Hash, len(leafSubset))
-		for i := range leafHashes {
-			leafHashes[i] = leafSubset[i].hash
-		}
-		cachedProof, err := p.Prove(leafHashes)
+		cachedProof, err := p.Prove(leafSubset.hashes)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -762,7 +708,7 @@ func FuzzUpdateProofAdd(f *testing.F) {
 			rootHashes[i] = root.data
 		}
 		proofBeforeStr := cachedProof.String()
-		leafHashes, cachedProof = UpdateProofAdd(cachedProof, nil, addHashes, nil, Stump{rootHashes, p.NumLeaves})
+		leafSubset.hashes, cachedProof = UpdateProofAdd(cachedProof, nil, addHashes, nil, Stump{rootHashes, p.NumLeaves})
 
 		beforePollardStr := p.String()
 		// Modify the pollard.
@@ -773,11 +719,11 @@ func FuzzUpdateProofAdd(f *testing.F) {
 		afterPollardStr := p.String()
 
 		// And verify that the proof is correct.
-		err = p.Verify(leafHashes, cachedProof)
+		err = p.Verify(leafSubset.hashes, cachedProof)
 		if err != nil {
 			t.Fatalf("FuzzUpdateProofAdd Fail. Error:\n%v\nleafHashes:\n%s\nProof before:\n%s\n"+
 				"Proof:\n%s\nPollard before:\n%s\nPollard after:\n%s\n",
-				err, printHashes(leafHashes), proofBeforeStr, cachedProof.String(),
+				err, printHashes(leafSubset.hashes), proofBeforeStr, cachedProof.String(),
 				beforePollardStr, afterPollardStr)
 		}
 	})
