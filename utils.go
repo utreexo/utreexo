@@ -879,20 +879,6 @@ func nodeMapToString(m map[miniHash]*polNode) string {
 	return str
 }
 
-// hashAndPosToString turns a slice of hash and pos into readable string.
-func hashAndPosToString(hnps []hashAndPos) string {
-	str := ""
-	for i, hnp := range hnps {
-		str += fmt.Sprintf("pos:%d, hash:%s", hnp.pos, hex.EncodeToString(hnp.hash[:]))
-
-		if i != len(hnps)-1 {
-			str += "\n"
-		}
-	}
-
-	return str
-}
-
 // polNodeAndPosToString turns a slice of polNode and pos into readable string.
 func polNodeAndPosToString(nodes []nodeAndPos) string {
 	str := ""
