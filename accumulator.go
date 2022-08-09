@@ -305,7 +305,12 @@ func (p *Pollard) deleteFromMap(delHashes []Hash) {
 	}
 }
 
-// Undo reverts the most recent modify that happened to the accumulator.
+// Undo reverts the most recent modify that happened to the accumulator. The passed in numAdds,
+// dels and delHashes should correspond to block being un-done. prevRoots should be of the block
+// that the caller is trying to go back to.
+//
+// Ex: If the caller is trying to go back to block 9, the numAdds, dels, and delHashes should be
+// the adds and dels that happened to get to block 10. prevRoots should be the roots at block 9.
 func (p *Pollard) Undo(numAdds uint64, dels []uint64, delHashes []Hash, prevRoots []Hash) error {
 	for i := 0; i < int(numAdds); i++ {
 		p.undoSingleAdd()
