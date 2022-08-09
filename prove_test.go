@@ -3,6 +3,7 @@ package utreexo
 import (
 	"fmt"
 	"math/rand"
+	"reflect"
 	"sort"
 	"testing"
 
@@ -881,6 +882,133 @@ func FuzzModifyProofChain(f *testing.F) {
 					b, len(p.NodeMap), p.NumLeaves-p.NumDels)
 				t.Fatal(err)
 			}
+		}
+	})
+}
+
+func FuzzGetProofSubset(f *testing.F) {
+	var tests = []struct {
+		startLeaves uint32
+		delCount    uint32
+		seed        int64
+	}{
+		{
+			16,
+			2,
+			12,
+		},
+	}
+	for _, test := range tests {
+		f.Add(test.startLeaves, test.delCount, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, startLeaves uint32, delCount uint32, seed int64) {
+		rand.Seed(seed)
+
+		// It'll error out if we try to delete more than we have. >= since we want
+		// at least 3 leftOver leaf to test.
+		if int(delCount) >= int(startLeaves)-3 {
+			return
+		}
+
+		// Get leaves and dels.
+		leaves, delHashes, delPos := getAddsAndDels(0, startLeaves, delCount)
+
+		// Create the starting off pollard.
+		p := NewAccumulator(true)
+		err := p.Modify(leaves, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = p.Modify(nil, delHashes, delPos)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Grab the current leaves that exist in the accumulator.
+		currentLeaves := hashAndPos{make([]uint64, 0, len(leaves)-len(delHashes)), make([]Hash, 0, len(leaves)-len(delHashes))}
+		for _, node := range p.NodeMap {
+			currentLeaves.Append(p.calculatePosition(node), node.data)
+		}
+		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
+		// guaranteed to have the same order, we need to do this.
+		sort.Sort(currentLeaves)
+
+		// Randomly grab some leaves.
+		indexes := randomIndexes(currentLeaves.Len(), 3)
+		leafSubset := hashAndPos{make([]uint64, 0, len(indexes)-1), make([]Hash, 0, len(indexes)-1)}
+		for i := 0; i < len(indexes)-1; i++ {
+			leafSubset.Append(currentLeaves.positions[indexes[i]],
+				currentLeaves.hashes[indexes[i]])
+		}
+		// The last element is to test if an error indeed returns when trying to
+		// prove something that's not in the cachedProof.
+		excluded := []uint64{currentLeaves.positions[indexes[len(indexes)-1]]}
+
+		// Generate a proof of the leafSubset.
+		cachedProof, err := p.Prove(leafSubset.hashes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// And verify that the proof is correct.
+		err = p.Verify(leafSubset.hashes, cachedProof)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Try to trigger an error by proving something that's not included in the cachedProof.
+		_, _, err = GetProofSubset(cachedProof, leafSubset.hashes, excluded, p.NumLeaves)
+		if err == nil {
+			t.Fatalf("Expected an error when trying to get a proof subset of %v from %v",
+				excluded, cachedProof.Targets)
+		}
+
+		// Store a copy of the cachedProof to later assert that the proof wasn't mutated.
+		cachedProofCopy := Proof{make([]uint64, len(cachedProof.Targets)), make([]Hash, len(cachedProof.Proof))}
+		copy(cachedProofCopy.Targets, cachedProof.Targets)
+		copy(cachedProofCopy.Proof, cachedProof.Proof)
+
+		// Store a copy of the leafSubset.hashes to later assert that the proof wasn't mutated.
+		leafSubsetHashesCopy := make([]Hash, len(leafSubset.hashes))
+		copy(leafSubsetHashesCopy, leafSubset.hashes)
+
+		// Randomly generate some positions to selectively prove.
+		proveIndexes := randomIndexes(leafSubset.Len(), 1)
+		provePositions := make([]uint64, len(proveIndexes))
+		for i := range proveIndexes {
+			provePositions[i] = leafSubset.positions[proveIndexes[i]]
+		}
+
+		// Get the proof subset.
+		subsetHashes, subsetProof, err := GetProofSubset(cachedProof, leafSubset.hashes, provePositions, p.NumLeaves)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Check that all the proves we want are there.
+		expectedEmpty := copySortedFunc(provePositions, uint64Less)
+		expectedEmpty = subtractSortedSlice(expectedEmpty, subsetProof.Targets, uint64Cmp)
+		if len(expectedEmpty) > 0 {
+			t.Fatalf("Positions %v did not get proven. All wanted positions: %v",
+				expectedEmpty, provePositions)
+		}
+
+		// Verify the proof.
+		err = p.Verify(subsetHashes, subsetProof)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Check that the cached proof and hashes were not mutated.
+		if !reflect.DeepEqual(cachedProofCopy, cachedProof) {
+			err := fmt.Errorf("cachedProof was mutated. Expected:\n%s\nGot:\n%s\n",
+				cachedProofCopy.String(), cachedProof.String())
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(leafSubsetHashesCopy, leafSubset.hashes) {
+			err := fmt.Errorf("leafSubset.hashes were mutated. Expected:\n%s\nGot:\n%s\n",
+				printHashes(leafSubsetHashesCopy), printHashes(leafSubset.hashes))
+			t.Fatal(err)
 		}
 	})
 }

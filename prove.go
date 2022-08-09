@@ -1234,3 +1234,37 @@ func UpdateProof(cachedProof, blockProof Proof, cachedDelHashes, blockDelHashes,
 
 	return cachedDelHashes, cachedProof, nil
 }
+
+// GetProofSubset trims away the un-needed data from the proof and returns a proof only
+// for the passed in removes. An error is returned if the passed in proof does not have
+// all the targets in the removes.
+func GetProofSubset(proof Proof, hashes []Hash, removes []uint64, numLeaves uint64) ([]Hash, Proof, error) {
+	// Copy to avoid mutating the original.
+	proofTargetsCopy := copySortedFunc(proof.Targets, uint64Less)
+
+	// Check that all the targets in removes are also present in the proof.
+	expectedEmpty := copySortedFunc(removes, uint64Less)
+	expectedEmpty = subtractSortedSlice(expectedEmpty, proofTargetsCopy, uint64Cmp)
+	if len(expectedEmpty) > 0 {
+		err := fmt.Errorf("Missing positions %v from the proof. Deletions %v, proof.Targets %v",
+			expectedEmpty, removes, proof.Targets)
+		return nil, Proof{}, err
+	}
+
+	// Create a copy of the proof that we'll mutate and return.
+	retProof := Proof{
+		make([]uint64, len(proof.Targets)),
+		make([]Hash, len(proof.Proof)),
+	}
+	copy(retProof.Targets, proof.Targets)
+	copy(retProof.Proof, proof.Proof)
+
+	// These are all the targets that we'll remove so that the returned proof will only
+	// prove the removes passed in.
+	sort.Slice(removes, func(a, b int) bool { return removes[a] < removes[b] })
+	proofTargetsCopy = subtractSortedSlice(proofTargetsCopy, removes, uint64Cmp)
+
+	// Remove the targets and return the results.
+	retHashes, retProof := RemoveTargets(numLeaves, hashes, retProof, proofTargetsCopy)
+	return retHashes, retProof, nil
+}
