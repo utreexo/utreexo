@@ -64,7 +64,7 @@ func FuzzStump(f *testing.F) {
 			adds[i] = leaves[i].Hash
 		}
 
-		stump, err = UpdateStump(nil, adds, Proof{}, stump)
+		err = stump.Update(nil, adds, Proof{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -99,7 +99,7 @@ func FuzzStump(f *testing.F) {
 			adds[i] = modifyLeaves[i].Hash
 		}
 
-		stump, err = UpdateStump(delHashes, adds, proof, stump)
+		err = stump.Update(delHashes, adds, proof)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -154,7 +154,7 @@ func FuzzStumpChain(f *testing.F) {
 			for i := range addHashes {
 				addHashes[i] = adds[i].Hash
 			}
-			stump, err = UpdateStump(delHashes, addHashes, proof, stump)
+			err = stump.Update(delHashes, addHashes, proof)
 			if err != nil {
 				t.Fatal(err)
 			}

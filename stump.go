@@ -12,38 +12,24 @@ type Stump struct {
 	NumLeaves uint64
 }
 
-// UpdateStump verifies the proof and returns a new Stump that is updated with
-// additions and the deletions.
-func UpdateStump(delHashes, addHashes []Hash, proof Proof, stump Stump) (Stump, error) {
-	rootCandidates, err := StumpVerify(stump, delHashes, proof)
+// Update verifies the proof and updates the Stump with the additions and the deletions.
+func (s *Stump) Update(delHashes, addHashes []Hash, proof Proof) error {
+	// Delete then add.
+	err := s.del(delHashes, proof)
 	if err != nil {
-		return Stump{}, fmt.Errorf("UpdateStump fail: Invalid proof. Error: %s", err)
+		return err
 	}
+	s.add(addHashes)
 
-	modifiedRoots := stumpDel(stump.NumLeaves, proof)
-
-	roots := make([]Hash, len(stump.Roots))
-	idx := 0
-	for i := len(stump.Roots) - 1; i >= 0; i-- {
-		root := stump.Roots[i]
-
-		if idx < len(rootCandidates) && root == rootCandidates[idx] {
-			roots[i] = modifiedRoots[idx]
-			idx++
-		} else {
-			roots[i] = stump.Roots[i]
-		}
-	}
-
-	return stumpAdd(Stump{roots, stump.NumLeaves}, addHashes), nil
+	return nil
 }
 
-// StumpVerify verifies the proof passed in against the passed in stump. The returned hashes
+// Verify verifies the proof passed in against the passed in stump. The returned hashes
 // are the hashes that were calculated from the proof.
-func StumpVerify(stump Stump, delHashes []Hash, proof Proof) ([]Hash, error) {
+func Verify(stump Stump, delHashes []Hash, proof Proof) ([]Hash, error) {
 	if len(delHashes) != len(proof.Targets) {
-		return nil, fmt.Errorf("StumpVerify fail. Was given %d targets but got %d hashes",
-			len(proof.Targets), len(delHashes))
+		return nil, fmt.Errorf("Verify fail. Was given %d targets but got %d "+
+			"hashes for those targets", len(proof.Targets), len(delHashes))
 	}
 
 	rootCandidates := calculateRoots(stump.NumLeaves, delHashes, proof)
@@ -66,16 +52,36 @@ func StumpVerify(stump Stump, delHashes []Hash, proof Proof) ([]Hash, error) {
 	return rootCandidates, nil
 }
 
-// stumpDel calculates the modified roots effected by the deletion.
-func stumpDel(numLeaves uint64, proof Proof) []Hash {
-	delHashes, afterProof := proofAfterDeletion(numLeaves, proof)
-	roots := calculateRoots(numLeaves, delHashes, afterProof)
-	return roots
+// del verifies that the passed in proof is correct. Then it calculates the
+// modified roots effected by the deletion and updates the roots of the stump
+// accordingly.
+func (s *Stump) del(delHashes []Hash, proof Proof) error {
+	// First verify the proof to make sure it's correct.
+	rootCandidates, err := Verify(*s, delHashes, proof)
+	if err != nil {
+		return fmt.Errorf("Stump update fail: Invalid proof. Error: %s", err)
+	}
+
+	// Then delete.
+	delHashes, afterProof := proofAfterDeletion(s.NumLeaves, proof)
+	modifiedRoots := calculateRoots(s.NumLeaves, delHashes, afterProof)
+
+	idx := 0
+	for i := len(s.Roots) - 1; i >= 0; i-- {
+		root := s.Roots[i]
+
+		if idx < len(rootCandidates) && root == rootCandidates[idx] {
+			s.Roots[i] = modifiedRoots[idx]
+			idx++
+		}
+	}
+
+	return nil
 }
 
-// stumpAdd returns a new Stump after adding the passed in adds to the previous roots
-// and numLeaves.
-func stumpAdd(stump Stump, adds []Hash) Stump {
+// add adds the passed in hashes to accumulator, adding new roots and
+// incrementing numLeaves.
+func (s *Stump) add(adds []Hash) {
 	for _, add := range adds {
 		// We can tell where the roots are by looking at the binary representation
 		// of the numLeaves. Wherever there's a 1, there's a root.
@@ -88,9 +94,9 @@ func stumpAdd(stump Stump, adds []Hash) Stump {
 		// a '1'. If there is a '1', we'll hash the root being added with that root
 		// until we hit a '0'.
 		newRoot := add
-		for h := uint8(0); (stump.NumLeaves>>h)&1 == 1; h++ {
-			root := stump.Roots[len(stump.Roots)-1]
-			stump.Roots = stump.Roots[:len(stump.Roots)-1]
+		for h := uint8(0); (s.NumLeaves>>h)&1 == 1; h++ {
+			root := s.Roots[len(s.Roots)-1]
+			s.Roots = s.Roots[:len(s.Roots)-1]
 
 			// If the root that we're gonna hash with is empty, move the current
 			// node up to the position of the parent.
@@ -119,9 +125,7 @@ func stumpAdd(stump Stump, adds []Hash) Stump {
 				newRoot = parentHash(root, newRoot)
 			}
 		}
-		stump.Roots = append(stump.Roots, newRoot)
-		stump.NumLeaves++
+		s.Roots = append(s.Roots, newRoot)
+		s.NumLeaves++
 	}
-
-	return stump
 }
