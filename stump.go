@@ -62,9 +62,13 @@ func (s *Stump) del(delHashes []Hash, proof Proof) error {
 		return fmt.Errorf("Stump update fail: Invalid proof. Error: %s", err)
 	}
 
-	// Then delete.
-	delHashes, afterProof := proofAfterDeletion(s.NumLeaves, proof)
-	modifiedRoots := calculateRoots(s.NumLeaves, delHashes, afterProof)
+	// Then calculate the modified roots.
+	modifiedRoots := calculateRoots(s.NumLeaves, nil, proof)
+
+	if len(modifiedRoots) != len(rootCandidates) {
+		return fmt.Errorf("Stump update fail: expected %d modified roots but got %d",
+			len(rootCandidates), len(modifiedRoots))
+	}
 
 	idx := 0
 	for i := len(s.Roots) - 1; i >= 0; i-- {
