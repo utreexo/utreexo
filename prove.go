@@ -410,56 +410,55 @@ func calculateRoots(numLeaves uint64, delHashes []Hash, proof Proof) []Hash {
 
 	// Separate index for the hashes in the passed in proof.
 	proofHashIdx := 0
-	for row := uint8(0); row <= totalRows; row++ {
-		extractedProves := extractRowHash(toProve, totalRows, row)
-
-		count := extractedProves.Len() + nextProves.Len()
-		for i := 0; i < count; i++ {
-			provePos, proveHash, sibPresent := getNextPos(&extractedProves, &nextProves)
-
-			// This means we hashed all the way to the top of this subtree.
-			if isRootPosition(provePos, numLeaves, totalRows) {
-				calculatedRootHashes = append(calculatedRootHashes, proveHash)
-				continue
-			}
-
-			var nextHash Hash
-			if sibPresent {
-				_, sibProveHash, _ := getNextPos(&extractedProves, &nextProves)
-
-				// There's 3 different outcomes if the next rowTarget
-				// is a sibling to the current one.
-				//
-				// Either sibling can be a target, which the other
-				// sibling moves up in that case. If neither are
-				// a target, then we hash to calculate the parent.
-				if proveHash == empty {
-					nextHash = sibProveHash
-				} else if sibProveHash == empty {
-					nextHash = proveHash
-				} else {
-					nextHash = parentHash(proveHash, sibProveHash)
-				}
-
-				i++ // Increment one more since we procesed another prove.
-			} else {
-				// If the next prove isn't the sibling of this prove, we fetch
-				// the next proof hash to calculate the parent.
-				hash := proof.Proof[proofHashIdx]
-				proofHashIdx++
-
-				nextHash = hash
-				if proveHash != empty {
-					if isLeftNiece(provePos) {
-						nextHash = parentHash(proveHash, hash)
-					} else {
-						nextHash = parentHash(hash, proveHash)
-					}
-				}
-			}
-
-			nextProves.Append(parent(provePos, totalRows), nextHash)
+	for nextProves.Len() > 0 || toProve.Len() > 0 {
+		provePos, proveHash, sibPresent := getNextPos(&toProve, &nextProves)
+		// Break if we don't have anymore elements left. Really not needed
+		// since the for loop is already checking for len but looks better.
+		if provePos == math.MaxUint64 {
+			break
 		}
+
+		// This means we hashed all the way to the top of this subtree.
+		if isRootPosition(provePos, numLeaves, totalRows) {
+			calculatedRootHashes = append(calculatedRootHashes, proveHash)
+			continue
+		}
+
+		// Calculate the next hash.
+		var nextHash Hash
+		if sibPresent {
+			_, sibProveHash, _ := getNextPos(&toProve, &nextProves)
+
+			// There's 3 different outcomes if the next rowTarget
+			// is a sibling to the current one.
+			//
+			// Either sibling can be a target, which the other
+			// sibling moves up in that case. If neither are
+			// a target, then we hash to calculate the parent.
+			if proveHash == empty {
+				nextHash = sibProveHash
+			} else if sibProveHash == empty {
+				nextHash = proveHash
+			} else {
+				nextHash = parentHash(proveHash, sibProveHash)
+			}
+		} else {
+			// If the next prove isn't the sibling of this prove, we fetch
+			// the next proof hash to calculate the parent.
+			hash := proof.Proof[proofHashIdx]
+			proofHashIdx++
+
+			nextHash = hash
+			if proveHash != empty {
+				if isLeftNiece(provePos) {
+					nextHash = parentHash(proveHash, hash)
+				} else {
+					nextHash = parentHash(hash, proveHash)
+				}
+			}
+		}
+
+		nextProves.Append(parent(provePos, totalRows), nextHash)
 	}
 
 	return calculatedRootHashes
