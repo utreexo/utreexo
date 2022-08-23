@@ -24,32 +24,34 @@ func (s *Stump) Update(delHashes, addHashes []Hash, proof Proof) error {
 	return nil
 }
 
-// Verify verifies the proof passed in against the passed in stump. The returned hashes
-// are the hashes that were calculated from the proof.
-func Verify(stump Stump, delHashes []Hash, proof Proof) ([]Hash, error) {
+// Verify verifies the proof passed in against the passed in stump. The returned ints
+// are the indexes of the roots that were matched with the roots calculated from
+// the proof.
+func Verify(stump Stump, delHashes []Hash, proof Proof) ([]int, error) {
 	if len(delHashes) != len(proof.Targets) {
 		return nil, fmt.Errorf("Verify fail. Was given %d targets but got %d "+
 			"hashes for those targets", len(proof.Targets), len(delHashes))
 	}
 
 	rootCandidates := calculateRoots(stump.NumLeaves, delHashes, proof)
-	rootMatches := 0
+	rootIndexes := make([]int, 0, len(rootCandidates))
 	for i := range stump.Roots {
-		if len(rootCandidates) > rootMatches &&
-			stump.Roots[len(stump.Roots)-(i+1)] == rootCandidates[rootMatches] {
-			rootMatches++
+		if len(rootCandidates) > len(rootIndexes) &&
+			stump.Roots[len(stump.Roots)-(i+1)] == rootCandidates[len(rootIndexes)] {
+
+			rootIndexes = append(rootIndexes, len(stump.Roots)-(i+1))
 		}
 	}
 
-	if len(rootCandidates) != rootMatches {
+	if len(rootCandidates) != len(rootIndexes) {
 		// The proof is invalid because some root candidates were not
 		// included in `roots`.
 		err := fmt.Errorf("StumpVerify fail. Invalid proof. Have %d roots but only "+
-			"matched %d roots", len(rootCandidates), rootMatches)
+			"matched %d roots", len(rootCandidates), len(rootIndexes))
 		return nil, err
 	}
 
-	return rootCandidates, nil
+	return rootIndexes, nil
 }
 
 // del verifies that the passed in proof is correct. Then it calculates the
@@ -57,27 +59,21 @@ func Verify(stump Stump, delHashes []Hash, proof Proof) ([]Hash, error) {
 // accordingly.
 func (s *Stump) del(delHashes []Hash, proof Proof) error {
 	// First verify the proof to make sure it's correct.
-	rootCandidates, err := Verify(*s, delHashes, proof)
+	rootIndexes, err := Verify(*s, delHashes, proof)
 	if err != nil {
 		return fmt.Errorf("Stump update fail: Invalid proof. Error: %s", err)
 	}
 
 	// Then calculate the modified roots.
 	modifiedRoots := calculateRoots(s.NumLeaves, nil, proof)
-
-	if len(modifiedRoots) != len(rootCandidates) {
+	if len(modifiedRoots) != len(rootIndexes) {
 		return fmt.Errorf("Stump update fail: expected %d modified roots but got %d",
-			len(rootCandidates), len(modifiedRoots))
+			len(rootIndexes), len(modifiedRoots))
 	}
 
-	idx := 0
-	for i := len(s.Roots) - 1; i >= 0; i-- {
-		root := s.Roots[i]
-
-		if idx < len(rootCandidates) && root == rootCandidates[idx] {
-			s.Roots[i] = modifiedRoots[idx]
-			idx++
-		}
+	// Update the modified roots.
+	for i, index := range rootIndexes {
+		s.Roots[index] = modifiedRoots[i]
 	}
 
 	return nil
