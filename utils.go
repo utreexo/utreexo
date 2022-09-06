@@ -85,10 +85,15 @@ func rootPosition(leaves uint64, h, forestRows uint8) uint64 {
 }
 
 // isRootPosition checks if the current position is a root given the number of
-// leaves and the enitre rows of the forest.
+// leaves and the entire rows of the forest.
 func isRootPosition(position, numLeaves uint64, forestRows uint8) bool {
 	row := detectRow(position, forestRows)
+	return isRootPositionOnRow(position, numLeaves, row, forestRows)
+}
 
+// isRootPosition checks if the current position is a root given the number of
+// leaves, current row, and the entire rows of the forest.
+func isRootPositionOnRow(position, numLeaves uint64, row, forestRows uint8) bool {
 	rootPresent := numLeaves&(1<<row) != 0
 	rootPos := rootPosition(numLeaves, row, forestRows)
 
