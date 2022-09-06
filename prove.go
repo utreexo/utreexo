@@ -3,7 +3,6 @@ package utreexo
 import (
 	"encoding/hex"
 	"fmt"
-	"math"
 	"sort"
 
 	"golang.org/x/exp/slices"
@@ -159,6 +158,26 @@ func (hnp *hashAndPos) AppendMany(positions []uint64, hashes []Hash) {
 func (hnp *hashAndPos) Delete(i int) {
 	hnp.positions = append(hnp.positions[:i], hnp.positions[i+1:]...)
 	hnp.hashes = append(hnp.hashes[:i], hnp.hashes[i+1:]...)
+}
+
+// PopFront pops the first off element from the slice.
+func (hnp *hashAndPos) PopFront() (uint64, Hash) {
+	var pos uint64
+	var hash Hash
+	pos, hnp.positions = hnp.positions[0], hnp.positions[1:]
+	hash, hnp.hashes = hnp.hashes[0], hnp.hashes[1:]
+
+	return pos, hash
+}
+
+// Pop pops off the last element from the slice.
+func (hnp *hashAndPos) Pop() (uint64, Hash) {
+	var pos uint64
+	var hash Hash
+	pos, hnp.positions = hnp.positions[len(hnp.positions)-1], hnp.positions[:len(hnp.positions)-1]
+	hash, hnp.hashes = hnp.hashes[len(hnp.hashes)-1], hnp.hashes[:len(hnp.hashes)-1]
+
+	return pos, hash
 }
 
 // Reset resets the slice of positions and the hashes for this hashAndPos.
@@ -341,51 +360,22 @@ func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
 	return nil
 }
 
-// getNextPos returns the next smallest element and its hash in the given slices along
-// with whether the element after that is its sibling and pop it off from the slice.
-// Will return MaxUint64 and an empty hash if both the slices are empty.
-func getNextPos(slice1, slice2 *hashAndPos) (uint64, Hash, bool) {
-	// Init with max and attempt to grab the next element in the slice.
-	slice1Pos := uint64(math.MaxUint64)
-	if slice1.Len() > 0 {
-		slice1Pos = slice1.positions[0]
-	}
-	slice2Pos := uint64(math.MaxUint64)
-	if slice2.Len() > 0 {
-		slice2Pos = slice2.positions[0]
-	}
-
-	// Check if there are any elements left.
-	if slice2Pos == math.MaxUint64 && slice1Pos == math.MaxUint64 {
-		return math.MaxUint64, empty, false
+// getNextLeast returns the index of the slice containing the lesser element in
+// the front of the slice. If both slices are empty, -1 is returned.
+func getNextLeast[E any](slice1, slice2 []E, less func(a, b E) bool) int {
+	if len(slice1) > 0 && len(slice2) > 0 {
+		if less(slice1[0], slice2[0]) {
+			return 0
+		} else {
+			return 1
+		}
+	} else if len(slice1) > 0 && len(slice2) == 0 {
+		return 0
+	} else if len(slice1) == 0 && len(slice2) > 0 {
+		return 1
 	}
 
-	// Pick the lesser position.
-	var provePos uint64
-	var proveHash Hash
-	if slice1Pos < slice2Pos {
-		provePos = slice1Pos
-		proveHash = slice1.hashes[0]
-		slice1.Delete(0)
-	} else {
-		provePos = slice2Pos
-		proveHash = slice2.hashes[0]
-		slice2.Delete(0)
-	}
-
-	slice1Sib := uint64(math.MaxUint64)
-	if slice1.Len() > 0 {
-		slice1Sib = slice1.positions[0]
-	}
-	slice2Sib := uint64(math.MaxUint64)
-	if slice2.Len() > 0 {
-		slice2Sib = slice2.positions[0]
-	}
-
-	sib := rightSib(provePos)
-	sibPresent := sib == slice1Sib || sib == slice2Sib
-
-	return provePos, proveHash, sibPresent
+	return -1
 }
 
 // calculateRoots calculates and returns the root hashes. Passing nil delHashes will
@@ -410,25 +400,55 @@ func calculateRoots(numLeaves uint64, delHashes []Hash, proof Proof) []Hash {
 
 	// Separate index for the hashes in the passed in proof.
 	proofHashIdx := 0
-	for nextProves.Len() > 0 || toProve.Len() > 0 {
-		provePos, proveHash, sibPresent := getNextPos(&toProve, &nextProves)
-		// Break if we don't have anymore elements left. Really not needed
-		// since the for loop is already checking for len but looks better.
-		if provePos == math.MaxUint64 {
+	for row := uint8(0); row <= totalRows; {
+		// Grab the next position and hash to process.
+		var provePos uint64
+		var proveHash Hash
+		idx := getNextLeast(toProve.positions, nextProves.positions, uint64Less)
+		if idx == 0 {
+			provePos, proveHash = toProve.PopFront()
+		} else if idx == 1 {
+			provePos, proveHash = nextProves.PopFront()
+		} else {
+			// Break if we don't have anymore elements left.
 			break
 		}
 
+		// Keep incrementing the row if the current position is greater
+		// than the max position on this row.
+		//
+		// Cannot error out here because this loop already checks that
+		// row is lower than totalRows.
+		maxPos, _ := maxPositionAtRow(row, totalRows, numLeaves)
+		for provePos > maxPos {
+			row++
+			maxPos, _ = maxPositionAtRow(row, totalRows, numLeaves)
+		}
+
 		// This means we hashed all the way to the top of this subtree.
-		if isRootPosition(provePos, numLeaves, totalRows) {
+		if isRootPositionOnRow(provePos, numLeaves, row, totalRows) {
 			calculatedRootHashes = append(calculatedRootHashes, proveHash)
 			continue
+		}
+
+		// Attempt to grab the sibling of the current position and hash to process.
+		maybeSibHash, sibPresent := empty, false
+		idx = getNextLeast(toProve.positions, nextProves.positions, uint64Less)
+		if idx == 0 {
+			if rightSib(provePos) == toProve.positions[0] {
+				sibPresent = true
+				_, maybeSibHash = toProve.PopFront()
+			}
+		} else if idx == 1 {
+			if rightSib(provePos) == nextProves.positions[0] {
+				sibPresent = true
+				_, maybeSibHash = nextProves.PopFront()
+			}
 		}
 
 		// Calculate the next hash.
 		var nextHash Hash
 		if sibPresent {
-			_, sibProveHash, _ := getNextPos(&toProve, &nextProves)
-
 			// There's 3 different outcomes if the next rowTarget
 			// is a sibling to the current one.
 			//
@@ -436,11 +456,11 @@ func calculateRoots(numLeaves uint64, delHashes []Hash, proof Proof) []Hash {
 			// sibling moves up in that case. If neither are
 			// a target, then we hash to calculate the parent.
 			if proveHash == empty {
-				nextHash = sibProveHash
-			} else if sibProveHash == empty {
+				nextHash = maybeSibHash
+			} else if maybeSibHash == empty {
 				nextHash = proveHash
 			} else {
-				nextHash = parentHash(proveHash, sibProveHash)
+				nextHash = parentHash(proveHash, maybeSibHash)
 			}
 		} else {
 			// If the next prove isn't the sibling of this prove, we fetch
