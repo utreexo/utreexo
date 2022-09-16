@@ -404,6 +404,13 @@ func startPositionAtRow(row, forestRows uint8) uint64 {
 	return uint64(offset)
 }
 
+// maxPossiblePosAtRow returns the biggest position an accumulator can have for the
+// given totalRows.
+func maxPossiblePosAtRow(row, totalRows uint8) uint64 {
+	mask := uint64(2<<totalRows) - 1
+	return ((mask << (totalRows - row)) & mask) - 1
+}
+
 // maxPositionAtRow returns the biggest position an accumulator can have for the
 // requested row for the given numLeaves.
 func maxPositionAtRow(row, forestRows uint8, numLeaves uint64) (uint64, error) {
@@ -514,90 +521,54 @@ func extractRow(targets []uint64, forestRows, rowToExtract uint8) []uint64 {
 }
 
 // proofPositions returns all the positions that are needed to prove targets passed in.
-func proofPositions(targets []uint64, numLeaves uint64, forestRows uint8) ([]uint64, []uint64) {
-	var nextTargets, proofPositions, computedPositions []uint64
+// NOTE: the passed in targets MUST be sorted.
+func proofPositions(targets []uint64, numLeaves uint64, totalRows uint8) ([]uint64, []uint64) {
+	nextTargets := make([]uint64, 0, len(targets))
+	nextTargetsIdx := 0
 
-	for row := uint8(0); row < forestRows; row++ {
-		rowTargs := extractRow(targets, forestRows, row)
+	proofPositions := make([]uint64, 0, len(targets))
 
-		computedPositions = append(computedPositions, nextTargets...)
-		rowTargs = append(rowTargs, nextTargets...)
-		sort.Slice(rowTargs, func(a, b int) bool { return rowTargs[a] < rowTargs[b] })
-
-		// Reset nextTargets
-		nextTargets = nextTargets[:0]
-
-		if numLeaves&(1<<row) > 0 && len(rowTargs) > 0 &&
-			rowTargs[len(rowTargs)-1] == rootPosition(numLeaves, row, forestRows) {
-			// remove roots from rowTargs
-			rowTargs = rowTargs[:len(rowTargs)-1]
+	targetsIdx := 0
+	for row := uint8(0); row <= totalRows; {
+		target, idx, sibIdx := getNextPos(targets, nextTargets, targetsIdx, nextTargetsIdx)
+		if idx == -1 {
+			// Break if we don't have anymore elements left.
+			break
+		}
+		if idx == 0 {
+			targetsIdx++
+		} else {
+			nextTargetsIdx++
 		}
 
-		for len(rowTargs) > 0 {
-			switch {
-			// look at the first 4 targets
-			case len(rowTargs) > 3:
-				if (rowTargs[0]|1)^2 == rowTargs[3]|1 {
-					// the first and fourth target are cousins
-					// => target 2 and 3 are also rowTargs, both parents are
-					// rowTargs of next row
-					nextTargets = append(nextTargets,
-						parent(rowTargs[0], forestRows), parent(rowTargs[3], forestRows))
-					rowTargs = rowTargs[4:]
-					break
-				}
-				// handle first three rowTargs
-				fallthrough
+		// Keep incrementing the row if the current position is greater
+		// than the max position on this row.
+		for target > maxPossiblePosAtRow(row, totalRows) && row <= totalRows {
+			row++
+		}
+		if row > totalRows {
+			break
+		}
 
-			// look at the first 3 rowTargs
-			case len(rowTargs) > 2:
-				if (rowTargs[0]|1)^2 == rowTargs[2]|1 {
-					// the first and third target are cousins
-					// => the second target is either the sibling of the first
-					// OR the sibiling of the third
-					// => only the sibling that is not a target is appended
-					// to the proof positions
-					if rowTargs[1]|1 == rowTargs[0]|1 {
-						proofPositions = append(proofPositions, rowTargs[2]^1)
-					} else {
-						proofPositions = append(proofPositions, rowTargs[0]^1)
-					}
-					// both parents are rowTargs of next row
-					nextTargets = append(nextTargets,
-						parent(rowTargs[0], forestRows), parent(rowTargs[2], forestRows))
-					rowTargs = rowTargs[3:]
-					break
-				}
-				// handle first two rowTargs
-				fallthrough
+		if isRootPositionOnRow(target, numLeaves, row, totalRows) {
+			continue
+		}
 
-			// look at the first 2 rowTargs
-			case len(rowTargs) > 1:
-				if rowTargs[0]|1 == rowTargs[1] {
-					nextTargets = append(nextTargets, parent(rowTargs[0], forestRows))
-					rowTargs = rowTargs[2:]
-					break
-				}
-				if (rowTargs[0]|1)^2 == rowTargs[1]|1 {
-					proofPositions = append(proofPositions, rowTargs[0]^1, rowTargs[1]^1)
-					nextTargets = append(nextTargets,
-						parent(rowTargs[0], forestRows), parent(rowTargs[1], forestRows))
-					rowTargs = rowTargs[2:]
-					break
-				}
-				// not related, handle first target
-				fallthrough
-
-			// look at the first target
-			default:
-				proofPositions = append(proofPositions, rowTargs[0]^1)
-				nextTargets = append(nextTargets, parent(rowTargs[0], forestRows))
-				rowTargs = rowTargs[1:]
+		sibPresent := sibIdx != -1
+		if sibPresent {
+			if sibIdx == 0 {
+				targetsIdx++
+			} else if sibIdx == 1 {
+				nextTargetsIdx++
 			}
+		} else {
+			proofPositions = append(proofPositions, sibling(target))
 		}
+
+		nextTargets = append(nextTargets, parent(target, totalRows))
 	}
 
-	return proofPositions, computedPositions
+	return proofPositions, nextTargets
 }
 
 // String prints out the whole thing. Only viable for forest that have height of 5 and less.
