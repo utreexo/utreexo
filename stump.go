@@ -1,6 +1,9 @@
 package utreexo
 
-import "fmt"
+import (
+	"encoding/hex"
+	"fmt"
+)
 
 // Stump is bare-minimum data required to validate and update changes in the accumulator.
 // Stump is client-side only and cannot generate proofs on its own. It can only validate
@@ -10,6 +13,27 @@ type Stump struct {
 	Roots []Hash
 	//  NumLeaves is how many leaves the accumulator has allocated for.
 	NumLeaves uint64
+}
+
+// String returns the fields of stump in a human readable string.
+func (s *Stump) String() string {
+	str := fmt.Sprintf("NumLeaves: %d, ", s.NumLeaves)
+
+	if len(s.Roots) == 1 {
+		str += fmt.Sprintf("%d root: [", len(s.Roots))
+	} else {
+		str += fmt.Sprintf("%d roots: [", len(s.Roots))
+	}
+	for i, root := range s.Roots {
+		str += hex.EncodeToString(root[:])
+
+		if i != len(s.Roots)-1 {
+			str += ", "
+		}
+	}
+	str += "]"
+
+	return str
 }
 
 // Update verifies the proof and updates the Stump with the additions and the deletions.
