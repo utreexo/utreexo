@@ -328,7 +328,7 @@ func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
 			len(proof.Targets), len(delHashes))
 	}
 
-	rootCandidates := calculateRoots(p.NumLeaves, delHashes, proof)
+	_, rootCandidates := calculateHashes(p.NumLeaves, delHashes, proof)
 	if len(rootCandidates) == 0 {
 		return fmt.Errorf("Pollard.Verify fail. No roots calculated "+
 			"but have %d deletions", len(delHashes))
@@ -378,40 +378,116 @@ func getNextLeast[E any](slice1, slice2 []E, less func(a, b E) bool) int {
 	return -1
 }
 
-// calculateRoots calculates and returns the root hashes. Passing nil delHashes will
-// return the roots after the deletion of the targets.
-func calculateRoots(numLeaves uint64, delHashes []Hash, proof Proof) []Hash {
-	totalRows := treeRows(numLeaves)
+// getNextHash returns the hash of the parent of these two hashes.
+func getNextHash(pos uint64, hash, sibHash Hash) Hash {
+	// There's 3 different outcomes:
+	// 1: Current hash is empty -> move the sibling up.
+	// 2: Sibling hash is empty -> move the current hash up.
+	// 3: Both are not empty -> hash them.
+	var nextHash Hash
+	if hash == empty {
+		nextHash = sibHash
+	} else if sibHash == empty {
+		nextHash = hash
+	} else {
+		if isLeftNiece(pos) {
+			nextHash = parentHash(hash, sibHash)
+		} else {
+			nextHash = parentHash(sibHash, hash)
+		}
+	}
 
-	// Where all the root hashes that we've calculated will go to.
-	calculatedRootHashes := make([]Hash, 0, numRoots(numLeaves))
+	return nextHash
+}
+
+// nextLeastSlice returns the index of the slice that's has the lesser position
+// in the given indexes. Returns -1 if the length of both slices are less than
+// their indexes.
+func nextLeastSlice(slice1, slice2 []uint64, idx1, idx2 int) int {
+	if len(slice1) > idx1 && len(slice2) > idx2 {
+		if slice1[idx1] < slice2[idx2] {
+			return 0
+		} else {
+			return 1
+		}
+	} else if len(slice1) > idx1 && len(slice2) <= idx2 {
+		return 0
+	} else if len(slice1) <= idx1 && len(slice2) > idx2 {
+		return 1
+	}
+
+	return -1
+}
+
+// getNextPos returns the next position in the given slices along with
+// index of the slice and the index of the sibling slice (if there's a sibling).
+func getNextPos(slice1, slice2 []uint64, slice1Idx, slice2Idx int) (uint64, int, int) {
+	// Grab the next position.
+	var pos uint64
+	idx := nextLeastSlice(slice1, slice2, slice1Idx, slice2Idx)
+	if idx == 0 {
+		pos = slice1[slice1Idx]
+		slice1Idx++
+	} else if idx == 1 {
+		pos = slice2[slice2Idx]
+		slice2Idx++
+	} else {
+		// Break if we don't have anymore elements left.
+		return pos, -1, -1
+	}
+
+	// Attempt to grab the sibling of the current position to process.
+	sibIdx := nextLeastSlice(slice1, slice2, slice1Idx, slice2Idx)
+	if sibIdx == 0 {
+		if rightSib(pos) != slice1[slice1Idx] {
+			sibIdx = -1
+		}
+	} else if sibIdx == 1 {
+		if rightSib(pos) != slice2[slice2Idx] {
+			sibIdx = -1
+		}
+	}
+
+	return pos, idx, sibIdx
+}
+
+// calculateHashes returns the hashes of the roots and all the nodes that
+// were used to calculate the roots. Passing nil delHashes will return the
+// hashes of the roots and the nodes used to calculate the roots after the
+// deletion of the targets.
+func calculateHashes(numLeaves uint64, delHashes []Hash, proof Proof) (hashAndPos, []Hash) {
+	totalRows := treeRows(numLeaves)
 
 	// Where all the parent hashes we've calculated in a given row will go to.
 	nextProves := hashAndPos{make([]uint64, 0, len(proof.Targets)), make([]Hash, 0, len(proof.Targets))}
-
-	// If delHashes are nil, it means that we're calculating the roots after del.
-	if delHashes == nil {
-		delHashes = make([]Hash, len(proof.Targets))
-	}
+	nextProvesIdx := 0
 
 	// These are the leaves to be proven. Each represent a position and the
 	// hash of a leaf.
+	if delHashes == nil {
+		delHashes = make([]Hash, len(proof.Targets))
+	}
 	toProve := toHashAndPos(proof.Targets, delHashes)
+	toProveIdx := 0
+
+	// Where all the root hashes that we've calculated will go to.
+	calculatedRootHashes := make([]Hash, 0, numRoots(numLeaves))
 
 	// Separate index for the hashes in the passed in proof.
 	proofHashIdx := 0
 	for row := uint8(0); row <= totalRows; {
 		// Grab the next position and hash to process.
-		var provePos uint64
 		var proveHash Hash
-		idx := getNextLeast(toProve.positions, nextProves.positions, uint64Less)
-		if idx == 0 {
-			provePos, proveHash = toProve.PopFront()
-		} else if idx == 1 {
-			provePos, proveHash = nextProves.PopFront()
-		} else {
-			// Break if we don't have anymore elements left.
+		provePos, idx, sibIdx := getNextPos(toProve.positions, nextProves.positions, toProveIdx, nextProvesIdx)
+		if idx == -1 {
 			break
+		}
+		if idx == 0 {
+			proveHash = toProve.hashes[toProveIdx]
+			toProveIdx++
+		} else {
+			proveHash = nextProves.hashes[nextProvesIdx]
+			nextProvesIdx++
 		}
 
 		// Keep incrementing the row if the current position is greater
@@ -431,57 +507,32 @@ func calculateRoots(numLeaves uint64, delHashes []Hash, proof Proof) []Hash {
 			continue
 		}
 
-		// Attempt to grab the sibling of the current position and hash to process.
-		maybeSibHash, sibPresent := empty, false
-		idx = getNextLeast(toProve.positions, nextProves.positions, uint64Less)
-		if idx == 0 {
-			if rightSib(provePos) == toProve.positions[0] {
-				sibPresent = true
-				_, maybeSibHash = toProve.PopFront()
-			}
-		} else if idx == 1 {
-			if rightSib(provePos) == nextProves.positions[0] {
-				sibPresent = true
-				_, maybeSibHash = nextProves.PopFront()
-			}
-		}
-
-		// Calculate the next hash.
-		var nextHash Hash
+		var sibHash Hash
+		sibPresent := sibIdx != -1
 		if sibPresent {
-			// There's 3 different outcomes if the next rowTarget
-			// is a sibling to the current one.
-			//
-			// Either sibling can be a target, which the other
-			// sibling moves up in that case. If neither are
-			// a target, then we hash to calculate the parent.
-			if proveHash == empty {
-				nextHash = maybeSibHash
-			} else if maybeSibHash == empty {
-				nextHash = proveHash
+			if sibIdx == 0 {
+				sibHash = toProve.hashes[toProveIdx]
+				toProveIdx++
 			} else {
-				nextHash = parentHash(proveHash, maybeSibHash)
+				sibHash = nextProves.hashes[nextProvesIdx]
+				nextProvesIdx++
 			}
 		} else {
 			// If the next prove isn't the sibling of this prove, we fetch
 			// the next proof hash to calculate the parent.
-			hash := proof.Proof[proofHashIdx]
+			sibHash = proof.Proof[proofHashIdx]
 			proofHashIdx++
-
-			nextHash = hash
-			if proveHash != empty {
-				if isLeftNiece(provePos) {
-					nextHash = parentHash(proveHash, hash)
-				} else {
-					nextHash = parentHash(hash, proveHash)
-				}
-			}
 		}
 
+		// Calculate the next hash.
+		nextHash := getNextHash(provePos, proveHash, sibHash)
 		nextProves.Append(parent(provePos, totalRows), nextHash)
 	}
 
-	return calculatedRootHashes
+	// Add in the targets as well since we need them as well to calculate up
+	// to the roots.
+	nextProves = mergeSortedHashAndPos(nextProves, toProve)
+	return nextProves, calculatedRootHashes
 }
 
 func mergeSortedSlicesFunc[E any](a, b []E, cmp func(E, E) int) (c []E) {
@@ -1202,7 +1253,7 @@ func rootsAfterDel(blockProof Proof, stump Stump) ([]Hash, error) {
 		rootPositions = append(rootPositions, pos)
 	}
 
-	rootCandidates := calculateRoots(stump.NumLeaves, nil, blockProof)
+	_, rootCandidates := calculateHashes(stump.NumLeaves, nil, blockProof)
 
 	// Calculate the roots that will be calculated from the proof.
 	calcRootPositions := []uint64{}
