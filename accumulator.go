@@ -337,7 +337,7 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []
 	// Add empty roots that was present in the previous roots.
 	for i, prevRoot := range prevRoots {
 		if prevRoot == empty {
-			if i >= len(p.Roots) {
+			for i >= len(p.Roots) {
 				p.Roots = append(p.Roots, &polNode{remember: p.Full})
 			}
 			if p.Roots[i].data != empty {
