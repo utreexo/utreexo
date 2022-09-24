@@ -1057,36 +1057,129 @@ func AddProof(proofA, proofB Proof, targetHashesA, targetHashesB []Hash, numLeav
 	return cachedDelHashAndPosC.hashes, retProof
 }
 
-// UpdateProofRemove modifies the cached proof with the deletions that happen in the block proof.
+// getNewPositions updates all the positions in the slice after the blockTargets have been deleted.
+func getNewPositions(blockTargets []uint64, slice hashAndPos, numLeaves uint64, appendRoots bool) hashAndPos {
+	totalRows := treeRows(numLeaves)
+	newSlice := hashAndPos{make([]uint64, 0, slice.Len()), make([]Hash, 0, slice.Len())}
+
+	row := uint8(0)
+	for i, pos := range slice.positions {
+		hash := slice.hashes[i]
+		if hash == empty {
+			continue
+		}
+
+		for pos > maxPossiblePosAtRow(row, totalRows) && row <= totalRows {
+			row++
+		}
+		if row > totalRows {
+			break
+		}
+
+		nextPos := pos
+		for _, target := range blockTargets {
+			if isRootPositionOnRow(nextPos, numLeaves, row, totalRows) {
+				break
+			}
+
+			// If these positions are in different subtrees, continue.
+			subtree, _, _, _ := detectOffset(target, numLeaves)
+			subtree1, _, _, _ := detectOffset(nextPos, numLeaves)
+			if subtree != subtree1 {
+				continue
+			}
+
+			if isAncestor(parent(target, totalRows), nextPos, totalRows) {
+				nextPos, _ = calcNextPosition(nextPos, target, totalRows)
+			}
+		}
+
+		if appendRoots {
+			newSlice.Append(nextPos, hash)
+		} else {
+			if !isRootPositionOnRow(nextPos, numLeaves, row, totalRows) {
+				newSlice.Append(nextPos, hash)
+			}
+		}
+	}
+
+	sort.Sort(newSlice)
+
+	return newSlice
+}
+
+// updateProofRemove modifies the cached proof with the deletions that happen in the block proof.
 // It updates the necessary proof hashes and un-caches the targets that are being deleted.
-func UpdateProofRemove(cachedProof, blockProof Proof, cachedDelHashes, blockDelHashes []Hash, numLeaves uint64) ([]Hash, Proof) {
-	// First we calculate which hashes are going to be deleted from the cached hashes.
-	// The resulting desiredHashesWithPos are the hashes that we will be caching after
-	// the deletion.
-	desiredHashesWithPos := toHashAndPos(cachedProof.Targets, cachedDelHashes)
-	blockHashesWithPos := toHashAndPos(blockProof.Targets, blockDelHashes)
-	desiredHashesWithPos = subtractSortedHashAndPos(desiredHashesWithPos, blockHashesWithPos.positions, uint64Cmp)
+func (p *Proof) updateProofRemove(blockTargets []uint64, cachedHashes []Hash, updated hashAndPos, numLeaves uint64) []Hash {
+	totalRows := treeRows(numLeaves)
 
-	// Combine the proofs so we have all the data that we need.
-	combinedDelHashes, combinedProof := AddProof(cachedProof, blockProof, cachedDelHashes, blockDelHashes, numLeaves)
-	// Calculate the proof after deleting the blockProof targets.
-	combinedDelHashes, combinedProof = proofAfterPartialDeletion(numLeaves, combinedProof, combinedDelHashes, blockProof.Targets)
-	// Then remove the blockProof targets as these need to be uncached.
-	// This removal process also calculates the proof hashes.
-	blockDelHashes, blockProof = proofAfterDeletion(numLeaves, blockProof)
+	// Delete from the target.
+	sortedBlockTargets := copySortedFunc(blockTargets, uint64Less)
+	targetsWithHash := toHashAndPos(p.Targets, cachedHashes)
+	targetsWithHash = subtractSortedHashAndPos(targetsWithHash, sortedBlockTargets, uint64Cmp)
 
-	// Calculate the positions that should be removed from the combined proof by removing
-	// the desired hashes from the block deletion hashes.
+	// Attach positions to the proofs.
+	sortedCachedTargets := copySortedFunc(p.Targets, uint64Less)
+	proofPos, _ := proofPositions(sortedCachedTargets, numLeaves, totalRows)
+	oldProofs := toHashAndPos(proofPos, p.Proof)
+	newProofs := hashAndPos{make([]uint64, 0, len(p.Proof)), make([]Hash, 0, len(p.Proof))}
 
-	blockDelHashesWithPos := toHashAndPos(blockProof.Targets, blockDelHashes)
-	blockDelHashesWithPos = removeHashesFromHashAndPos(blockDelHashesWithPos, desiredHashesWithPos.hashes, func(elem Hash) Hash { return elem })
-	removeTargets := make([]uint64, blockDelHashesWithPos.Len())
-	copy(removeTargets, blockDelHashesWithPos.positions)
+	// Grab all the positions of the needed proof hashes.
+	neededPos, _ := proofPositions(targetsWithHash.positions, numLeaves, totalRows)
 
-	// Remove the unnecessary positions from the combined proof.
-	combinedDelHashes, combinedProof = RemoveTargets(numLeaves, combinedDelHashes, combinedProof, removeTargets)
+	// Grab the un-needed positions. These are un-needed as they were proofs
+	// for the now deleted targets.
+	extraPos := copySortedFunc(oldProofs.positions, uint64Less)
+	extraPos = subtractSortedSlice(extraPos, neededPos, uint64Cmp)
 
-	return combinedDelHashes, combinedProof
+	// Loop through oldProofs and only add the needed proof hashes.
+	idx, extraIdx := 0, 0
+	for i, pos := range oldProofs.positions {
+		for extraIdx < len(extraPos) && extraPos[extraIdx] < pos {
+			extraIdx++
+		}
+		if extraIdx < len(extraPos) && extraPos[extraIdx] == pos {
+			continue
+		}
+
+		for idx < updated.Len() && updated.positions[idx] < pos {
+			idx++
+		}
+		if idx < updated.Len() && updated.positions[idx] == pos {
+			if updated.hashes[idx] != empty {
+				newProofs.Append(pos, updated.hashes[idx])
+			}
+		} else {
+			newProofs.Append(pos, oldProofs.hashes[i])
+		}
+	}
+
+	// Missing positions are the newly needed positions that aren't present in the proof.
+	// These positions are there because they were calculateable before the deletion in the
+	// previous proof.
+	missingPos := copySortedFunc(neededPos, uint64Less)
+	missingPos = subtractSortedSlice(missingPos, oldProofs.positions, uint64Cmp)
+	missingPos = subtractSortedSlice(missingPos, sortedBlockTargets, uint64Cmp)
+
+	// Loop through the missingPos and add missing positions.
+	idx = 0
+	for _, missing := range missingPos {
+		for idx < updated.Len() && updated.positions[idx] < missing {
+			idx++
+		}
+
+		if idx < updated.Len() && updated.positions[idx] == missing {
+			newProofs.Append(missing, updated.hashes[idx])
+		}
+	}
+
+	// Update positions.
+	sortedBlockTargets = deTwin(sortedBlockTargets, totalRows)
+	targetsWithHash = getNewPositions(sortedBlockTargets, targetsWithHash, numLeaves, true)
+	newProofs = getNewPositions(sortedBlockTargets, newProofs, numLeaves, false)
+
+	*p = Proof{targetsWithHash.positions, newProofs.hashes}
+	return targetsWithHash.hashes
 }
 
 // UpdateProofAdd modifies the cached proof with the additions that are passed in.
@@ -1245,15 +1338,13 @@ func getNewPositionsAfterAdd(cachedProof Proof, cachedHashes, adds []Hash,
 
 // rootsAfterDel returns the roots after the deletion in the blockProof has happened.
 // NOTE: This function does not verify the proof. That responsibility is on the caller.
-func rootsAfterDel(blockProof Proof, stump Stump) ([]Hash, error) {
+func rootsAfterDel(blockProof Proof, rootCandidates []Hash, stump Stump) ([]Hash, error) {
 	// Calculate all the current root positions.
 	rootPositions := []uint64{}
 	for _, root := range stump.Roots {
 		pos := whichRoot(stump.NumLeaves, root, stump.Roots)
 		rootPositions = append(rootPositions, pos)
 	}
-
-	_, rootCandidates := calculateHashes(stump.NumLeaves, nil, blockProof)
 
 	// Calculate the roots that will be calculated from the proof.
 	calcRootPositions := []uint64{}
@@ -1285,12 +1376,12 @@ func UpdateProof(cachedProof, blockProof Proof, cachedDelHashes, blockDelHashes,
 	adds []Hash, remembers []uint32, stump Stump) ([]Hash, Proof, error) {
 
 	// Remove necessary targets and update proof hashes with the blockProof.
-	cachedDelHashes, cachedProof = UpdateProofRemove(cachedProof, blockProof,
-		cachedDelHashes, blockDelHashes, stump.NumLeaves)
+	updated, rootCandidates := calculateHashes(stump.NumLeaves, nil, blockProof)
+	cachedDelHashes = cachedProof.updateProofRemove(blockProof.Targets, cachedDelHashes, updated, stump.NumLeaves)
 
 	// Modify the roots with the blockProof.
 	var err error
-	stump.Roots, err = rootsAfterDel(blockProof, stump)
+	stump.Roots, err = rootsAfterDel(blockProof, rootCandidates, stump)
 	if err != nil {
 		return nil, Proof{}, err
 	}

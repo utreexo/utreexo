@@ -561,7 +561,6 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		delIndexes := randomIndexes(currentLeaves.Len(), 1)
 		delPositions := make([]uint64, len(delIndexes))
 		for i := range delIndexes {
-			//delPositions[i] = delLeaves[i].pos
 			delPositions[i] = currentLeaves.positions[delIndexes[i]]
 		}
 
@@ -590,7 +589,8 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		cachedTargetsAndHash = subtractSortedHashAndPos(cachedTargetsAndHash, blockDelTargetsAndHash.positions, uint64Cmp)
 
 		// Update the cached proof with the block proof.
-		leafSubset.hashes, cachedProof = UpdateProofRemove(cachedProof, blockProof, leafSubset.hashes, blockDelHashes, p.NumLeaves)
+		updated, _ := calculateHashes(p.NumLeaves, nil, blockProof)
+		leafSubset.hashes = cachedProof.updateProofRemove(blockProof.Targets, leafSubset.hashes, updated, p.NumLeaves)
 
 		// Modify the pollard.
 		err = p.Modify(nil, blockDelHashes, delPositions)
@@ -616,20 +616,31 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		// Check that all the hashes we expect to be cached are all there.
 		shouldBeEmpty = removeHashesFromHashAndPos(shouldBeEmpty, leafHashesAndPos.hashes, func(elem Hash) Hash { return elem })
 		if shouldBeEmpty.Len() > 0 {
-			t.Fatalf("FuzzUpdateProofRemove Fail. Expected hashes:\n%s\nbut got:\n%s\n",
-				printHashes(cachedTargetsAndHash.hashes), printHashes(shouldBeEmpty.hashes))
+			t.Fatalf("FuzzUpdateProofRemove Fail. Expected hashes:\n%s\nbut got:\n%s\n"+
+				"Pollard before:\n%s\nPollard after:\n%s\n",
+				printHashes(cachedTargetsAndHash.hashes), printHashes(shouldBeEmpty.hashes),
+				pollardBeforeStr, p.String())
 		}
 
 		cachedProofPos, _ := proofPositions(cachedProof.Targets, p.NumLeaves, treeRows(p.NumLeaves))
 		if len(cachedProofPos) != len(cachedProof.Proof) {
-			t.Fatalf("FuzzUpdateProofRemove Fail. CachedProof hashes:\n%v\nbut want these positions:\n%v.\nPollard:\n%s\n",
-				printHashes(cachedProof.Proof), cachedProofPos, p.String())
+			t.Fatalf("FuzzUpdateProofRemove Fail. CachedProof has these hashes:\n%v\n"+
+				"for these targets:\n%v\n"+
+				"but want hashes of these positions:\n%v.\nOriginal cached targets:\n%s\n"+
+				"Pollard before:\n%s\nPollard after:\n%s\n",
+				printHashes(cachedProof.Proof), cachedProof.Targets, cachedProofPos,
+				origTargetsAndHash.String(),
+				pollardBeforeStr, p.String())
 		}
 
 		// And verify that the proof is correct.
 		err = p.Verify(leafSubset.hashes, cachedProof)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("FuzzUpdateProofRemove Fail\nErr: %s\n\n"+
+				"Proof:\n%s\nTarget hashes:\n%s\n"+
+				"Pollard before:\n%s\nPollard after:\n%s\n", err,
+				cachedProof.String(), printHashes(leafSubset.hashes),
+				pollardBeforeStr, p.String())
 		}
 	})
 }
@@ -831,7 +842,7 @@ func FuzzModifyProofChain(f *testing.F) {
 			// Check that we have enough targets as we expect.
 			if len(cachedProof.Targets) != len(cachedHashes) {
 				t.Fatalf("FuzzUpdateProofRemove Fail. Expected %d "+
-					"targets but got %d.\nDeleted hashes:\n%v."+
+					"targets but got %d.\nDeleted hashes:\n%v"+
 					"\nOriginal cached hashes:\n%v\nExpected "+
 					"hashes:\n%v\nGot hashes:\n%v\n",
 					len(cachedHashes),
