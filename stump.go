@@ -15,6 +15,24 @@ type Stump struct {
 	NumLeaves uint64
 }
 
+// UpdateData is all the data needed from the stump to update a cached proof.
+type UpdateData struct {
+	// ToDestroy is the positions of the empty roots removed after the add.
+	ToDestroy []uint64
+	// PrevNumLeaves is the numLeaves of the stump before the add.
+	PrevNumLeaves uint64
+
+	// NewDelHash are the new hashes after the deletion.
+	NewDelHash []Hash
+	// NewDelPos are the original positions of the new hashes.
+	NewDelPos []uint64
+
+	// NewAddHash are the new hashes for the newly created roots after the addition.
+	NewAddHash []Hash
+	// NewAddPos are the positions of the new hashes.
+	NewAddPos []uint64
+}
+
 // String returns the fields of stump in a human readable string.
 func (s *Stump) String() string {
 	str := fmt.Sprintf("NumLeaves: %d, ", s.NumLeaves)
@@ -37,15 +55,17 @@ func (s *Stump) String() string {
 }
 
 // Update verifies the proof and updates the Stump with the additions and the deletions.
-func (s *Stump) Update(delHashes, addHashes []Hash, proof Proof) error {
+// The returned update data can be used to update a cached proof.
+func (s *Stump) Update(delHashes, addHashes []Hash, proof Proof) (UpdateData, error) {
 	// Delete then add.
-	err := s.del(delHashes, proof)
+	delHash, delPos, err := s.del(delHashes, proof)
 	if err != nil {
-		return err
+		return UpdateData{}, err
 	}
-	s.add(addHashes)
+	prevNumLeaves := s.NumLeaves
+	addHash, addPos, toDestroy := s.add(addHashes)
 
-	return nil
+	return UpdateData{toDestroy, prevNumLeaves, delHash, delPos, addHash, addPos}, nil
 }
 
 // Verify verifies the proof passed in against the passed in stump. The returned ints
@@ -80,18 +100,18 @@ func Verify(stump Stump, delHashes []Hash, proof Proof) ([]int, error) {
 
 // del verifies that the passed in proof is correct. Then it calculates the
 // modified roots effected by the deletion and updates the roots of the stump
-// accordingly.
-func (s *Stump) del(delHashes []Hash, proof Proof) error {
+// accordingly. The returned hashes represents the new hashes at their old positions.
+func (s *Stump) del(delHashes []Hash, proof Proof) ([]Hash, []uint64, error) {
 	// First verify the proof to make sure it's correct.
 	rootIndexes, err := Verify(*s, delHashes, proof)
 	if err != nil {
-		return fmt.Errorf("Stump update fail: Invalid proof. Error: %s", err)
+		return nil, nil, fmt.Errorf("Stump update fail: Invalid proof. Error: %s", err)
 	}
 
 	// Then calculate the modified roots.
-	_, modifiedRoots := calculateHashes(s.NumLeaves, nil, proof)
+	intermediate, modifiedRoots := calculateHashes(s.NumLeaves, nil, proof)
 	if len(modifiedRoots) != len(rootIndexes) {
-		return fmt.Errorf("Stump update fail: expected %d modified roots but got %d",
+		return nil, nil, fmt.Errorf("Stump update fail: expected %d modified roots but got %d",
 			len(rootIndexes), len(modifiedRoots))
 	}
 
@@ -100,7 +120,7 @@ func (s *Stump) del(delHashes []Hash, proof Proof) error {
 		s.Roots[index] = modifiedRoots[i]
 	}
 
-	return nil
+	return intermediate.hashes, intermediate.positions, nil
 }
 
 // add adds the passed in hashes to accumulator, adding new roots and

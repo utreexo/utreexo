@@ -734,7 +734,7 @@ func FuzzModifyProofChain(f *testing.F) {
 			if err != nil {
 				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
 			}
-			err = stump.Update(delHashes, addHashes, blockProof)
+			_, err = stump.Update(delHashes, addHashes, blockProof)
 			if err != nil {
 				t.Fatal(err)
 			}
