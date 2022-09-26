@@ -647,141 +647,6 @@ func subtractSortedSlice[E, F any](a []E, b []F, cmp func(E, F) int) []E {
 	return a
 }
 
-// proofAfterDeletion modifies the proof so that it proves the siblings of the targets
-// in this proof. Having this information allows for the calculation of roots after the
-// deletion has happened.
-func proofAfterDeletion(numLeaves uint64, proof Proof) ([]Hash, Proof) {
-	// We don't need the delHashes for the proof if we're deleting every target.
-	// Create these empty delHashes are needed since proofAfterPartialDeletion
-	// needs it for making hashAndPos for the targets.
-	delHashes := make([]Hash, len(proof.Targets))
-	return proofAfterPartialDeletion(numLeaves, proof, delHashes, proof.Targets)
-}
-
-// proofAfterDeletion modifies the proof so that it proves the siblings of the targets
-// remTargets. The hashes and proof returned for the calculation of roots after the
-// deletion of the remTargets has happened.
-//
-// NOTE: remTargets must be a subset of proof.Targets. Otherwise nothing happens.
-func proofAfterPartialDeletion(numLeaves uint64, proof Proof, delHashes []Hash, remTargets []uint64) ([]Hash, Proof) {
-	forestRows := treeRows(numLeaves)
-
-	// Copy the targets to avoid mutating the original. Then detwin it
-	// to prep for deletion.
-	targets := copySortedFunc(proof.Targets, uint64Less)
-
-	// Use the sorted targets to generate the positions for the proof hashes.
-	proofPos, _ := proofPositions(targets, numLeaves, forestRows)
-	// Attach a position to each of the proof hashes.
-	hnp := toHashAndPos(proofPos, proof.Proof)
-
-	targetsWithHashes := toHashAndPos(proof.Targets, delHashes)
-
-	// We want to detwin targetsWithHashes but *only* the targets that will be removed. We
-	// do this by removing the remTargets, detwining the remTargets, then adding back the
-	// detwined remTargets to the targetsWithHashes.
-	sort.Slice(remTargets, func(a, b int) bool { return remTargets[a] < remTargets[b] })
-	targetsWithHashes = subtractSortedHashAndPos(targetsWithHashes, remTargets, uint64Cmp)
-
-	// Detwin the removes.
-	deTwinedRems := make([]uint64, len(remTargets))
-	copy(deTwinedRems, remTargets)
-	deTwinedRems = deTwin(deTwinedRems, forestRows)
-
-	// Final step of the detwin. Add the detwined target and hash to targetsWithHashes.
-	// Empty hashes are just so that they can also be hashAndPos. All of these will get
-	// removed and be replaced with the sibling so it's ok with have empty hashes.
-	deTwinedRemsWithHash := toHashAndPos(deTwinedRems, make([]Hash, len(deTwinedRems)))
-	targetsWithHashes = mergeSortedHashAndPos(targetsWithHashes, deTwinedRemsWithHash)
-
-	// For each of the detwinedRems, if we find it in targetsWithHashes, we'll try
-	// to find the sibling in the proof hashes and promote it as the parent. If
-	// it's not in the proof hashes, we'll move the descendants of the existing
-	// proofs of the sibling's parent up by one row.
-	for i := 0; i < len(deTwinedRems); i++ {
-		// If this deletion isn't in the targets, move on.
-		idx := slices.IndexFunc(targetsWithHashes.positions, func(elem uint64) bool { return elem == deTwinedRems[i] })
-		if idx == -1 {
-			continue
-		}
-		targetPos := targetsWithHashes.positions[idx]
-		targetsWithHashes.Delete(idx)
-
-		// If we're deleting a root, then add empty to the targets and move on.
-		if isRootPosition(deTwinedRems[i], numLeaves, forestRows) {
-			targetsWithHashes = mergeSortedHashAndPos(targetsWithHashes, hashAndPos{[]uint64{deTwinedRems[i]}, []Hash{empty}})
-			continue
-		}
-
-		// Same for whenthe sibling is a root. Add empty and move on.
-		sib := sibling(targetPos)
-		if isRootPosition(sib, numLeaves, forestRows) {
-			targetsWithHashes = mergeSortedHashAndPos(targetsWithHashes, hashAndPos{[]uint64{sib}, []Hash{empty}})
-			continue
-		}
-
-		// Look for the sibling in the proof hashes.
-		if idx := slices.IndexFunc(hnp.positions, func(elem uint64) bool { return elem == sib }); idx != -1 {
-			parentPos := parent(sib, forestRows)
-
-			targetsWithHashes = mergeSortedHashAndPos(targetsWithHashes, hashAndPos{[]uint64{parentPos}, []Hash{hnp.hashes[idx]}})
-
-			// Delete the sibling from hnp as this sibling is a target now, not a proof.
-			hnp.Delete(idx)
-		} else {
-			// If the sibling is not in the proof hashes or the targets,
-			// the descendants of the sibling will be moving up.
-			//
-			// 14
-			// |---------------\
-			// 12              13
-			// |-------\       |-------\
-			// 08      09      10      11
-			// |---\   |---\   |---\   |---\
-			// 00  01          04  05  06  07
-			//
-			// In the above tree, if we're deleting 00 and 09, 09 won't be
-			// able to find the sibling in the proof hashes. 01 would have moved
-			// up to 08 and we'll move 08 up and to 12 as 09 is also being deleted.
-
-			// First update the targets to their new positions.
-			for j := targetsWithHashes.Len() - 1; j >= 0; j-- {
-				ancestor := isAncestor(parent(sib, forestRows), targetsWithHashes.positions[j], forestRows)
-				if ancestor {
-					// We can ignore the error since we've already verified that
-					// the targetsWithHashes[j] is an ancestor of sib.
-					nextPos, _ := calcNextPosition(targetsWithHashes.positions[j], sib, forestRows)
-					targetsWithHashes.positions[j] = nextPos
-				}
-			}
-
-			// Update the proofs as well.
-			for j := hnp.Len() - 1; j >= 0; j-- {
-				ancestor := isAncestor(parent(sib, forestRows), hnp.positions[j], forestRows)
-				if ancestor {
-					// We can ignore the error since we've already verified that
-					// the hnp[j] is an ancestor of sib.
-					nextPos, _ := calcNextPosition(hnp.positions[j], sib, forestRows)
-					hnp.positions[j] = nextPos
-				}
-			}
-
-			// Dedupe.
-			sort.Sort(targetsWithHashes)
-			for i := 0; i < targetsWithHashes.Len(); i++ {
-				if i < targetsWithHashes.Len()-1 && targetsWithHashes.positions[i] == targetsWithHashes.positions[i+1] {
-					targetsWithHashes.Delete(i)
-				}
-			}
-		}
-	}
-
-	// The proof hashes should be in order before they're included in the proof.
-	sort.Sort(hnp)
-
-	return targetsWithHashes.hashes, Proof{targetsWithHashes.positions, hnp.hashes}
-}
-
 // GetMissingPositions returns the positions missing in the proof to proof the desiredTargets.
 //
 // The proofTargets being passed in MUST be a from a valid proof. Having an invalid proof may
@@ -1057,36 +922,129 @@ func AddProof(proofA, proofB Proof, targetHashesA, targetHashesB []Hash, numLeav
 	return cachedDelHashAndPosC.hashes, retProof
 }
 
-// UpdateProofRemove modifies the cached proof with the deletions that happen in the block proof.
+// getNewPositions updates all the positions in the slice after the blockTargets have been deleted.
+func getNewPositions(blockTargets []uint64, slice hashAndPos, numLeaves uint64, appendRoots bool) hashAndPos {
+	totalRows := treeRows(numLeaves)
+	newSlice := hashAndPos{make([]uint64, 0, slice.Len()), make([]Hash, 0, slice.Len())}
+
+	row := uint8(0)
+	for i, pos := range slice.positions {
+		hash := slice.hashes[i]
+		if hash == empty {
+			continue
+		}
+
+		for pos > maxPossiblePosAtRow(row, totalRows) && row <= totalRows {
+			row++
+		}
+		if row > totalRows {
+			break
+		}
+
+		nextPos := pos
+		for _, target := range blockTargets {
+			if isRootPositionOnRow(nextPos, numLeaves, row, totalRows) {
+				break
+			}
+
+			// If these positions are in different subtrees, continue.
+			subtree, _, _, _ := detectOffset(target, numLeaves)
+			subtree1, _, _, _ := detectOffset(nextPos, numLeaves)
+			if subtree != subtree1 {
+				continue
+			}
+
+			if isAncestor(parent(target, totalRows), nextPos, totalRows) {
+				nextPos, _ = calcNextPosition(nextPos, target, totalRows)
+			}
+		}
+
+		if appendRoots {
+			newSlice.Append(nextPos, hash)
+		} else {
+			if !isRootPositionOnRow(nextPos, numLeaves, row, totalRows) {
+				newSlice.Append(nextPos, hash)
+			}
+		}
+	}
+
+	sort.Sort(newSlice)
+
+	return newSlice
+}
+
+// updateProofRemove modifies the cached proof with the deletions that happen in the block proof.
 // It updates the necessary proof hashes and un-caches the targets that are being deleted.
-func UpdateProofRemove(cachedProof, blockProof Proof, cachedDelHashes, blockDelHashes []Hash, numLeaves uint64) ([]Hash, Proof) {
-	// First we calculate which hashes are going to be deleted from the cached hashes.
-	// The resulting desiredHashesWithPos are the hashes that we will be caching after
-	// the deletion.
-	desiredHashesWithPos := toHashAndPos(cachedProof.Targets, cachedDelHashes)
-	blockHashesWithPos := toHashAndPos(blockProof.Targets, blockDelHashes)
-	desiredHashesWithPos = subtractSortedHashAndPos(desiredHashesWithPos, blockHashesWithPos.positions, uint64Cmp)
+func (p *Proof) updateProofRemove(blockTargets []uint64, cachedHashes []Hash, updated hashAndPos, numLeaves uint64) []Hash {
+	totalRows := treeRows(numLeaves)
 
-	// Combine the proofs so we have all the data that we need.
-	combinedDelHashes, combinedProof := AddProof(cachedProof, blockProof, cachedDelHashes, blockDelHashes, numLeaves)
-	// Calculate the proof after deleting the blockProof targets.
-	combinedDelHashes, combinedProof = proofAfterPartialDeletion(numLeaves, combinedProof, combinedDelHashes, blockProof.Targets)
-	// Then remove the blockProof targets as these need to be uncached.
-	// This removal process also calculates the proof hashes.
-	blockDelHashes, blockProof = proofAfterDeletion(numLeaves, blockProof)
+	// Delete from the target.
+	sortedBlockTargets := copySortedFunc(blockTargets, uint64Less)
+	targetsWithHash := toHashAndPos(p.Targets, cachedHashes)
+	targetsWithHash = subtractSortedHashAndPos(targetsWithHash, sortedBlockTargets, uint64Cmp)
 
-	// Calculate the positions that should be removed from the combined proof by removing
-	// the desired hashes from the block deletion hashes.
+	// Attach positions to the proofs.
+	sortedCachedTargets := copySortedFunc(p.Targets, uint64Less)
+	proofPos, _ := proofPositions(sortedCachedTargets, numLeaves, totalRows)
+	oldProofs := toHashAndPos(proofPos, p.Proof)
+	newProofs := hashAndPos{make([]uint64, 0, len(p.Proof)), make([]Hash, 0, len(p.Proof))}
 
-	blockDelHashesWithPos := toHashAndPos(blockProof.Targets, blockDelHashes)
-	blockDelHashesWithPos = removeHashesFromHashAndPos(blockDelHashesWithPos, desiredHashesWithPos.hashes, func(elem Hash) Hash { return elem })
-	removeTargets := make([]uint64, blockDelHashesWithPos.Len())
-	copy(removeTargets, blockDelHashesWithPos.positions)
+	// Grab all the positions of the needed proof hashes.
+	neededPos, _ := proofPositions(targetsWithHash.positions, numLeaves, totalRows)
 
-	// Remove the unnecessary positions from the combined proof.
-	combinedDelHashes, combinedProof = RemoveTargets(numLeaves, combinedDelHashes, combinedProof, removeTargets)
+	// Grab the un-needed positions. These are un-needed as they were proofs
+	// for the now deleted targets.
+	extraPos := copySortedFunc(oldProofs.positions, uint64Less)
+	extraPos = subtractSortedSlice(extraPos, neededPos, uint64Cmp)
 
-	return combinedDelHashes, combinedProof
+	// Loop through oldProofs and only add the needed proof hashes.
+	idx, extraIdx := 0, 0
+	for i, pos := range oldProofs.positions {
+		for extraIdx < len(extraPos) && extraPos[extraIdx] < pos {
+			extraIdx++
+		}
+		if extraIdx < len(extraPos) && extraPos[extraIdx] == pos {
+			continue
+		}
+
+		for idx < updated.Len() && updated.positions[idx] < pos {
+			idx++
+		}
+		if idx < updated.Len() && updated.positions[idx] == pos {
+			if updated.hashes[idx] != empty {
+				newProofs.Append(pos, updated.hashes[idx])
+			}
+		} else {
+			newProofs.Append(pos, oldProofs.hashes[i])
+		}
+	}
+
+	// Missing positions are the newly needed positions that aren't present in the proof.
+	// These positions are there because they were calculateable before the deletion in the
+	// previous proof.
+	missingPos := copySortedFunc(neededPos, uint64Less)
+	missingPos = subtractSortedSlice(missingPos, oldProofs.positions, uint64Cmp)
+	missingPos = subtractSortedSlice(missingPos, sortedBlockTargets, uint64Cmp)
+
+	// Loop through the missingPos and add missing positions.
+	idx = 0
+	for _, missing := range missingPos {
+		for idx < updated.Len() && updated.positions[idx] < missing {
+			idx++
+		}
+
+		if idx < updated.Len() && updated.positions[idx] == missing {
+			newProofs.Append(missing, updated.hashes[idx])
+		}
+	}
+
+	// Update positions.
+	sortedBlockTargets = deTwin(sortedBlockTargets, totalRows)
+	targetsWithHash = getNewPositions(sortedBlockTargets, targetsWithHash, numLeaves, true)
+	newProofs = getNewPositions(sortedBlockTargets, newProofs, numLeaves, false)
+
+	*p = Proof{targetsWithHash.positions, newProofs.hashes}
+	return targetsWithHash.hashes
 }
 
 // UpdateProofAdd modifies the cached proof with the additions that are passed in.
@@ -1245,15 +1203,13 @@ func getNewPositionsAfterAdd(cachedProof Proof, cachedHashes, adds []Hash,
 
 // rootsAfterDel returns the roots after the deletion in the blockProof has happened.
 // NOTE: This function does not verify the proof. That responsibility is on the caller.
-func rootsAfterDel(blockProof Proof, stump Stump) ([]Hash, error) {
+func rootsAfterDel(blockProof Proof, rootCandidates []Hash, stump Stump) ([]Hash, error) {
 	// Calculate all the current root positions.
 	rootPositions := []uint64{}
 	for _, root := range stump.Roots {
 		pos := whichRoot(stump.NumLeaves, root, stump.Roots)
 		rootPositions = append(rootPositions, pos)
 	}
-
-	_, rootCandidates := calculateHashes(stump.NumLeaves, nil, blockProof)
 
 	// Calculate the roots that will be calculated from the proof.
 	calcRootPositions := []uint64{}
@@ -1285,12 +1241,12 @@ func UpdateProof(cachedProof, blockProof Proof, cachedDelHashes, blockDelHashes,
 	adds []Hash, remembers []uint32, stump Stump) ([]Hash, Proof, error) {
 
 	// Remove necessary targets and update proof hashes with the blockProof.
-	cachedDelHashes, cachedProof = UpdateProofRemove(cachedProof, blockProof,
-		cachedDelHashes, blockDelHashes, stump.NumLeaves)
+	updated, rootCandidates := calculateHashes(stump.NumLeaves, nil, blockProof)
+	cachedDelHashes = cachedProof.updateProofRemove(blockProof.Targets, cachedDelHashes, updated, stump.NumLeaves)
 
 	// Modify the roots with the blockProof.
 	var err error
-	stump.Roots, err = rootsAfterDel(blockProof, stump)
+	stump.Roots, err = rootsAfterDel(blockProof, rootCandidates, stump)
 	if err != nil {
 		return nil, Proof{}, err
 	}

@@ -395,106 +395,6 @@ func FuzzAddProof(f *testing.F) {
 	})
 }
 
-func FuzzProofAfterDeletion(f *testing.F) {
-	var tests = []struct {
-		startLeaves uint32
-		delCount    uint32
-		seed        int64
-	}{
-		{
-			16,
-			2,
-			12,
-		},
-	}
-	for _, test := range tests {
-		f.Add(test.startLeaves, test.delCount, test.seed)
-	}
-
-	f.Fuzz(func(t *testing.T, startLeaves uint32, delCount uint32, seed int64) {
-		rand.Seed(seed)
-
-		// It'll error out if we try to delete more than we have. >= since we want
-		// at least 2 leftOver leaf to test.
-		if int(delCount) >= int(startLeaves)-2 {
-			return
-		}
-
-		// Get leaves and dels.
-		leaves, delHashes, delPos := getAddsAndDels(0, startLeaves, delCount)
-
-		// Create the starting off pollard.
-		p := NewAccumulator(true)
-		err := p.Modify(leaves, nil, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		err = p.Modify(nil, delHashes, delPos)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		// Grab the current leaves that exist in the accumulator.
-		currentLeaves := hashAndPos{make([]uint64, 0, len(leaves)-len(delHashes)), make([]Hash, 0, len(leaves)-len(delHashes))}
-		for _, node := range p.NodeMap {
-			currentLeaves.Append(p.calculatePosition(node), node.data)
-		}
-		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
-		// guaranteed to have the same order, we need to do this.
-		sort.Sort(currentLeaves)
-
-		// Randomly grab some leaves.
-		indexes := randomIndexes(currentLeaves.Len(), 2)
-		leafSubset := hashAndPos{make([]uint64, 0, len(indexes)), make([]Hash, 0, len(indexes))}
-		for i := 0; i < len(indexes); i++ {
-			leafSubset.Append(currentLeaves.positions[indexes[i]],
-				currentLeaves.hashes[indexes[i]])
-		}
-		// Generate a proof of the leafSubset.
-		proof, err := p.Prove(leafSubset.hashes)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		// Randomly generate some positions to delete.
-		indexes = randomIndexes(leafSubset.Len(), 1)
-		positions := make([]uint64, len(indexes))
-		for i := range positions {
-			positions[i] = leafSubset.positions[indexes[i]]
-		}
-
-		// Delete the positions from the cached proof.
-		leafSubset.hashes, proof = proofAfterPartialDeletion(p.NumLeaves, proof, leafSubset.hashes, positions)
-
-		proofPos, _ := proofPositions(proof.Targets, p.NumLeaves, treeRows(p.NumLeaves))
-		if len(proofPos) != len(proof.Proof) {
-			t.Fatalf("FuzzProofAfterDeletion Fail. Have %v proofs but want %v.\nPollard:\n%s\n",
-				printHashes(proof.Proof), proofPos, p.String())
-		}
-
-		// Fetch hashes.
-		blockDelHashes := make([]Hash, len(positions))
-		for i := range blockDelHashes {
-			blockDelHashes[i] = p.getHash(positions[i])
-			if blockDelHashes[i] == empty {
-				t.Fatal("FuzzProofAfterDeletion Fail. Couldn't fetch hash for position", positions[i])
-			}
-		}
-
-		// Modify the pollard.
-		err = p.Modify(nil, blockDelHashes, positions)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		// And verify that the proof is correct.
-		err = p.Verify(leafSubset.hashes, proof)
-		if err != nil {
-			t.Fatal(err)
-		}
-	})
-}
-
 func FuzzUpdateProofRemove(f *testing.F) {
 	var tests = []struct {
 		startLeaves uint32
@@ -561,7 +461,6 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		delIndexes := randomIndexes(currentLeaves.Len(), 1)
 		delPositions := make([]uint64, len(delIndexes))
 		for i := range delIndexes {
-			//delPositions[i] = delLeaves[i].pos
 			delPositions[i] = currentLeaves.positions[delIndexes[i]]
 		}
 
@@ -590,7 +489,8 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		cachedTargetsAndHash = subtractSortedHashAndPos(cachedTargetsAndHash, blockDelTargetsAndHash.positions, uint64Cmp)
 
 		// Update the cached proof with the block proof.
-		leafSubset.hashes, cachedProof = UpdateProofRemove(cachedProof, blockProof, leafSubset.hashes, blockDelHashes, p.NumLeaves)
+		updated, _ := calculateHashes(p.NumLeaves, nil, blockProof)
+		leafSubset.hashes = cachedProof.updateProofRemove(blockProof.Targets, leafSubset.hashes, updated, p.NumLeaves)
 
 		// Modify the pollard.
 		err = p.Modify(nil, blockDelHashes, delPositions)
@@ -616,20 +516,31 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		// Check that all the hashes we expect to be cached are all there.
 		shouldBeEmpty = removeHashesFromHashAndPos(shouldBeEmpty, leafHashesAndPos.hashes, func(elem Hash) Hash { return elem })
 		if shouldBeEmpty.Len() > 0 {
-			t.Fatalf("FuzzUpdateProofRemove Fail. Expected hashes:\n%s\nbut got:\n%s\n",
-				printHashes(cachedTargetsAndHash.hashes), printHashes(shouldBeEmpty.hashes))
+			t.Fatalf("FuzzUpdateProofRemove Fail. Expected hashes:\n%s\nbut got:\n%s\n"+
+				"Pollard before:\n%s\nPollard after:\n%s\n",
+				printHashes(cachedTargetsAndHash.hashes), printHashes(shouldBeEmpty.hashes),
+				pollardBeforeStr, p.String())
 		}
 
 		cachedProofPos, _ := proofPositions(cachedProof.Targets, p.NumLeaves, treeRows(p.NumLeaves))
 		if len(cachedProofPos) != len(cachedProof.Proof) {
-			t.Fatalf("FuzzUpdateProofRemove Fail. CachedProof hashes:\n%v\nbut want these positions:\n%v.\nPollard:\n%s\n",
-				printHashes(cachedProof.Proof), cachedProofPos, p.String())
+			t.Fatalf("FuzzUpdateProofRemove Fail. CachedProof has these hashes:\n%v\n"+
+				"for these targets:\n%v\n"+
+				"but want hashes of these positions:\n%v.\nOriginal cached targets:\n%s\n"+
+				"Pollard before:\n%s\nPollard after:\n%s\n",
+				printHashes(cachedProof.Proof), cachedProof.Targets, cachedProofPos,
+				origTargetsAndHash.String(),
+				pollardBeforeStr, p.String())
 		}
 
 		// And verify that the proof is correct.
 		err = p.Verify(leafSubset.hashes, cachedProof)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("FuzzUpdateProofRemove Fail\nErr: %s\n\n"+
+				"Proof:\n%s\nTarget hashes:\n%s\n"+
+				"Pollard before:\n%s\nPollard after:\n%s\n", err,
+				cachedProof.String(), printHashes(leafSubset.hashes),
+				pollardBeforeStr, p.String())
 		}
 	})
 }
@@ -831,7 +742,7 @@ func FuzzModifyProofChain(f *testing.F) {
 			// Check that we have enough targets as we expect.
 			if len(cachedProof.Targets) != len(cachedHashes) {
 				t.Fatalf("FuzzUpdateProofRemove Fail. Expected %d "+
-					"targets but got %d.\nDeleted hashes:\n%v."+
+					"targets but got %d.\nDeleted hashes:\n%v"+
 					"\nOriginal cached hashes:\n%v\nExpected "+
 					"hashes:\n%v\nGot hashes:\n%v\n",
 					len(cachedHashes),
