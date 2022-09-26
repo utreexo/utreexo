@@ -104,9 +104,28 @@ func (s *Stump) del(delHashes []Hash, proof Proof) error {
 }
 
 // add adds the passed in hashes to accumulator, adding new roots and
-// incrementing numLeaves.
-func (s *Stump) add(adds []Hash) {
-	for _, add := range adds {
+// incrementing numLeaves. It also returns the intermediate hashes and their
+// positions used to calculate the newly created roots.
+func (s *Stump) add(adds []Hash) ([]Hash, []uint64, []uint64) {
+	// afterRows is the total amount of rows after the addition has happened.
+	afterRows := treeRows(s.NumLeaves + uint64(len(adds)))
+
+	// allDeleted is all the empty roots that get deleted by the additions.
+	allDeleted := rootsToDestory(uint64(len(adds)), s.NumLeaves, s.Roots)
+
+	subTrees := make([]hashAndPos, 0, len(adds))
+	for i, add := range adds {
+		pos := s.NumLeaves
+
+		// deleted is the empty roots that are being added over. These force
+		// the current root to move up.
+		deleted := rootsToDestory(uint64(len(adds)-i), s.NumLeaves, s.Roots)
+		for _, del := range deleted {
+			if isAncestor(parent(del, afterRows), pos, afterRows) {
+				pos, _ = calcNextPosition(pos, del, afterRows)
+			}
+		}
+
 		// We can tell where the roots are by looking at the binary representation
 		// of the numLeaves. Wherever there's a 1, there's a root.
 		//
@@ -118,6 +137,7 @@ func (s *Stump) add(adds []Hash) {
 		// a '1'. If there is a '1', we'll hash the root being added with that root
 		// until we hit a '0'.
 		newRoot := add
+		subTreeUpdated := hashAndPos{}
 		for h := uint8(0); (s.NumLeaves>>h)&1 == 1; h++ {
 			root := s.Roots[len(s.Roots)-1]
 			s.Roots = s.Roots[:len(s.Roots)-1]
@@ -142,14 +162,58 @@ func (s *Stump) add(adds []Hash) {
 			// 08      09      10
 			// |---\   |---\   |---\
 			// 00  01  02  03  --  --
-			if root == empty {
-				continue
-			} else {
+			if root != empty {
+				subTreeUpdated.Append(leftSib(pos), root)
+				subTreeUpdated.Append(pos, newRoot)
+
 				// Calculate the hash of the new root and append it.
 				newRoot = parentHash(root, newRoot)
+				pos = parent(pos, afterRows)
 			}
 		}
+		subTreeUpdated.Append(pos, newRoot)
+
+		subTrees = append(subTrees, subTreeUpdated)
 		s.Roots = append(s.Roots, newRoot)
 		s.NumLeaves++
 	}
+
+	updated := hashAndPos{}
+	for i, subTree := range subTrees {
+		// If there are duplicates in the next subtree, skip the current subtree
+		// as all the positions in this subtree will get added in the next subtree.
+		if i+1 < len(subTrees) {
+			duplicates := getHashAndPosHashSubset(subTree, subTrees[i+1].hashes)
+			if duplicates.Len() > 0 {
+				continue
+			}
+		}
+		updated = mergeSortedHashAndPos(updated, subTree)
+	}
+
+	return updated.hashes, updated.positions, allDeleted
+}
+
+// rootsToDestory returns the empty roots that get written over after numAdds
+// amount of leaves have been added.
+func rootsToDestory(numAdds, numLeaves uint64, origRoots []Hash) []uint64 {
+	roots := make([]Hash, len(origRoots))
+	copy(roots, origRoots)
+
+	deleted := make([]uint64, 0, treeRows(numLeaves+numAdds))
+	for i := uint64(0); i < numAdds; i++ {
+		for h := uint8(0); (numLeaves>>h)&1 == 1; h++ {
+			root := roots[len(roots)-1]
+			roots = roots[:len(roots)-1]
+			if root == empty {
+				rootPos := rootPosition(numLeaves, h, treeRows(numLeaves+(numAdds-i)))
+				deleted = append(deleted, rootPos)
+			}
+		}
+		// Just adding a non-zero value to the slice.
+		roots = append(roots, Hash{1})
+		numLeaves++
+	}
+
+	return deleted
 }
