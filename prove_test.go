@@ -620,7 +620,16 @@ func FuzzUpdateProofAdd(f *testing.F) {
 			rootHashes[i] = root.data
 		}
 		proofBeforeStr := cachedProof.String()
-		leafSubset.hashes, cachedProof = UpdateProofAdd(cachedProof, nil, addHashes, nil, Stump{rootHashes, p.NumLeaves})
+
+		// Modify the stump and grab all the positions and hashes used to calculate the
+		// new roots.
+		rootHashesCopy := make([]Hash, len(rootHashes))
+		copy(rootHashesCopy, rootHashes)
+		stump := Stump{rootHashesCopy, p.NumLeaves}
+		newHashes, newPositions, toDestroy := stump.add(addHashes)
+		newNodes := hashAndPos{newPositions, newHashes}
+
+		leafSubset.hashes = cachedProof.updateProofAdd(addHashes, leafSubset.hashes, nil, newNodes, p.NumLeaves, toDestroy)
 
 		beforePollardStr := p.String()
 		// Modify the pollard.

@@ -1271,8 +1271,17 @@ func UpdateProof(cachedProof, blockProof Proof, cachedDelHashes, blockDelHashes,
 		return nil, Proof{}, err
 	}
 
+	roots := make([]Hash, len(stump.Roots))
+	copy(roots, stump.Roots)
+	numLeaves := stump.NumLeaves
+
+	// Modify the stump and grab all the positions and hashes used to calculate the
+	// new roots.
+	newHashes, newPositions, toDestroy := stump.add(adds)
+	newNodes := hashAndPos{newPositions, newHashes}
+
 	// Add new proof hashes as needed.
-	cachedDelHashes, cachedProof = UpdateProofAdd(cachedProof, cachedDelHashes, adds, remembers, stump)
+	cachedDelHashes = cachedProof.updateProofAdd(adds, cachedDelHashes, remembers, newNodes, numLeaves, toDestroy)
 
 	return cachedDelHashes, cachedProof, nil
 }
@@ -1309,4 +1318,94 @@ func GetProofSubset(proof Proof, hashes []Hash, removes []uint64, numLeaves uint
 	// Remove the targets and return the results.
 	retHashes, retProof := RemoveTargets(numLeaves, hashes, retProof, proofTargetsCopy)
 	return retHashes, retProof, nil
+}
+
+// maybeRemap remaps the passed in hash and pos if the treeRows increase after
+// adding the new nodes.
+func maybeRemap(numLeaves, numAdds uint64, hnp hashAndPos) hashAndPos {
+	// Update target positions if the forest has remapped to a higher row.
+	newForestRows := treeRows(numLeaves + numAdds)
+	oldForestRows := treeRows(numLeaves)
+	if newForestRows > oldForestRows {
+		for i, pos := range hnp.positions {
+			row := detectRow(pos, treeRows(numLeaves))
+
+			oldStartPos := startPositionAtRow(row, oldForestRows)
+			newStartPos := startPositionAtRow(row, newForestRows)
+
+			offset := pos - oldStartPos
+
+			hnp.positions[i] = offset + newStartPos
+		}
+	}
+
+	return hnp
+}
+
+// updateProofAdd modifies the cached proof with the additions that are passed in.
+// It adds the necessary proof hashes that will be needed to prove the targets in
+// the cached proof and updates the positions of the cached targets as needed.
+func (p *Proof) updateProofAdd(adds, cachedDelHashes []Hash, remembers []uint32,
+	newNodes hashAndPos, beforeNumLeaves uint64, toDestroy []uint64) []Hash {
+
+	// Combine the hashes with the targets.
+	origTargetsWithHash := toHashAndPos(p.Targets, cachedDelHashes)
+
+	// Attach positions to the proof.
+	proofPos, _ := proofPositions(origTargetsWithHash.positions, beforeNumLeaves, treeRows(beforeNumLeaves))
+	proofWithPos := toHashAndPos(proofPos, p.Proof)
+
+	// Remap the positions if we moved up a after the addition row.
+	origTargetsWithHash = maybeRemap(beforeNumLeaves, uint64(len(adds)), origTargetsWithHash)
+	proofWithPos = maybeRemap(beforeNumLeaves, uint64(len(adds)), proofWithPos)
+
+	// Move up positions that need to be moved up due to the empty roots
+	// being written over.
+	for _, del := range toDestroy {
+		origTargetsWithHash = getNewPositions([]uint64{del}, origTargetsWithHash, beforeNumLeaves+uint64(len(adds)), true)
+		proofWithPos = getNewPositions([]uint64{del}, proofWithPos, beforeNumLeaves+uint64(len(adds)), true)
+	}
+
+	// Add in proofHashes to the newNodes as some needed hashes
+	// will be in the proof hashes.
+	newNodes = mergeSortedHashAndPos(newNodes, proofWithPos)
+
+	// Grab all the new hashes to be cached.
+	remembersIdx := 0
+	addHashes := []Hash{}
+	for i, add := range adds {
+		if remembersIdx >= len(remembers) {
+			break
+		}
+
+		if uint32(i) == remembers[remembersIdx] {
+			addHashes = append(addHashes, add)
+			remembersIdx++
+		}
+	}
+	remembersWithHash := getHashAndPosHashSubset(newNodes, addHashes)
+
+	// Add the new hashes to be cached to the current hashes.
+	origTargetsWithHash = mergeSortedHashAndPos(remembersWithHash, origTargetsWithHash)
+
+	// Grab all the new nodes after this add.
+	neededProofPositions, _ := proofPositions(origTargetsWithHash.positions, beforeNumLeaves+uint64(len(adds)), treeRows(beforeNumLeaves+uint64(len(adds))))
+
+	// Add all the new proof hashes to the proof.
+	newProofWithPos := hashAndPos{}
+	newNodesIdx := 0
+	for _, pos := range neededProofPositions {
+		for newNodesIdx < newNodes.Len() && newNodes.positions[newNodesIdx] < pos {
+			newNodesIdx++
+		}
+		if newNodesIdx < newNodes.Len() && newNodes.positions[newNodesIdx] == pos {
+			newProofWithPos.Append(newNodes.positions[newNodesIdx], newNodes.hashes[newNodesIdx])
+		}
+	}
+
+	sort.Sort(newProofWithPos)
+	p.Proof = newProofWithPos.hashes
+
+	p.Targets = origTargetsWithHash.positions
+	return origTargetsWithHash.hashes
 }
