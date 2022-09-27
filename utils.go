@@ -100,37 +100,6 @@ func isRootPositionOnRow(position, numLeaves uint64, row, forestRows uint8) bool
 	return rootPresent && rootPos == position
 }
 
-// whichRoot returns the position of the root given the numLeaves and all the roots.
-func whichRoot(numLeaves uint64, root Hash, roots []Hash) uint64 {
-	forestRows := treeRows(numLeaves)
-
-	// Calculate which row the root is on.
-	rootRow := -1
-	// Start from the lowest root.
-	rootIdx := len(roots) - 1
-	for h := 0; h <= int(forestRows); h++ {
-		// Because every root represents a perfect tree of every leaf
-		// we ever added, each root position will be a power of 2.
-		//
-		// Go through the bits of numLeaves. Every bit that is on
-		// represents a root.
-		if (numLeaves>>h)&1 == 1 {
-			// If we found the root, save the row to rootRow
-			// and return.
-			if roots[rootIdx] == root {
-				rootRow = h
-				break
-			}
-
-			// Check the next higher root.
-			rootIdx--
-		}
-	}
-
-	// Start from the root and work our way down the position that we want.
-	return rootPosition(numLeaves, uint8(rootRow), forestRows)
-}
-
 // isAncestor returns true if the higherPos is an ancestor of the lowerPos.
 //
 // 14

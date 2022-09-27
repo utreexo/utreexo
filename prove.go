@@ -1067,69 +1067,20 @@ func (p *Proof) updateProofRemove(blockTargets []uint64, cachedHashes []Hash, up
 	return targetsWithHash.hashes
 }
 
-// rootsAfterDel returns the roots after the deletion in the blockProof has happened.
-// NOTE: This function does not verify the proof. That responsibility is on the caller.
-func rootsAfterDel(blockProof Proof, rootCandidates []Hash, stump Stump) ([]Hash, error) {
-	// Calculate all the current root positions.
-	rootPositions := []uint64{}
-	for _, root := range stump.Roots {
-		pos := whichRoot(stump.NumLeaves, root, stump.Roots)
-		rootPositions = append(rootPositions, pos)
-	}
-
-	// Calculate the roots that will be calculated from the proof.
-	calcRootPositions := []uint64{}
-	for _, del := range blockProof.Targets {
-		root, err := getRootPosition(del, stump.NumLeaves, treeRows(stump.NumLeaves))
-		if err != nil {
-			return nil, err
-		}
-		calcRootPositions = mergeSortedSlicesFunc(calcRootPositions, []uint64{root}, uint64Cmp)
-	}
-
-	// Look for the positions that match up and replace the hash with the newly
-	// calculated hash.
-	idx := 0
-	for i := len(rootPositions) - 1; i >= 0; i-- {
-		rootPosition := rootPositions[i]
-
-		if idx < len(rootCandidates) && rootPosition == calcRootPositions[idx] {
-			stump.Roots[i] = rootCandidates[idx]
-			idx++
-		}
-	}
-
-	return stump.Roots, nil
-}
-
-// UpdateProof updates the cachedProof with the given blockProof and adds.
-func UpdateProof(cachedProof, blockProof Proof, cachedDelHashes, blockDelHashes,
-	adds []Hash, remembers []uint32, stump Stump) ([]Hash, Proof, error) {
+// Update updates the proof with the given data.
+func (p *Proof) Update(
+	cachedHashes, addHashes []Hash, blockTargets []uint64, remembers []uint32, updateData UpdateData) ([]Hash, error) {
 
 	// Remove necessary targets and update proof hashes with the blockProof.
-	updated, rootCandidates := calculateHashes(stump.NumLeaves, nil, blockProof)
-	cachedDelHashes = cachedProof.updateProofRemove(blockProof.Targets, cachedDelHashes, updated, stump.NumLeaves)
+	cachedHashes = p.updateProofRemove(
+		blockTargets, cachedHashes, hashAndPos{updateData.NewAddPos, updateData.NewAddHash},
+		updateData.PrevNumLeaves)
 
-	// Modify the roots with the blockProof.
-	var err error
-	stump.Roots, err = rootsAfterDel(blockProof, rootCandidates, stump)
-	if err != nil {
-		return nil, Proof{}, err
-	}
+	cachedHashes = p.updateProofAdd(addHashes, cachedHashes, remembers,
+		hashAndPos{updateData.NewDelPos, updateData.NewDelHash},
+		updateData.PrevNumLeaves, updateData.ToDestroy)
 
-	roots := make([]Hash, len(stump.Roots))
-	copy(roots, stump.Roots)
-	numLeaves := stump.NumLeaves
-
-	// Modify the stump and grab all the positions and hashes used to calculate the
-	// new roots.
-	newHashes, newPositions, toDestroy := stump.add(adds)
-	newNodes := hashAndPos{newPositions, newHashes}
-
-	// Add new proof hashes as needed.
-	cachedDelHashes = cachedProof.updateProofAdd(adds, cachedDelHashes, remembers, newNodes, numLeaves, toDestroy)
-
-	return cachedDelHashes, cachedProof, nil
+	return cachedHashes, nil
 }
 
 // GetProofSubset trims away the un-needed data from the proof and returns a proof only
