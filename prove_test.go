@@ -732,18 +732,19 @@ func FuzzModifyProofChain(f *testing.F) {
 				addHashes[i] = adds[i].Hash
 			}
 
-			newStump := Stump{make([]Hash, len(stump.Roots)), stump.NumLeaves}
-			copy(newStump.Roots, stump.Roots)
-			cachedHashes, cachedProof, err = UpdateProof(
-				cachedProof, blockProof, cachedHashes, delHashes, addHashes, remembers, newStump)
-			if err != nil {
-				t.Fatal(err)
-			}
-			blockProof, err = p.Prove(delHashes)
+			err = p.Modify(adds, delHashes, blockProof.Targets)
 			if err != nil {
 				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
 			}
-			_, err = stump.Update(delHashes, addHashes, blockProof)
+
+			p.Undo(uint64(len(adds)), blockProof.Targets, delHashes, stump.Roots)
+
+			updateData, err := stump.Update(delHashes, addHashes, blockProof)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cachedHashes, err = cachedProof.Update(cachedHashes, addHashes, blockProof.Targets, remembers, updateData)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -779,6 +780,11 @@ func FuzzModifyProofChain(f *testing.F) {
 			// Sanity check that the modified proof verifies with the
 			// modified pollard.
 			err = p.Verify(cachedHashes, cachedProof)
+			if err != nil {
+				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
+			}
+
+			_, err = Verify(stump, cachedHashes, cachedProof)
 			if err != nil {
 				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
 			}
