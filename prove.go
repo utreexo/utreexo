@@ -1067,160 +1067,6 @@ func (p *Proof) updateProofRemove(blockTargets []uint64, cachedHashes []Hash, up
 	return targetsWithHash.hashes
 }
 
-// UpdateProofAdd modifies the cached proof with the additions that are passed in.
-// It adds the necessary proof hashes that will be needed to prove the targets in
-// the cached proof.
-//
-// NOTE: the stump passed in to the UpdateProofAdd is assumed to already be modified
-// with the deletion.
-func UpdateProofAdd(cachedProof Proof, cachedHashes, adds []Hash, remembers []uint32, stump Stump) ([]Hash, Proof) {
-	// Update target positions if the forest has remapped to a higher row.
-	newForestRows := treeRows(stump.NumLeaves + uint64(len(adds)))
-	oldForestRows := treeRows(stump.NumLeaves)
-	if newForestRows > oldForestRows {
-		for i, target := range cachedProof.Targets {
-			row := detectRow(target, treeRows(stump.NumLeaves))
-
-			oldStartPos := startPositionAtRow(row, oldForestRows)
-			newStartPos := startPositionAtRow(row, newForestRows)
-
-			offset := target - oldStartPos
-
-			cachedProof.Targets[i] = offset + newStartPos
-		}
-	}
-
-	cachedHashes, cachedProof, newRootsMap := getNewPositionsAfterAdd(
-		cachedProof, cachedHashes, adds, remembers, stump, newForestRows)
-	stump.NumLeaves += uint64(len(adds))
-
-	// These are the positions that we'd need after the addition.
-	cachedProofTargets := copySortedFunc(cachedProof.Targets, uint64Less)
-	neededProofPositions, _ := proofPositions(cachedProofTargets, stump.NumLeaves, newForestRows)
-
-	proofHashes := make([]Hash, len(neededProofPositions))
-	for i, neededProofPosition := range neededProofPositions {
-		hash := newRootsMap[neededProofPosition]
-		proofHashes[i] = hash
-	}
-
-	cachedProof.Proof = proofHashes
-
-	return cachedHashes, cachedProof
-}
-
-// getNewPositionsAfterAdd returns updated proof positions and the newly created
-// positions in the map.
-func getNewPositionsAfterAdd(cachedProof Proof, cachedHashes, adds []Hash,
-	remembers []uint32, stump Stump, forestRows uint8) ([]Hash, Proof, map[uint64]Hash) {
-
-	// Create a map of all the proof positions and their hashes. We'll use this
-	// map to fetch the needed proof positions after the addition.
-	proofPos, _ := proofPositions(cachedProof.Targets, stump.NumLeaves, forestRows)
-	newRootsMap := make(map[uint64]Hash)
-	for i, pos := range proofPos {
-		newRootsMap[pos] = cachedProof.Proof[i]
-	}
-
-	cachedTargetsWithHash := toHashAndPos(cachedProof.Targets, cachedHashes)
-
-	remembersIdx := 0
-	roots := stump.Roots
-	for i, add := range adds {
-		if len(remembers) > 0 && remembersIdx < len(remembers) &&
-			remembers[remembersIdx] == uint32(i) {
-
-			cachedTargetsWithHash = mergeSortedHashAndPos(cachedTargetsWithHash,
-				hashAndPos{[]uint64{stump.NumLeaves}, []Hash{add}})
-			remembersIdx++
-		}
-		// We can tell where the roots are by looking at the binary representation
-		// of the numLeaves. Wherever there's a 1, there's a root.
-		//
-		// numLeaves of 8 will be '1000' in binary, so there will be one root at
-		// row 3. numLeaves of 3 will be '11' in binary, so there's two roots. One at
-		// row 0 and one at row 1.
-		//
-		// In this loop below, we're looking for these roots by checking if there's
-		// a '1'. If there is a '1', we'll hash the root being added with that root
-		// until we hit a '0'.
-		newRoot := add
-		for h := uint8(0); (stump.NumLeaves>>h)&1 == 1; h++ {
-			root := roots[len(roots)-1]
-			roots = roots[:len(roots)-1]
-
-			// If the root that we're gonna hash with is empty, move the current
-			// node up to the position of the parent.
-			//
-			// Example:
-			//
-			// 12
-			// |-------\
-			// 08      09
-			// |---\   |---\
-			// 00  01  02  03  --
-			//
-			// When we add 05 to this tree, 04 is empty so we move 05 to 10.
-			// The resulting tree looks like below. The hash at position 10
-			// is not hash(04 || 05) but just the hash of 05.
-			//
-			// 12
-			// |-------\
-			// 08      09      10
-			// |---\   |---\   |---\
-			// 00  01  02  03  --  --
-			if root == empty {
-				pos := rootPosition(stump.NumLeaves, h, forestRows)
-
-				sib := sibling(pos)
-				cachedTargetsWithHash.positions = updatePositions(cachedTargetsWithHash.positions, sib, forestRows,
-					func(e uint64) uint64 { return e },
-					func(i int, pos uint64) { cachedTargetsWithHash.positions[i] = pos })
-
-				tmpMap := make(map[uint64]Hash)
-				for key, hash := range newRootsMap {
-					ancestor := isAncestor(parent(sib, forestRows), key, forestRows)
-					if ancestor {
-						// We can ignore the error since we've already verified that
-						// the proofAndPos[j] is an ancestor of sib.
-						nextPos, _ := calcNextPosition(key, sib, forestRows)
-						tmpMap[nextPos] = hash
-					} else {
-						tmpMap[key] = hash
-					}
-				}
-				newRootsMap = tmpMap
-
-				continue
-			} else {
-				pos := rootPosition(stump.NumLeaves, h, forestRows)
-
-				// Check if positions will be updated and update
-				// if they will be.
-				if _, found := newRootsMap[pos]; !found {
-					newRootsMap[pos] = root
-				}
-				if _, found := newRootsMap[pos^1]; !found {
-					newRootsMap[pos^1] = newRoot
-				}
-
-				// Calculate the hash of the new root and append it.
-				newRoot = parentHash(root, newRoot)
-				pos = parent(pos, forestRows)
-
-				if _, found := newRootsMap[pos]; !found {
-					newRootsMap[pos] = newRoot
-				}
-			}
-		}
-		roots = append(roots, newRoot)
-		stump.NumLeaves++
-	}
-
-	cachedProof.Targets = cachedTargetsWithHash.positions
-	return cachedTargetsWithHash.hashes, cachedProof, newRootsMap
-}
-
 // rootsAfterDel returns the roots after the deletion in the blockProof has happened.
 // NOTE: This function does not verify the proof. That responsibility is on the caller.
 func rootsAfterDel(blockProof Proof, rootCandidates []Hash, stump Stump) ([]Hash, error) {
@@ -1271,8 +1117,17 @@ func UpdateProof(cachedProof, blockProof Proof, cachedDelHashes, blockDelHashes,
 		return nil, Proof{}, err
 	}
 
+	roots := make([]Hash, len(stump.Roots))
+	copy(roots, stump.Roots)
+	numLeaves := stump.NumLeaves
+
+	// Modify the stump and grab all the positions and hashes used to calculate the
+	// new roots.
+	newHashes, newPositions, toDestroy := stump.add(adds)
+	newNodes := hashAndPos{newPositions, newHashes}
+
 	// Add new proof hashes as needed.
-	cachedDelHashes, cachedProof = UpdateProofAdd(cachedProof, cachedDelHashes, adds, remembers, stump)
+	cachedDelHashes = cachedProof.updateProofAdd(adds, cachedDelHashes, remembers, newNodes, numLeaves, toDestroy)
 
 	return cachedDelHashes, cachedProof, nil
 }
@@ -1309,4 +1164,94 @@ func GetProofSubset(proof Proof, hashes []Hash, removes []uint64, numLeaves uint
 	// Remove the targets and return the results.
 	retHashes, retProof := RemoveTargets(numLeaves, hashes, retProof, proofTargetsCopy)
 	return retHashes, retProof, nil
+}
+
+// maybeRemap remaps the passed in hash and pos if the treeRows increase after
+// adding the new nodes.
+func maybeRemap(numLeaves, numAdds uint64, hnp hashAndPos) hashAndPos {
+	// Update target positions if the forest has remapped to a higher row.
+	newForestRows := treeRows(numLeaves + numAdds)
+	oldForestRows := treeRows(numLeaves)
+	if newForestRows > oldForestRows {
+		for i, pos := range hnp.positions {
+			row := detectRow(pos, treeRows(numLeaves))
+
+			oldStartPos := startPositionAtRow(row, oldForestRows)
+			newStartPos := startPositionAtRow(row, newForestRows)
+
+			offset := pos - oldStartPos
+
+			hnp.positions[i] = offset + newStartPos
+		}
+	}
+
+	return hnp
+}
+
+// updateProofAdd modifies the cached proof with the additions that are passed in.
+// It adds the necessary proof hashes that will be needed to prove the targets in
+// the cached proof and updates the positions of the cached targets as needed.
+func (p *Proof) updateProofAdd(adds, cachedDelHashes []Hash, remembers []uint32,
+	newNodes hashAndPos, beforeNumLeaves uint64, toDestroy []uint64) []Hash {
+
+	// Combine the hashes with the targets.
+	origTargetsWithHash := toHashAndPos(p.Targets, cachedDelHashes)
+
+	// Attach positions to the proof.
+	proofPos, _ := proofPositions(origTargetsWithHash.positions, beforeNumLeaves, treeRows(beforeNumLeaves))
+	proofWithPos := toHashAndPos(proofPos, p.Proof)
+
+	// Remap the positions if we moved up a after the addition row.
+	origTargetsWithHash = maybeRemap(beforeNumLeaves, uint64(len(adds)), origTargetsWithHash)
+	proofWithPos = maybeRemap(beforeNumLeaves, uint64(len(adds)), proofWithPos)
+
+	// Move up positions that need to be moved up due to the empty roots
+	// being written over.
+	for _, del := range toDestroy {
+		origTargetsWithHash = getNewPositions([]uint64{del}, origTargetsWithHash, beforeNumLeaves+uint64(len(adds)), true)
+		proofWithPos = getNewPositions([]uint64{del}, proofWithPos, beforeNumLeaves+uint64(len(adds)), true)
+	}
+
+	// Add in proofHashes to the newNodes as some needed hashes
+	// will be in the proof hashes.
+	newNodes = mergeSortedHashAndPos(newNodes, proofWithPos)
+
+	// Grab all the new hashes to be cached.
+	remembersIdx := 0
+	addHashes := []Hash{}
+	for i, add := range adds {
+		if remembersIdx >= len(remembers) {
+			break
+		}
+
+		if uint32(i) == remembers[remembersIdx] {
+			addHashes = append(addHashes, add)
+			remembersIdx++
+		}
+	}
+	remembersWithHash := getHashAndPosHashSubset(newNodes, addHashes)
+
+	// Add the new hashes to be cached to the current hashes.
+	origTargetsWithHash = mergeSortedHashAndPos(remembersWithHash, origTargetsWithHash)
+
+	// Grab all the new nodes after this add.
+	neededProofPositions, _ := proofPositions(origTargetsWithHash.positions, beforeNumLeaves+uint64(len(adds)), treeRows(beforeNumLeaves+uint64(len(adds))))
+
+	// Add all the new proof hashes to the proof.
+	newProofWithPos := hashAndPos{}
+	newNodesIdx := 0
+	for _, pos := range neededProofPositions {
+		for newNodesIdx < newNodes.Len() && newNodes.positions[newNodesIdx] < pos {
+			newNodesIdx++
+		}
+		if newNodesIdx < newNodes.Len() && newNodes.positions[newNodesIdx] == pos {
+			newProofWithPos.Append(newNodes.positions[newNodesIdx], newNodes.hashes[newNodesIdx])
+		}
+	}
+
+	sort.Sort(newProofWithPos)
+	p.Proof = newProofWithPos.hashes
+
+	p.Targets = origTargetsWithHash.positions
+	return origTargetsWithHash.hashes
 }

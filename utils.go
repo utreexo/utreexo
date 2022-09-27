@@ -217,24 +217,6 @@ func calcNextPosition(position, delPos uint64, forestRows uint8) (uint64, error)
 	return higherBits | lowerBits, nil
 }
 
-// updatePositions updates the slice of positions passed in after the deletion of
-// deletionPos happens.
-func updatePositions[E any](positions []E, deletionPos uint64, forestRows uint8,
-	get func(E) uint64, set func(int, uint64)) []E {
-
-	for j := len(positions) - 1; j >= 0; j-- {
-		ancestor := isAncestor(parent(deletionPos, forestRows), get(positions[j]), forestRows)
-		if ancestor {
-			// We can ignore the error since we've already verified that
-			// the positions[j] is an ancestor of sib.
-			nextPos, _ := calcNextPosition(get(positions[j]), deletionPos, forestRows)
-			set(j, nextPos)
-		}
-	}
-
-	return removeDuplicateUint64Func(positions, get)
-}
-
 // detectRow finds the current row of your node given the position
 // and the total forest rows.
 func detectRow(position uint64, forestRows uint8) uint8 {
