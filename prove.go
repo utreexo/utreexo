@@ -1073,11 +1073,11 @@ func (p *Proof) Update(
 
 	// Remove necessary targets and update proof hashes with the blockProof.
 	cachedHashes = p.updateProofRemove(
-		blockTargets, cachedHashes, hashAndPos{updateData.NewAddPos, updateData.NewAddHash},
+		blockTargets, cachedHashes, hashAndPos{updateData.NewDelPos, updateData.NewDelHash},
 		updateData.PrevNumLeaves)
 
 	cachedHashes = p.updateProofAdd(addHashes, cachedHashes, remembers,
-		hashAndPos{updateData.NewDelPos, updateData.NewDelHash},
+		hashAndPos{updateData.NewAddPos, updateData.NewAddHash},
 		updateData.PrevNumLeaves, updateData.ToDestroy)
 
 	return cachedHashes, nil
@@ -1170,7 +1170,8 @@ func (p *Proof) updateProofAdd(adds, cachedDelHashes []Hash, remembers []uint32,
 	// Grab all the new hashes to be cached.
 	remembersIdx := 0
 	addHashes := []Hash{}
-	for i, add := range adds {
+	for i := 0; i < len(adds); i++ {
+		add := adds[i]
 		if remembersIdx >= len(remembers) {
 			break
 		}
@@ -1178,6 +1179,9 @@ func (p *Proof) updateProofAdd(adds, cachedDelHashes []Hash, remembers []uint32,
 		if uint32(i) == remembers[remembersIdx] {
 			addHashes = append(addHashes, add)
 			remembersIdx++
+		} else if uint32(i) > remembers[remembersIdx] {
+			remembersIdx++
+			i--
 		}
 	}
 	remembersWithHash := getHashAndPosHashSubset(newNodes, addHashes)
