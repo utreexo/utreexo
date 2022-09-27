@@ -316,6 +316,26 @@ func removeHashesFromHashAndPos[E any](slice1 hashAndPos, slice2 []E, getHash fu
 	return retSlice
 }
 
+// getHashAndPosHashSubset allocates and returns a new hashAndPos that is the
+// intersection of a and b based on the hashes in b.
+func getHashAndPosHashSubset(a hashAndPos, b []Hash) hashAndPos {
+	allKeys := make(map[Hash]bool, len(b))
+	for _, elem := range b {
+		allKeys[elem] = true
+	}
+
+	c := hashAndPos{make([]uint64, 0, len(b)), make([]Hash, 0, len(b))}
+	for i := 0; i < a.Len(); i++ {
+		elem := a.hashes[i]
+
+		if _, val := allKeys[elem]; val {
+			c.Append(a.positions[i], a.hashes[i])
+		}
+	}
+
+	return c
+}
+
 // Verify calculates the root hashes from the passed in proof and delHashes and
 // compares it against the current roots in the pollard.
 func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
