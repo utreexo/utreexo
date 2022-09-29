@@ -931,10 +931,17 @@ func FuzzUndoChain(f *testing.F) {
 	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
 		p := NewAccumulator(true)
 
+		undoData := []struct {
+			targets   []uint64
+			hashes    []Hash
+			prevRoots []Hash
+			adds      []Leaf
+			nodeMap   map[miniHash]polNode
+		}{}
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 		for b := 0; b <= 100; b++ {
-			adds, durations, delHashes := sc.NextBlock(numAdds)
+			adds, _, delHashes := sc.NextBlock(numAdds)
 
 			bp, err := p.Prove(delHashes)
 			if err != nil {
@@ -959,6 +966,20 @@ func FuzzUndoChain(f *testing.F) {
 			}
 			beforeLeaves := p.NumLeaves
 
+			undoData = append(undoData, struct {
+				targets   []uint64
+				hashes    []Hash
+				prevRoots []Hash
+				adds      []Leaf
+				nodeMap   map[miniHash]polNode
+			}{
+				undoTargs,
+				undoDelHashes,
+				beforeRoot,
+				adds,
+				beforeMap,
+			})
+
 			err = p.Modify(adds, delHashes, bp.Targets)
 			if err != nil {
 				t.Fatalf("FuzzUndoChain fail at block %d. Error: %v", b, err)
@@ -971,48 +992,67 @@ func FuzzUndoChain(f *testing.F) {
 				t.Fatal(err)
 			}
 
-			// Undo the last modify.
-			if b%3 == 2 {
-				err := p.Undo(uint64(len(adds)), undoTargs, undoDelHashes, beforeRoot)
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				sc.BackOne(adds, durations, delHashes)
-				afterRoot := p.GetRoots()
-				if !reflect.DeepEqual(beforeRoot, afterRoot) {
-					err := fmt.Errorf("FuzzUndoChain fail at block %d, "+
-						"root mismatch.\nBefore:\n%s\nAfter:\n%s",
-						b, printHashes(beforeRoot), printHashes(afterRoot))
-					t.Fatal(err)
-				}
-
-				if len(p.NodeMap) != len(beforeMap) {
-					err := fmt.Errorf("FuzzUndoChain fail at block %d, map length mismatch. "+
-						"before %d, after %d", b, len(beforeMap), len(p.NodeMap))
-					t.Fatal(err)
-				}
-
-				for key, value := range beforeMap {
-					node, found := p.NodeMap[key]
-					if !found {
-						err := fmt.Errorf("FuzzUndoChain fail at block %d, hash %s not found after undo",
-							b, hex.EncodeToString(key[:]))
+			// Undo the last 10 modifies and re-do them.
+			if b%10 == 9 {
+				for i := 9; i >= 0; i-- {
+					err := p.Undo(uint64(len(undoData[i].adds)), undoData[i].targets, undoData[i].hashes, undoData[i].prevRoots)
+					if err != nil {
 						t.Fatal(err)
 					}
 
-					if node.data != value.data {
-						err := fmt.Errorf("FuzzUndoChain fail at block %d, for hash %s, expected %s, got %s ",
-							b, hex.EncodeToString(key[:]),
-							hex.EncodeToString(value.data[:]),
-							hex.EncodeToString(node.data[:]))
+					afterRoot := p.GetRoots()
+					if !reflect.DeepEqual(undoData[i].prevRoots, afterRoot) {
+						err := fmt.Errorf("FuzzUndoChain fail at block %d, "+
+							"root mismatch.\nBefore:\n%s\nAfter:\n%s",
+							b, printHashes(beforeRoot), printHashes(afterRoot))
 						t.Fatal(err)
 					}
+
+					if len(p.NodeMap) != len(undoData[i].nodeMap) {
+						err := fmt.Errorf("FuzzUndoChain fail at block %d, map length mismatch. "+
+							"before %d, after %d", b, len(undoData[i].nodeMap), len(p.NodeMap))
+						t.Fatal(err)
+					}
+
+					for key, value := range undoData[i].nodeMap {
+						node, found := p.NodeMap[key]
+						if !found {
+							err := fmt.Errorf("FuzzUndoChain fail at block %d, hash %s not found after undo",
+								b, hex.EncodeToString(key[:]))
+							t.Fatal(err)
+						}
+
+						if node.data != value.data {
+							err := fmt.Errorf("FuzzUndoChain fail at block %d, for hash %s, expected %s, got %s ",
+								b, hex.EncodeToString(key[:]),
+								hex.EncodeToString(value.data[:]),
+								hex.EncodeToString(node.data[:]))
+							t.Fatal(err)
+						}
+					}
 				}
+
+				for i := 0; i < 10; i++ {
+					adds, delHashes := undoData[i].adds, undoData[i].hashes
+					bp, err := p.Prove(delHashes)
+					if err != nil {
+						t.Fatalf("FuzzUndoChain fail at block %d. Error: %v", b, err)
+					}
+
+					err = p.Verify(delHashes, bp)
+					if err != nil {
+						t.Fatal(err)
+					}
+					err = p.Modify(adds, delHashes, bp.Targets)
+					if err != nil {
+						t.Fatalf("FuzzUndoChain fail at block %d. Error: %v", b, err)
+					}
+				}
+				undoData = undoData[:0]
 			}
 
 			// Check hashes.
-			if b%10 == 0 {
+			if b%20 == 0 {
 				err = p.checkHashes()
 				if err != nil {
 					t.Fatal(err)
