@@ -333,21 +333,6 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []
 	if len(p.Roots) >= int(numRoots(p.NumLeaves)) {
 		return nil
 	}
-
-	// Add empty roots that was present in the previous roots.
-	for i, prevRoot := range prevRoots {
-		if prevRoot == empty {
-			for i >= len(p.Roots) {
-				p.Roots = append(p.Roots, &polNode{remember: p.Full})
-			}
-			if p.Roots[i].data != empty {
-				p.Roots = append(p.Roots, nil)
-				copy(p.Roots[i+1:], p.Roots[i:])
-				p.Roots[i] = &polNode{data: prevRoot, remember: p.Full}
-			}
-		}
-	}
-
 	dels := make([]uint64, len(origDels))
 	copy(dels, origDels)
 
@@ -355,27 +340,32 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []
 	sort.Slice(dels, func(a, b int) bool { return dels[a] < dels[b] })
 	dels = deTwin(dels, treeRows(p.NumLeaves))
 
-	// Add empty roots that were destroyed during the additions. Need to do this
-	// separate step before the deletions are undo-ed.
-	for i := len(dels) - 1; i >= 0; i-- {
-		del := dels[i]
+	// Copy to avoid mutating the original.
+	copyRoots := make([]Hash, len(prevRoots))
+	copy(copyRoots, prevRoots)
+
+	// Add in the empty roots that was removed by the deletions to the prevRoots.
+	for _, del := range dels {
 		if isRootPosition(del, p.NumLeaves, treeRows(p.NumLeaves)) {
 			tree, _, _, err := detectOffset(del, p.NumLeaves)
 			if err != nil {
 				return err
 			}
-			if int(tree) == len(p.Roots) {
-				p.Roots = append(p.Roots, &polNode{data: empty, remember: p.Full})
+			copyRoots[tree] = empty
+		}
+	}
+
+	// Add empty roots that was present in the previous roots.
+	for i, prevRoot := range copyRoots {
+		if prevRoot == empty {
+			for i >= len(p.Roots) {
+				p.Roots = append(p.Roots, &polNode{remember: p.Full})
+				continue
 			}
-			if int(tree) > len(p.Roots) {
-				return fmt.Errorf("undoEmptyRoots error: calculated root index of %d "+
-					"for position %d but only have %d roots",
-					tree, del, len(p.Roots))
-			}
-			if p.Roots[tree].data != empty {
+			if p.Roots[i].data != empty {
 				p.Roots = append(p.Roots, nil)
-				copy(p.Roots[tree+1:], p.Roots[tree:])
-				p.Roots[tree] = &polNode{data: empty, remember: p.Full}
+				copy(p.Roots[i+1:], p.Roots[i:])
+				p.Roots[i] = &polNode{data: prevRoot, remember: p.Full}
 			}
 		}
 	}
