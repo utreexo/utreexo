@@ -130,16 +130,10 @@ func TestUndo(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		p := NewAccumulator(true)
-
-		adds := make([]Leaf, len(test.startAdds))
-		for i := range adds {
-			hash := test.startAdds[i]
-			adds[i] = Leaf{Hash: hash}
-		}
+		p := NewAccumulator()
 
 		// Create the initial starting off pollard.
-		err := p.Modify(adds, nil, nil)
+		err := p.Modify(test.startAdds, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -155,12 +149,6 @@ func TestUndo(t *testing.T) {
 		beforeRoots := p.GetRoots()
 		beforeStr := p.String()
 
-		modifyAdds := make([]Leaf, len(test.modifyAdds))
-		for i := range modifyAdds {
-			hash := test.modifyAdds[i]
-			modifyAdds[i] = Leaf{Hash: hash}
-		}
-
 		modifyProof, err := p.Prove(test.modifyDels)
 		if err != nil {
 			t.Fatalf("TestUndo failed %d: error %v", i, err)
@@ -172,7 +160,7 @@ func TestUndo(t *testing.T) {
 		}
 
 		// Perform the modify to undo.
-		err = p.Modify(modifyAdds, test.modifyDels, modifyProof.Targets)
+		err = p.Modify(test.modifyAdds, test.modifyDels, modifyProof.Targets)
 		if err != nil {
 			t.Fatalf("TestUndo failed %d: error %v", i, err)
 		}
@@ -474,11 +462,11 @@ func (s *simChain) NextBlock(numAdds uint32) ([]Leaf, []int32, []Hash) {
 // p.NumLeaves into getAddsAndDels after the pollard has been modified with the
 // previous set of adds and deletions. The leaves genereated are not random and
 // are just the next leaf encoded to a 32 byte hash.
-func getAddsAndDels(currentLeaves, addCount, delCount uint32) ([]Leaf, []Hash, []uint64) {
+func getAddsAndDels(currentLeaves, addCount, delCount uint32) ([]Hash, []Hash, []uint64) {
 	if addCount == 0 {
 		return nil, nil, nil
 	}
-	leaves := make([]Leaf, addCount)
+	leaves := make([]Hash, addCount)
 	for i := uint32(0); i < addCount; i++ {
 		// Convert int to byte slice.
 		bs := make([]byte, 32)
@@ -489,7 +477,7 @@ func getAddsAndDels(currentLeaves, addCount, delCount uint32) ([]Leaf, []Hash, [
 		bs[31] = 0xFF
 
 		// Hash the byte slice.
-		leaves[i] = Leaf{Hash: *(*Hash)(bs)}
+		leaves[i] = *(*Hash)(bs)
 	}
 
 	delHashes := make([]Hash, delCount)
@@ -513,7 +501,7 @@ func getAddsAndDels(currentLeaves, addCount, delCount uint32) ([]Leaf, []Hash, [
 			}
 		}
 
-		delHashes[i] = leaves[idx].Hash
+		delHashes[i] = leaves[idx]
 		delTargets[i] = uint64(idx)
 	}
 
@@ -563,7 +551,7 @@ func FuzzModify(f *testing.F) {
 			return
 		}
 
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		leaves, delHashes, delTargets := getAddsAndDels(uint32(p.NumLeaves), startLeaves, delCount)
 		err := p.Modify(leaves, nil, nil)
 		if err != nil {
@@ -587,15 +575,6 @@ func FuzzModify(f *testing.F) {
 
 		err = p.posMapSanity()
 		if err != nil {
-			startHashes := make([]Hash, len(leaves))
-			for i, leaf := range leaves {
-				startHashes[i] = leaf.Hash
-			}
-
-			modifyHashes := make([]Hash, len(modifyLeaves))
-			for i, leaf := range modifyLeaves {
-				modifyHashes[i] = leaf.Hash
-			}
 			err := fmt.Errorf("FuzzModify fail: %v. "+
 				"\nbefore:\n\n%s"+
 				"\nafter:\n\n%s"+
@@ -610,8 +589,8 @@ func FuzzModify(f *testing.F) {
 				beforeStr,
 				afterStr,
 				startLeaves, modifyAdds, delCount,
-				printHashes(startHashes),
-				printHashes(modifyHashes),
+				printHashes(leaves),
+				printHashes(modifyLeaves),
 				printHashes(delHashes),
 				delTargets,
 				beforeMap,
@@ -637,7 +616,7 @@ func FuzzModifyChain(f *testing.F) {
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		var totalAdds, totalDels int
 		for b := 0; b <= 100; b++ {
 			adds, _, delHashes := sc.NextBlock(numAdds)
@@ -664,7 +643,11 @@ func FuzzModifyChain(f *testing.F) {
 				}
 			}
 
-			err = p.Modify(adds, delHashes, proof.Targets)
+			addHashes := make([]Hash, len(adds))
+			for i, add := range adds {
+				addHashes[i] = add.Hash
+			}
+			err = p.Modify(addHashes, delHashes, proof.Targets)
 			if err != nil {
 				t.Fatalf("FuzzModifyChain fail at block %d. Error: %v", b, err)
 			}
@@ -728,7 +711,7 @@ func FuzzUndo(f *testing.F) {
 		}
 
 		// Create the starting off pollard.
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		leaves, dels, _ := getAddsAndDels(uint32(p.NumLeaves), uint32(startLeaves), uint32(delCount))
 		err := p.Modify(leaves, nil, nil)
 		if err != nil {
@@ -766,15 +749,6 @@ func FuzzUndo(f *testing.F) {
 
 		err = p.Undo(uint64(modifyAdds), bp.Targets, dels, beforeRoots)
 		if err != nil {
-			startHashes := make([]Hash, len(leaves))
-			for i, leaf := range leaves {
-				startHashes[i] = leaf.Hash
-			}
-
-			modifyHashes := make([]Hash, len(modifyLeaves))
-			for i, leaf := range modifyLeaves {
-				modifyHashes[i] = leaf.Hash
-			}
 			err := fmt.Errorf("FuzzUndo fail: Undo failed, error: %v"+
 				"\nbefore:\n\n%s"+
 				"\nafter:\n\n%s"+
@@ -789,8 +763,8 @@ func FuzzUndo(f *testing.F) {
 				beforeStr,
 				afterStr,
 				startLeaves, modifyAdds, delCount,
-				printHashes(startHashes),
-				printHashes(modifyHashes),
+				printHashes(leaves),
+				printHashes(modifyLeaves),
 				printHashes(dels),
 				bp.Targets,
 				beforeMap,
@@ -807,15 +781,6 @@ func FuzzUndo(f *testing.F) {
 		}
 
 		if uint64(len(p.NodeMap)) != p.NumLeaves-p.NumDels {
-			startHashes := make([]Hash, len(leaves))
-			for i, leaf := range leaves {
-				startHashes[i] = leaf.Hash
-			}
-
-			modifyHashes := make([]Hash, len(modifyLeaves))
-			for i, leaf := range modifyLeaves {
-				modifyHashes[i] = leaf.Hash
-			}
 			err := fmt.Errorf("FuzzUndo fail: have %d leaves in map but %d leaves in total. "+
 				"\nbefore:\n\n%s"+
 				"\nafter:\n\n%s"+
@@ -833,8 +798,8 @@ func FuzzUndo(f *testing.F) {
 				afterStr,
 				undoStr,
 				startLeaves, modifyAdds, delCount,
-				printHashes(startHashes),
-				printHashes(modifyHashes),
+				printHashes(leaves),
+				printHashes(modifyLeaves),
 				printHashes(dels),
 				bp.Targets,
 				beforeMap,
@@ -844,15 +809,6 @@ func FuzzUndo(f *testing.F) {
 		}
 		err = p.posMapSanity()
 		if err != nil {
-			startHashes := make([]Hash, len(leaves))
-			for i, leaf := range leaves {
-				startHashes[i] = leaf.Hash
-			}
-
-			modifyHashes := make([]Hash, len(modifyLeaves))
-			for i, leaf := range modifyLeaves {
-				modifyHashes[i] = leaf.Hash
-			}
 			t.Fatal(fmt.Errorf("FuzzUndo fail: error %v"+
 				"\nbefore\n %s"+
 				"\nafter\n %s"+
@@ -868,8 +824,8 @@ func FuzzUndo(f *testing.F) {
 				afterStr,
 				undoStr,
 				startLeaves, modifyAdds, delCount,
-				printHashes(startHashes),
-				printHashes(modifyHashes),
+				printHashes(leaves),
+				printHashes(modifyLeaves),
 				printHashes(dels),
 				bp.Targets,
 				nodeMapToString(p.NodeMap)))
@@ -878,16 +834,6 @@ func FuzzUndo(f *testing.F) {
 		afterRoots := p.GetRoots()
 
 		if !reflect.DeepEqual(beforeRoots, afterRoots) {
-			startHashes := make([]Hash, len(leaves))
-			for i, leaf := range leaves {
-				startHashes[i] = leaf.Hash
-			}
-
-			modifyHashes := make([]Hash, len(modifyLeaves))
-			for i, leaf := range modifyLeaves {
-				modifyHashes[i] = leaf.Hash
-			}
-
 			err := fmt.Errorf("FuzzUndo fail: roots don't equal after the undo. "+
 				"\nbefore:\n\n%s"+
 				"\nafter:\n\n%s"+
@@ -904,8 +850,8 @@ func FuzzUndo(f *testing.F) {
 				afterStr,
 				undoStr,
 				startLeaves, modifyAdds, delCount,
-				printHashes(startHashes),
-				printHashes(modifyHashes),
+				printHashes(leaves),
+				printHashes(modifyLeaves),
 				printHashes(dels),
 				bp.Targets,
 				beforeMap,
@@ -929,7 +875,7 @@ func FuzzUndoChain(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 
 		undoData := []struct {
 			targets   []uint64
@@ -980,7 +926,11 @@ func FuzzUndoChain(f *testing.F) {
 				beforeMap,
 			})
 
-			err = p.Modify(adds, delHashes, bp.Targets)
+			addHashes := make([]Hash, len(adds))
+			for i, add := range adds {
+				addHashes[i] = add.Hash
+			}
+			err = p.Modify(addHashes, delHashes, bp.Targets)
 			if err != nil {
 				t.Fatalf("FuzzUndoChain fail at block %d. Error: %v", b, err)
 			}
@@ -1043,7 +993,11 @@ func FuzzUndoChain(f *testing.F) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					err = p.Modify(adds, delHashes, bp.Targets)
+					addHashes := make([]Hash, len(adds))
+					for i, add := range adds {
+						addHashes[i] = add.Hash
+					}
+					err = p.Modify(addHashes, delHashes, bp.Targets)
 					if err != nil {
 						t.Fatalf("FuzzUndoChain fail at block %d. Error: %v", b, err)
 					}
@@ -1086,7 +1040,7 @@ func FuzzWriteAndRead(f *testing.F) {
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		var totalAdds, totalDels int
 		for b := 0; b <= 100; b++ {
 			adds, _, delHashes := sc.NextBlock(numAdds)
@@ -1098,7 +1052,12 @@ func FuzzWriteAndRead(f *testing.F) {
 				t.Fatalf("FuzzWriteAndRead fail at block %d. Error: %v", b, err)
 			}
 
-			err = p.Modify(adds, delHashes, proof.Targets)
+			addHashes := make([]Hash, len(adds))
+			for i, add := range adds {
+				addHashes[i] = add.Hash
+			}
+
+			err = p.Modify(addHashes, delHashes, proof.Targets)
 			if err != nil {
 				t.Fatalf("FuzzWriteAndRead fail at block %d. Error: %v", b, err)
 			}

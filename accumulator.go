@@ -10,6 +10,8 @@ import (
 
 // Pollard is a representation of the utreexo forest using a collection of
 // binary trees. It may or may not contain the entire set.
+//
+// TODO For the moment it only supports holding the entire set.
 type Pollard struct {
 	// NodeMap maps hashes to polNodes. Used during proving individual elements
 	// in the accumulator.
@@ -43,10 +45,12 @@ type Pollard struct {
 
 // NewAccumulator returns a initialized accumulator. To enable the generating proofs
 // for all elements, set Full to true.
-func NewAccumulator(full bool) Pollard {
+func NewAccumulator() Pollard {
 	var p Pollard
 	p.NodeMap = make(map[miniHash]*polNode)
-	p.Full = full
+
+	// TODO Make this optional.
+	p.Full = true
 
 	return p
 }
@@ -55,7 +59,7 @@ func NewAccumulator(full bool) Pollard {
 //
 // NOTE Modify does NOT do any validation and assumes that all the positions of the leaves
 // being deleted have already been verified.
-func (p *Pollard) Modify(adds []Leaf, delHashes []Hash, origDels []uint64) error {
+func (p *Pollard) Modify(adds, delHashes []Hash, origDels []uint64) error {
 	// Make a copy to avoid mutating the deletion slice passed in.
 	delCount := len(origDels)
 	dels := make([]uint64, delCount)
@@ -77,11 +81,11 @@ func (p *Pollard) Modify(adds []Leaf, delHashes []Hash, origDels []uint64) error
 }
 
 // add adds all the passed in leaves to the accumulator.
-func (p *Pollard) add(adds []Leaf) {
+func (p *Pollard) add(adds []Hash) {
 	for _, add := range adds {
 		// Create a node from the hash. If the pollard is Full, then remember
 		// every node.
-		node := &polNode{data: add.Hash, remember: add.Remember}
+		node := &polNode{data: add}
 		if p.Full {
 			node.remember = true
 		}
@@ -634,7 +638,7 @@ func writeOne(n *polNode, w io.Writer) (int64, error) {
 
 // RestorePollardFrom restores the pollard from the reader.
 func RestorePollardFrom(r io.Reader) (int64, *Pollard, error) {
-	p := NewAccumulator(true)
+	p := NewAccumulator()
 	totalBytes := int64(0)
 
 	// Read numleaves.
