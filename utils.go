@@ -155,7 +155,7 @@ func removeBit(val, bit uint64) uint64 {
 //
 // Ex: pos of 1, delPos of 5.
 // In the below tree, when we delete 5 (101), we'll remove the 1st bit of 1 (001)
-// and we get 01. Then we prepend bit 1 on 01 and get 101, which is 4, the position
+// and we get 01. Then we prepend bit 1 on 01 and get 101, which is 5, the position
 // 1 needs to go to when we delete 5.
 //
 // row 2: 110
