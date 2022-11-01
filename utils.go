@@ -284,34 +284,11 @@ func detectOffset(position uint64, numLeaves uint64) (uint8, uint8, uint64, erro
 //        |---\   |---\
 // row 0: 00  01  02
 func treeRows(n uint64) uint8 {
-	// treeRows works by:
-	// 1. Find the next power of 2 from the given n leaves.
-	// 2. Calculate the log2 of the result from step 1.
-	//
-	// For example, if the given number is 9, the next power of 2 is
-	// 16. This log2 of this number is how many rows there are in the
-	// given tree.
-	//
-	// This works because while Utreexo is a collection of perfect
-	// trees, the allocated number of leaves is always a power of 2.
-	// For Utreexo trees that don't have leaves that are power of 2,
-	// the extra space is just unallocated/filled with zeros.
+	if n == 0 {
+		return 0
+	}
 
-	// Find the next power of 2
-	n--
-	n |= n >> 1
-	n |= n >> 2
-	n |= n >> 4
-	n |= n >> 8
-	n |= n >> 16
-	n |= n >> 32
-	n++
-
-	// log of 2 is the tree depth/height
-	// if n == 0, there will be 64 traling zeros but actually no tree rows.
-	// we clear the 6th bit to return 0 in that case.
-	return uint8(bits.TrailingZeros64(n) & ^int(64))
-
+	return uint8(bits.Len64(n - 1))
 }
 
 // logicalTreeRows returns the number of
