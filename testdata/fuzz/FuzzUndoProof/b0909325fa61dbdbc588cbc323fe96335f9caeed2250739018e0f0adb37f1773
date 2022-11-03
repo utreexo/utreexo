@@ -1,0 +1,5 @@
+go test fuzz v1
+int64(-14465465)
+byte('\x06')
+byte('\x02')
+byte('\x04')
