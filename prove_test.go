@@ -737,7 +737,10 @@ func FuzzModifyProofChain(f *testing.F) {
 				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
 			}
 
-			p.Undo(uint64(len(adds)), blockProof.Targets, delHashes, stump.Roots)
+			err = p.Undo(uint64(len(adds)), blockProof.Targets, delHashes, stump.Roots)
+			if err != nil {
+				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
+			}
 
 			updateData, err := stump.Update(delHashes, addHashes, blockProof)
 			if err != nil {
