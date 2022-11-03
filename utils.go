@@ -148,6 +148,24 @@ func removeBit(val, bit uint64) uint64 {
 	return (upper >> 1) | lower
 }
 
+// addBit insert a bit into the desired place. For example, if place is 2 and
+// bit is true, for value of 1001 (9 in decimal), the returned value is 10101
+// (21 in decimal).
+func addBit(val, place uint64, bit bool) uint64 {
+	mask := uint64((1 << place) - 1)
+	upperMask := math.MaxUint64 ^ mask
+	upper := val & upperMask
+	upper <<= 1
+
+	lowerMask := ^(math.MaxUint64 ^ mask)
+	lower := val & lowerMask
+
+	if bit {
+		return (upper | lower) | (1 << place)
+	}
+	return (upper | lower)
+}
+
 // calcNextPosition calculates where a position should move to if an ancestor of
 // delPos gets deleted.
 // NOTE: caller must check that delPos is an ancestor of position. Wrong position
@@ -184,6 +202,41 @@ func calcNextPosition(position, delPos uint64, forestRows uint8) (uint64, error)
 
 	// Put the bits together and return it.
 	return higherBits | lowerBits, nil
+}
+
+// calcPrevPosition calculates where a position was previously before delPos was deleted.
+//
+// Ex: pos of 5, delPos of 5.
+// In the below tree, we first flip the row bit for pos 5 (101) and get 001. We then add
+// a bit of the del row. Since 5 on the right and is on row 1, we add a single 0 bit at
+// the 1st bit and get 001.
+//
+// row 2: 110
+//        |---------\
+// row 1: 100       101
+//        |----\    |----\
+// row 0: 000  001  010  011
+//
+func calcPrevPosition(position, delPos uint64, forestRows uint8) uint64 {
+	delRow := detectRow(delPos, forestRows)
+	posRow := detectRow(position, forestRows)
+
+	mask := ^(uint64(1<<posRow) << uint64(forestRows-posRow))
+	lowerBits := position
+	lowerBits &= mask
+
+	bitToAdd := isLeftNiece(delPos)
+	if delRow < posRow {
+		if isLeftNiece(delPos) {
+			bitToAdd = true
+		} else {
+			bitToAdd = false
+		}
+	}
+
+	place := uint64(delRow - (posRow - 1))
+	lowerBits = addBit(lowerBits, place, bitToAdd)
+	return lowerBits
 }
 
 // detectRow finds the current row of your node given the position

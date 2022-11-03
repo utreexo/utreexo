@@ -316,6 +316,32 @@ func removeHashesFromHashAndPos[E any](slice1 hashAndPos, slice2 []E, getHash fu
 	return retSlice
 }
 
+// getHashAndPosSubset allocates and returns a new hashAndPos that is the
+// intersection of a and b.
+//
+// NOTE: Both inputs MUST be sorted.
+func getHashAndPosSubset(a hashAndPos, b []uint64) hashAndPos {
+	c := hashAndPos{make([]uint64, 0, len(b)), make([]Hash, 0, len(b))}
+
+	bIdx := 0
+	for i := 0; i < a.Len(); i++ {
+		if bIdx >= len(b) {
+			break
+		}
+		// If they're equal, append element to c.
+		if a.positions[i] == b[bIdx] {
+			c.Append(a.positions[i], a.hashes[i])
+			// Move both indexes forward if they're the same.
+			bIdx++
+		} else if a.positions[i] > b[bIdx] {
+			bIdx++
+			i--
+		}
+	}
+
+	return c
+}
+
 // getHashAndPosHashSubset allocates and returns a new hashAndPos that is the
 // intersection of a and b based on the hashes in b.
 func getHashAndPosHashSubset(a hashAndPos, b []Hash) hashAndPos {
@@ -334,6 +360,37 @@ func getHashAndPosHashSubset(a hashAndPos, b []Hash) hashAndPos {
 	}
 
 	return c
+}
+
+func deTwinHashAndPos(hnp hashAndPos, forestRows uint8) hashAndPos {
+	for i := 0; i < hnp.Len(); i++ {
+		// 1: Check that there's at least 2 elements in the slice left.
+		// 2: Check if the right sibling of the current element matches
+		//    up with the next element in the slice.
+		if i+1 < hnp.Len() && rightSib(hnp.positions[i]) == hnp.positions[i+1] {
+			// Grab the position of the del.
+			nodePos, nodeHash := hnp.positions[i], hnp.hashes[i]
+			sibHash := hnp.hashes[i+1]
+
+			// Remove both of the detwined nodes from the slice.
+			hnp.Delete(i)
+			hnp.Delete(i)
+
+			// Calculate and insert the parent in order.
+			position := parent(nodePos, forestRows)
+			hnp = mergeSortedHashAndPos(
+				hnp,
+				hashAndPos{[]uint64{position}, []Hash{parentHash(nodeHash, sibHash)}},
+			)
+
+			// Decrement one since the next element we should
+			// look at is at the same index because the slice decreased
+			// in length by one.
+			i--
+		}
+	}
+
+	return hnp
 }
 
 // Verify calculates the root hashes from the passed in proof and delHashes and
@@ -1081,6 +1138,285 @@ func (p *Proof) Update(
 		updateData.PrevNumLeaves, updateData.ToDestroy)
 
 	return cachedHashes, nil
+}
+
+// Undo reverts the proof back to the previous state before the Update.
+//
+// NOTE Undo does NOT re-cache the already deleted leaves that were previously
+// cached. Those must be added back to the cached proof separately.
+func (p *Proof) Undo(numAdds, numLeaves uint64, dels []uint64,
+	delHashes, cachedHashes []Hash, toDestroy []uint64, proof Proof) ([]Hash, error) {
+
+	cachedHashes, err := p.undoAdd(numAdds, numLeaves, cachedHashes, toDestroy)
+	if err != nil {
+		return cachedHashes, err
+	}
+
+	cachedHashes, err = p.undoDel(dels, delHashes, cachedHashes, proof, numLeaves-numAdds)
+	if err != nil {
+		return cachedHashes, err
+	}
+
+	return cachedHashes, nil
+}
+
+// pruneEdges prunes all the positions that cannot exist in the prevForestRows.
+func pruneEdges(hnp hashAndPos, numAdds, numLeaves uint64, forestRows, prevForestRows uint8) (hashAndPos, error) {
+	prevTargetsWithHash := hashAndPos{make([]uint64, 0, hnp.Len()), make([]Hash, 0, hnp.Len())}
+	for i, target := range hnp.positions {
+		// Save the current row.
+		row := detectRow(target, forestRows)
+
+		// If the row is greater than the prevForestRows, this can't exist.
+		if row > prevForestRows {
+			continue
+		}
+
+		currentStartPos := startPositionAtRow(row, forestRows)
+		prevStartPos := startPositionAtRow(row, prevForestRows)
+		offset := target - currentStartPos
+
+		maxPos, err := maxPositionAtRow(row, prevForestRows, numLeaves-numAdds)
+		if err != nil {
+			return hashAndPos{}, err
+		}
+		if prevStartPos+offset <= maxPos {
+			prevTargetsWithHash.Append(target, hnp.hashes[i])
+		}
+	}
+
+	return prevTargetsWithHash, nil
+}
+
+// undoAdd remaps the targets to their previous positions and prunes positions and
+// proof hashes that could not have existed before the add.
+func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestroy []uint64) ([]Hash, error) {
+	targetsWithHash := toHashAndPos(p.Targets, cachedHashes)
+	proofPos, _ := proofPositions(targetsWithHash.positions, numLeaves, treeRows(numLeaves))
+	proofWithPos := toHashAndPos(proofPos, p.Proof)
+
+	forestRows := treeRows(numLeaves)
+	prevForestRows := treeRows(numLeaves - numAdds)
+
+	// Move positions to their previous positions before the empty roots were destroyed.
+	for _, destroyed := range toDestroy {
+		for i, target := range targetsWithHash.positions {
+			if destroyed <= target {
+				continue
+			}
+
+			// If these positions are in different subtrees, continue.
+			subtree, _, _, _ := detectOffset(target, numLeaves)
+			subtree1, _, _, _ := detectOffset(destroyed, numLeaves-numAdds)
+			if subtree != subtree1 {
+				continue
+			}
+			if isAncestor(parent(destroyed, forestRows), target, forestRows) {
+				targetsWithHash.positions[i] = calcPrevPosition(target, destroyed, forestRows)
+			}
+		}
+
+		for i, target := range proofWithPos.positions {
+			if destroyed <= target {
+				continue
+			}
+			// If these positions are in different subtrees, continue.
+			subtree, _, _, _ := detectOffset(target, numLeaves)
+			subtree1, _, _, _ := detectOffset(destroyed, numLeaves-numAdds)
+			if subtree != subtree1 {
+				continue
+			}
+			if isAncestor(parent(destroyed, forestRows), target, forestRows) {
+				proofWithPos.positions[i] = calcPrevPosition(target, destroyed, forestRows)
+			}
+		}
+	}
+
+	// Prune all positions that can't exist in the previous forest rows.
+	var err error
+	targetsWithHash, err = pruneEdges(targetsWithHash, numAdds, numLeaves, forestRows, prevForestRows)
+	if err != nil {
+		return nil, err
+	}
+	proofWithPos, err = pruneEdges(proofWithPos, numAdds, numLeaves, forestRows, prevForestRows)
+	if err != nil {
+		return nil, err
+	}
+
+	// Prune all positions that are under the previously empty root.
+	for row := 0; row <= int(prevForestRows); row++ {
+		for _, destroyed := range toDestroy {
+			for i := 0; i < proofWithPos.Len(); i++ {
+				target := proofWithPos.positions[i]
+				// If these positions are in different subtrees, continue.
+				subtree, _, _, _ := detectOffset(destroyed, numLeaves)
+				subtree1, _, _, _ := detectOffset(target, numLeaves)
+				if subtree == subtree1 || target == destroyed {
+					proofWithPos.Delete(i)
+				}
+			}
+
+			for i := 0; i < targetsWithHash.Len(); i++ {
+				target := targetsWithHash.positions[i]
+				// If these positions are in different subtrees, continue.
+				subtree, _, _, _ := detectOffset(destroyed, numLeaves)
+				subtree1, _, _, _ := detectOffset(target, numLeaves)
+				if subtree == subtree1 || target == destroyed {
+					targetsWithHash.Delete(i)
+				}
+			}
+		}
+	}
+
+	// Remap all positions to their previous positions before the remap.
+	if prevForestRows < forestRows {
+		for i, pos := range targetsWithHash.positions {
+			row := detectRow(pos, treeRows(numLeaves))
+
+			currentStartPos := startPositionAtRow(row, forestRows)
+			prevStartPos := startPositionAtRow(row, prevForestRows)
+
+			offset := pos - currentStartPos
+
+			targetsWithHash.positions[i] = offset + prevStartPos
+		}
+
+		for i, pos := range proofWithPos.positions {
+			row := detectRow(pos, treeRows(numLeaves))
+
+			currentStartPos := startPositionAtRow(row, forestRows)
+			prevStartPos := startPositionAtRow(row, prevForestRows)
+
+			offset := pos - currentStartPos
+
+			proofWithPos.positions[i] = offset + prevStartPos
+		}
+	}
+
+	// There may be extra proof hashes that we don't need anymore. Calculate the
+	// needed positions and remove the rest.
+	neededProofPos, _ := proofPositions(targetsWithHash.positions, numLeaves-numAdds, prevForestRows)
+	proofWithPos = getHashAndPosSubset(proofWithPos, neededProofPos)
+
+	// Set the proof.
+	p.Proof = proofWithPos.hashes
+	p.Targets = targetsWithHash.positions
+
+	return targetsWithHash.hashes, nil
+}
+
+// undoDel adds back the deleted positions and proof hashes back to the proof.
+//
+// NOTE undoDel does not re-cache the deleted targets that were previously cached.
+func (p *Proof) undoDel(blockTargets []uint64, blockHashes, cachedHashes []Hash, blockProof Proof, numLeaves uint64) ([]Hash, error) {
+	totalRows := treeRows(numLeaves)
+
+	if len(blockTargets) == 0 {
+		return cachedHashes, nil
+	}
+
+	targetsWithHashes := toHashAndPos(p.Targets, cachedHashes)
+	proofPos, _ := proofPositions(targetsWithHashes.positions, numLeaves, totalRows)
+	proofWithPos := toHashAndPos(proofPos, p.Proof)
+
+	// Detwin the block targets.
+	blockTargetsWithHash := toHashAndPos(blockTargets, blockHashes)
+	blockTargetsWithHash = deTwinHashAndPos(blockTargetsWithHash, totalRows)
+
+	// newProofs are the newly needed proofs that come from undoing the deletions.
+	// Need to keep track of them separately from the current proof hashes as
+	// some exisiting positions in the proof may share the same position (and thus
+	// may get deduped out if we call mergeSortedHashAndPos.)
+	newProofs := hashAndPos{}
+
+	// Loop through all the targets and look for the previous sibling.
+	// If that sibling is included in the proof, include the target into
+	// the proof and remap the positions accordingly.
+	for i := blockTargetsWithHash.Len() - 1; i >= 0; i-- {
+		blockTarget, blockHash := blockTargetsWithHash.positions[i], blockTargetsWithHash.hashes[i]
+
+		// When a target is deleted, its sibling moves up to the parent
+		// position. Therefore the current sibling will be in the parent
+		// position of the deleted target if it exists.
+		sibPos := parent(blockTarget, totalRows)
+
+		// Look for the sibling in the cached targets.
+		for i, target := range targetsWithHashes.positions {
+			// If these positions are in different subtrees, continue.
+			subtree, _, _, _ := detectOffset(target, numLeaves)
+			subtree1, _, _, _ := detectOffset(blockTarget, numLeaves)
+			if subtree != subtree1 {
+				continue
+			}
+			if isAncestor(sibPos, target, totalRows) || sibPos == target {
+				targetsWithHashes.positions[i] = calcPrevPosition(target, blockTarget, totalRows)
+
+				// Store the block hash and target to add onto the proof hashes later.
+				newProofs.Append(blockTarget, blockHash)
+				sort.Sort(newProofs)
+
+				sort.Sort(targetsWithHashes)
+			}
+		}
+
+		// Look for the sibling in the proof hashes.
+		for i, target := range proofWithPos.positions {
+			// If these positions are in different subtrees, continue.
+			subtree, _, _, _ := detectOffset(target, numLeaves)
+			subtree1, _, _, _ := detectOffset(blockTarget, numLeaves)
+			if subtree != subtree1 {
+				continue
+			}
+			if isAncestor(sibPos, target, totalRows) || sibPos == target {
+				proofWithPos.positions[i] = calcPrevPosition(target, blockTarget, totalRows)
+				sibHash := proofWithPos.hashes[i]
+				sort.Sort(proofWithPos)
+
+				if isLeftNiece(blockTarget) {
+					parentH := parentHash(blockHash, sibHash)
+					newProof := hashAndPos{[]uint64{sibPos}, []Hash{parentH}}
+					proofWithPos = mergeSortedHashAndPos(proofWithPos, newProof)
+
+				} else {
+					parentH := parentHash(sibHash, blockHash)
+					newProof := hashAndPos{[]uint64{sibPos}, []Hash{parentH}}
+					proofWithPos = mergeSortedHashAndPos(proofWithPos, newProof)
+				}
+			}
+		}
+	}
+
+	// Add in the new proofs.
+	proofWithPos = mergeSortedHashAndPos(proofWithPos, newProofs)
+
+	before, _ := calculateHashes(numLeaves, blockHashes, blockProof)
+	beforeIdx := 0
+
+	// Replace the proof hashes with the before hashes. This is needed
+	// because the mergeSortedHashAndPos will dedupe and use the hashes
+	// from proofWithPos.
+	for i, pos := range proofWithPos.positions {
+		for beforeIdx < before.Len() && before.positions[beforeIdx] < pos {
+			beforeIdx++
+		}
+
+		if beforeIdx < before.Len() && before.positions[beforeIdx] == pos {
+			proofWithPos.hashes[i] = before.hashes[beforeIdx]
+		}
+	}
+	// Merge everything so we have a single big pile of proof hashes that
+	// we can extract hashes from.
+	proofWithPos = mergeSortedHashAndPos(proofWithPos, before)
+
+	// Only extract the proof hashes that are needed for the targets after
+	// the remap.
+	neededProofPos, _ := proofPositions(targetsWithHashes.positions, numLeaves, totalRows)
+	proofWithPos = getHashAndPosSubset(proofWithPos, neededProofPos)
+
+	p.Proof = proofWithPos.hashes
+	p.Targets = targetsWithHashes.positions
+
+	return targetsWithHashes.hashes, nil
 }
 
 // GetProofSubset trims away the un-needed data from the proof and returns a proof only
