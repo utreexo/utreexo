@@ -53,7 +53,7 @@ func FuzzStump(f *testing.F) {
 			return
 		}
 
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		stump := Stump{}
 
 		leaves, delHashes, _ := getAddsAndDels(uint32(p.NumLeaves), startLeaves, delCount)
@@ -62,12 +62,7 @@ func FuzzStump(f *testing.F) {
 			t.Fatal(err)
 		}
 
-		adds := make([]Hash, len(leaves))
-		for i := range leaves {
-			adds[i] = leaves[i].Hash
-		}
-
-		_, err = stump.Update(nil, adds, Proof{})
+		_, err = stump.Update(nil, leaves, Proof{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -101,17 +96,13 @@ func FuzzStump(f *testing.F) {
 		prevRoots := make([]Hash, len(stump.Roots))
 		copy(prevRoots, stump.Roots)
 
-		adds = make([]Hash, len(modifyLeaves))
-		for i := range adds {
-			adds[i] = modifyLeaves[i].Hash
-		}
 		// Update the stump.
-		updateData, err := stump.Update(delHashes, adds, proof)
+		updateData, err := stump.Update(delHashes, modifyLeaves, proof)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		err = checkUpdateData(updateData, adds, delHashes, prevRoots, proof, stump, &p)
+		err = checkUpdateData(updateData, modifyLeaves, delHashes, prevRoots, proof, stump, &p)
 		if err != nil {
 			t.Fatalf("FuzzStump fail: error %v", err)
 		}
@@ -148,7 +139,7 @@ func FuzzStumpChain(f *testing.F) {
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		stump := Stump{}
 
 		var totalAdds, totalDels int
@@ -175,7 +166,7 @@ func FuzzStumpChain(f *testing.F) {
 				t.Fatal(err)
 			}
 
-			err = p.Modify(adds, delHashes, proof.Targets)
+			err = p.Modify(addHashes, delHashes, proof.Targets)
 			if err != nil {
 				t.Fatalf("FuzzStumpChain fail at block %d. Error: %v", b, err)
 			}

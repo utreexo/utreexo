@@ -10,20 +10,20 @@ func TestCalculatePosition(t *testing.T) {
 	t.Parallel()
 
 	var tests = []struct {
-		adds     []Leaf
+		adds     []Hash
 		dels     []uint64
 		expected map[Hash]uint64
 	}{
 		{
-			[]Leaf{
-				{Hash: Hash{1}},
-				{Hash: Hash{2}},
-				{Hash: Hash{3}},
-				{Hash: Hash{4}},
-				{Hash: Hash{5}},
-				{Hash: Hash{6}},
-				{Hash: Hash{7}},
-				{Hash: Hash{8}},
+			[]Hash{
+				{1},
+				{2},
+				{3},
+				{4},
+				{5},
+				{6},
+				{7},
+				{8},
 			},
 			nil,
 			map[Hash]uint64{
@@ -38,15 +38,15 @@ func TestCalculatePosition(t *testing.T) {
 			},
 		},
 		{
-			[]Leaf{
-				{Hash: Hash{1}},
-				{Hash: Hash{2}},
-				{Hash: Hash{3}},
-				{Hash: Hash{4}},
-				{Hash: Hash{5}},
-				{Hash: Hash{6}},
-				{Hash: Hash{7}},
-				{Hash: Hash{8}},
+			[]Hash{
+				{1},
+				{2},
+				{3},
+				{4},
+				{5},
+				{6},
+				{7},
+				{8},
 			},
 			[]uint64{0},
 			map[Hash]uint64{
@@ -62,7 +62,7 @@ func TestCalculatePosition(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 
 		err := p.Modify(test.adds, nil, nil)
 		if err != nil {
@@ -98,20 +98,20 @@ func TestReadPosition(t *testing.T) {
 	t.Parallel()
 
 	var tests = []struct {
-		adds     []Leaf
+		adds     []Hash
 		dels     []uint64
 		expected map[Hash]uint64
 	}{
 		{
-			[]Leaf{
-				{Hash: Hash{1}},
-				{Hash: Hash{2}},
-				{Hash: Hash{3}},
-				{Hash: Hash{4}},
-				{Hash: Hash{5}},
-				{Hash: Hash{6}},
-				{Hash: Hash{7}},
-				{Hash: Hash{8}},
+			[]Hash{
+				{1},
+				{2},
+				{3},
+				{4},
+				{5},
+				{6},
+				{7},
+				{8},
 			},
 			[]uint64{0},
 			map[Hash]uint64{
@@ -125,15 +125,15 @@ func TestReadPosition(t *testing.T) {
 			},
 		},
 		{
-			[]Leaf{
-				{Hash: Hash{1}},
-				{Hash: Hash{2}},
-				{Hash: Hash{3}},
-				{Hash: Hash{4}},
-				{Hash: Hash{5}},
-				{Hash: Hash{6}},
-				{Hash: Hash{7}},
-				{Hash: Hash{8}},
+			[]Hash{
+				{1},
+				{2},
+				{3},
+				{4},
+				{5},
+				{6},
+				{7},
+				{8},
 			},
 			[]uint64{0, 4, 5, 7},
 			map[Hash]uint64{
@@ -145,7 +145,7 @@ func TestReadPosition(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 
 		err := p.Modify(test.adds, nil, nil)
 		if err != nil {
