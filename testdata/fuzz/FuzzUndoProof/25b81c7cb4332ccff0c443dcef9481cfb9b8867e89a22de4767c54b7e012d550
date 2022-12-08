@@ -1,0 +1,5 @@
+go test fuzz v1
+int64(-14465536)
+byte('\x17')
+byte('\x02')
+byte('\n')

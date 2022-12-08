@@ -941,3 +941,362 @@ func FuzzGetProofSubset(f *testing.F) {
 		}
 	})
 }
+
+func FuzzUndoProofChain(f *testing.F) {
+	var tests = []struct {
+		numAdds  uint32
+		duration uint32
+		seed     int64
+	}{
+		{3, 0x07, 0x07},
+	}
+	for _, test := range tests {
+		f.Add(test.numAdds, test.duration, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		// simulate blocks with simchain
+		sc := newSimChainWithSeed(duration, seed)
+
+		p := NewAccumulator(true)
+		stump := Stump{}
+
+		undoData := []struct {
+			addHashes  []Hash
+			delHashes  []Hash
+			targets    []uint64
+			remembers  []uint32
+			updateData UpdateData
+			proof      Proof
+			roots      []Hash
+
+			blockHeight int
+		}{}
+		// We'll store the cached utxos here. This would be the equivalent
+		// of a wallet storing its own utxos.
+		var cachedProof Proof
+		var cachedHashes []Hash
+		for b := 0; b <= 50; b++ {
+			adds, duration, delHashes := sc.NextBlock(numAdds)
+
+			// The blockProof is the proof for the utxos being
+			// spent/deleted.
+			blockProof, err := p.Prove(delHashes)
+			if err != nil {
+				t.Fatalf("FuzzUndoProofChain fail at block %d. Error: %v", b, err)
+			}
+
+			// Sanity checking.
+			err = p.Verify(delHashes, blockProof)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Sanity checking.
+			for _, target := range blockProof.Targets {
+				n, _, _, err := p.getNode(target)
+				if err != nil {
+					t.Fatalf("FuzzUndoProofChain fail at block %d. Error: %v", b, err)
+				}
+				if n == nil {
+					t.Fatalf("FuzzUndoProofChain fail to read %d at block %d.", target, b)
+				}
+			}
+
+			// For logging.
+			origCachedHashes := make([]Hash, len(cachedHashes))
+			copy(origCachedHashes, cachedHashes)
+
+			// Cache new utxos that have a duration longer than 3.
+			var remembers []uint32
+			var newHashesToCache []Hash
+			for i, add := range adds {
+				if duration[i] > 3 {
+					remembers = append(remembers, uint32(i))
+					newHashesToCache = append(newHashesToCache, add.Hash)
+				}
+			}
+
+			// expectedCachedHashes is the expected hashes after the
+			// modify has happened.
+			expectedCachedHashes := make([]Hash, len(cachedHashes))
+			copy(expectedCachedHashes, cachedHashes)
+			expectedCachedHashes = removeHashes(expectedCachedHashes, delHashes, func(elem Hash) Hash { return elem })
+			expectedCachedHashes = append(expectedCachedHashes, newHashesToCache...)
+
+			// Update the proof with the deletions and additions that
+			// happen in this block.
+			rootHashes := make([]Hash, len(p.Roots))
+			for i := range rootHashes {
+				rootHashes[i] = p.Roots[i].data
+			}
+			addHashes := make([]Hash, len(adds))
+			for i := range addHashes {
+				addHashes[i] = adds[i].Hash
+			}
+
+			prevRoots := make([]Hash, len(stump.Roots))
+			copy(prevRoots, stump.Roots)
+
+			updateData, err := stump.Update(delHashes, addHashes, blockProof)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Save the undo data to undo the cached proof.
+			undoData = append(undoData,
+				struct {
+					addHashes  []Hash
+					delHashes  []Hash
+					targets    []uint64
+					remembers  []uint32
+					updateData UpdateData
+					proof      Proof
+					roots      []Hash
+
+					blockHeight int
+				}{
+					addHashes,
+					delHashes,
+					blockProof.Targets,
+					remembers,
+					updateData,
+					blockProof,
+					prevRoots,
+
+					b,
+				},
+			)
+
+			cachedHashes, err = cachedProof.Update(cachedHashes, addHashes, blockProof.Targets, remembers, updateData)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Check that we have enough targets as we expect.
+			if len(cachedProof.Targets) != len(cachedHashes) {
+				t.Fatalf("FuzzUndoProofChain Fail. Expected %d "+
+					"targets but got %d.\nDeleted hashes:\n%v"+
+					"\nOriginal cached hashes:\n%v\nExpected "+
+					"hashes:\n%v\nGot hashes:\n%v\n",
+					len(cachedHashes),
+					len(cachedProof.Targets),
+					printHashes(delHashes),
+					printHashes(origCachedHashes),
+					printHashes(expectedCachedHashes),
+					printHashes(cachedHashes))
+			}
+
+			shouldBeEmpty := make([]Hash, len(cachedHashes))
+			copy(shouldBeEmpty, cachedHashes)
+
+			// Check that all the hashes we expect to be cached are all there.
+			shouldBeEmpty = removeHashes(shouldBeEmpty, cachedHashes, func(elem Hash) Hash { return elem })
+			if len(shouldBeEmpty) > 0 {
+				t.Fatalf("FuzzUndoProofChain Fail. Expected hashes:\n%s\nbut got:\n%s\n",
+					printHashes(expectedCachedHashes), printHashes(cachedHashes))
+			}
+			err = p.Modify(adds, delHashes, blockProof.Targets)
+			if err != nil {
+				t.Fatalf("FuzzUndoProofChain fail at block %d. Error: %v", b, err)
+			}
+
+			// Sanity check that the modified proof verifies with the
+			// modified pollard.
+			err = p.Verify(cachedHashes, cachedProof)
+			if err != nil {
+				t.Fatalf("FuzzUndoProofChain fail at block %d. Error: %v", b, err)
+			}
+
+			_, err = Verify(stump, cachedHashes, cachedProof)
+			if err != nil {
+				t.Fatalf("FuzzUndoProofChain fail at block %d. Error: %v", b, err)
+			}
+
+			// Undo every 10 blocks. We only check the validity of the proof after
+			// the undo. We don't check that all the relevant hashes are still cached.
+			if b%3 == 2 {
+				// Don't use the originals. Make a copy of the cachedHashes
+				// and the cached proof.
+				cachedHashesCopy := make([]Hash, len(cachedHashes))
+				copy(cachedHashesCopy, cachedHashes)
+
+				cachedProofCopy := Proof{make([]uint64, len(cachedProof.Targets)), make([]Hash, len(cachedProof.Proof))}
+				copy(cachedProofCopy.Proof, cachedProof.Proof)
+				copy(cachedProofCopy.Targets, cachedProof.Targets)
+
+				// Undo the last 10 blocks.
+				for i := 2; i >= 0; i-- {
+					cachedHashesCopy, err = cachedProofCopy.Undo(
+						uint64(len(undoData[i].addHashes)),
+						undoData[i].updateData.PrevNumLeaves+uint64(len(undoData[i].addHashes)),
+						undoData[i].targets,
+						undoData[i].delHashes,
+						cachedHashesCopy,
+						undoData[i].updateData.ToDestroy,
+						undoData[i].proof,
+					)
+					if err != nil {
+						t.Fatalf("FuzzUndoProofChain error: %v", err)
+					}
+
+					_, err = Verify(
+						Stump{
+							undoData[i].roots,
+							undoData[i].updateData.PrevNumLeaves,
+						},
+						undoData[i].delHashes,
+						undoData[i].proof,
+					)
+					if err != nil {
+						t.Fatalf("FuzzUndoProofChain error: %v", err)
+					}
+				}
+				undoData = undoData[:0]
+			}
+
+			// Sanity checking.
+			if b%10 == 0 {
+				err = p.checkHashes()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			err = p.posMapSanity()
+			if err != nil {
+				t.Fatalf("FuzzUndoProofChain fail at block %d. Error: %v",
+					b, err)
+			}
+			if uint64(len(p.NodeMap)) != p.NumLeaves-p.NumDels {
+				err := fmt.Errorf("FuzzUndoProofChain fail at block %d: "+
+					"have %d leaves in map but only %d leaves in total",
+					b, len(p.NodeMap), p.NumLeaves-p.NumDels)
+				t.Fatal(err)
+			}
+		}
+	})
+}
+
+func leafToHashes(leaves []Leaf) []Hash {
+	hashes := make([]Hash, len(leaves))
+	for i, leaf := range leaves {
+		hashes[i] = leaf.Hash
+	}
+
+	return hashes
+}
+
+func FuzzUndoProof(f *testing.F) {
+	var tests = []struct {
+		seed        int64
+		startLeaves uint8
+		modifyAdds  uint8
+		delCount    uint8
+	}{
+		{
+			165465,
+			8,
+			2,
+			3,
+		},
+		{
+			-14465465,
+			6,
+			2,
+			5,
+		},
+	}
+
+	for _, test := range tests {
+		f.Add(test.seed, test.startLeaves, test.modifyAdds, test.delCount)
+	}
+
+	f.Fuzz(func(t *testing.T, seed int64, startLeaves uint8, modifyAdds uint8, delCount uint8) {
+		rand.Seed(seed)
+		// delCount must be less than the current number of leaves.
+		if delCount > startLeaves {
+			return
+		}
+
+		// Have at least 2 leaves left over.
+		if startLeaves-delCount < 2 {
+			return
+		}
+
+		// Create the starting off pollard.
+		p := NewAccumulator(true)
+		leaves, dels, _ := getAddsAndDels(uint32(p.NumLeaves), uint32(startLeaves), uint32(delCount))
+		err := p.Modify(leaves, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		addHashes := leafToHashes(leaves)
+		stump := Stump{}
+		updateData, err := stump.Update(nil, addHashes, Proof{})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		indexes := randomIndexes(len(leaves), 1)
+		remembers := make([]uint32, len(indexes))
+		for i, index := range indexes {
+			remembers[i] = uint32(index)
+		}
+
+		cachedProof := Proof{}
+		cachedHashes, err := cachedProof.Update(nil, addHashes, nil, remembers, updateData)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = Verify(stump, cachedHashes, cachedProof)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		bp, err := p.Prove(dels)
+		if err != nil {
+			t.Fatal(err)
+		}
+		modifyLeaves, _, _ := getAddsAndDels(uint32(p.NumLeaves), uint32(modifyAdds), 0)
+		err = p.Modify(modifyLeaves, dels, bp.Targets)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		prevStump := Stump{make([]Hash, len(stump.Roots)), stump.NumLeaves}
+		copy(prevStump.Roots, stump.Roots)
+
+		addHashes = leafToHashes(modifyLeaves)
+		updateData, err = stump.Update(dels, addHashes, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		indexes = randomIndexes(len(modifyLeaves), 1)
+		remembers = make([]uint32, len(indexes))
+		for i, index := range indexes {
+			remembers[i] = uint32(index)
+		}
+
+		cachedHashes, err = cachedProof.Update(cachedHashes, addHashes, bp.Targets, remembers, updateData)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = Verify(stump, cachedHashes, cachedProof)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		cachedHashes, err = cachedProof.Undo(uint64(len(addHashes)), stump.NumLeaves, bp.Targets, dels, cachedHashes, updateData.ToDestroy, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = Verify(prevStump, cachedHashes, cachedProof)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+}
