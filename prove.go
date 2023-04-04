@@ -1422,35 +1422,60 @@ func (p *Proof) undoDel(blockTargets []uint64, blockHashes, cachedHashes []Hash,
 // GetProofSubset trims away the un-needed data from the proof and returns a proof only
 // for the passed in removes. An error is returned if the passed in proof does not have
 // all the targets in the removes.
-func GetProofSubset(proof Proof, hashes []Hash, removes []uint64, numLeaves uint64) ([]Hash, Proof, error) {
+//
+// NOTE The returned hashes and proof targets are in the same permutation as the given wants.
+func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64) ([]Hash, Proof, error) {
 	// Copy to avoid mutating the original.
 	proofTargetsCopy := copySortedFunc(proof.Targets, uint64Less)
 
 	// Check that all the targets in removes are also present in the proof.
-	expectedEmpty := copySortedFunc(removes, uint64Less)
+	expectedEmpty := copySortedFunc(wants, uint64Less)
 	expectedEmpty = subtractSortedSlice(expectedEmpty, proofTargetsCopy, uint64Cmp)
 	if len(expectedEmpty) > 0 {
 		err := fmt.Errorf("Missing positions %v from the proof. Deletions %v, proof.Targets %v",
-			expectedEmpty, removes, proof.Targets)
+			expectedEmpty, wants, proof.Targets)
 		return nil, Proof{}, err
 	}
 
-	// Create a copy of the proof that we'll mutate and return.
-	retProof := Proof{
-		make([]uint64, len(proof.Targets)),
-		make([]Hash, len(proof.Proof)),
+	// Match up the targets with their respective hashes.
+	targetHashesWithPos := toHashAndPos(proofTargetsCopy, hashes)
+
+	// calculateHashes provides us with all the intermediate calculated nodes in the tree.
+	// Need to sort the returned positions and hashes as they aren't sorted.
+	posAndHashes, _ := calculateHashes(numLeaves, hashes, proof)
+	sort.Sort(posAndHashes)
+
+	// Put positions onto the proof hashes.
+	positions, _ := proofPositions(proofTargetsCopy, numLeaves, treeRows(numLeaves))
+	proofPos := toHashAndPos(positions, proof.Proof)
+
+	// Merge the proof positions and its hashes along with the calculated intermediate nodes
+	// so we have one big slice to extract the proof for the want slice.
+	posAndHashes = mergeSortedHashAndPos(posAndHashes, proofPos)
+
+	// Copy to avoid mutating the wants.
+	sortedWants := copySortedFunc(wants, uint64Less)
+	targetHashesWithPos = getHashAndPosSubset(targetHashesWithPos, sortedWants)
+
+	// Grab the positions that we need to prove the wants.
+	wantProofPos, _ := proofPositions(targetHashesWithPos.positions, numLeaves, treeRows(numLeaves))
+
+	// Extract the proof positions we want and then sanity check to see that we have everything.
+	posAndHashes = getHashAndPosSubset(posAndHashes, wantProofPos)
+	if posAndHashes.Len() != len(wantProofPos) {
+		return nil, Proof{},
+			fmt.Errorf("Expected %d proofs but got %d", len(wantProofPos), posAndHashes.Len())
 	}
-	copy(retProof.Targets, proof.Targets)
-	copy(retProof.Proof, proof.Proof)
 
-	// These are all the targets that we'll remove so that the returned proof will only
-	// prove the removes passed in.
-	sort.Slice(removes, func(a, b int) bool { return removes[a] < removes[b] })
-	proofTargetsCopy = subtractSortedSlice(proofTargetsCopy, removes, uint64Cmp)
+	// Lastly, we make separate slice of hashes as we guarantee that the hashes
+	// and targets will be in the same permutation as the passed in wants by the caller.
+	retHashes := make([]Hash, len(wants))
+	for i, want := range wants {
+		idx := slices.Index(targetHashesWithPos.positions, want)
+		retHashes[i] = targetHashesWithPos.hashes[idx]
+	}
 
-	// Remove the targets and return the results.
-	retHashes, retProof := RemoveTargets(numLeaves, hashes, retProof, proofTargetsCopy)
-	return retHashes, retProof, nil
+	return retHashes, Proof{wants, posAndHashes.hashes}, nil
 }
 
 // maybeRemap remaps the passed in hash and pos if the treeRows increase after
