@@ -810,138 +810,6 @@ func hashSiblings(proofHashes hashAndPos, pos uint64, currentHash, sibHash Hash,
 	return proofHashes
 }
 
-// RemoveTargets removes the selected targets from the given proof.
-// NOTE The passed in proof MUST be a valid proof. There are no checks done so it is the caller's
-// responsibility to make sure that the proof is valid.
-func RemoveTargets(numLeaves uint64, delHashes []Hash, proof Proof, remTargets []uint64) ([]Hash, Proof) {
-	forestRows := treeRows(numLeaves)
-
-	// Copy targets to avoid mutating the original.
-	targets := make([]uint64, len(proof.Targets))
-	copy(targets, proof.Targets)
-	targetHashesWithPos := toHashAndPos(targets, delHashes)
-
-	// Calculate the positions of the proofs that we currently have.
-	sort.Slice(targets, func(a, b int) bool { return targets[a] < targets[b] })
-	havePositions, _ := proofPositions(targets, numLeaves, forestRows)
-	proofHashesWithPos := toHashAndPos(havePositions, proof.Proof)
-
-	// Merge the target hashes and proof hashes and sort. We do this as some targets may become
-	// a proof.
-	proofHashesWithPos = mergeSortedHashAndPos(proofHashesWithPos, targetHashesWithPos)
-
-	// Remove the remTargets from the targets.
-	targetHashesWithPos = subtractSortedHashAndPos(targetHashesWithPos, remTargets, uint64Cmp)
-
-	// Extract hashes and positions.
-	targetHashes := targetHashesWithPos.hashes
-	targets = targetHashesWithPos.positions
-
-	// Get rid of all the leftover targets from the proofs.
-	proofHashesWithPos = subtractSortedHashAndPos(proofHashesWithPos, targets, uint64Cmp)
-
-	// Calculate all the subtrees that we're interested in. We'll use this to leave out positions
-	// that are not included in the subtrees here.
-	//
-	// Example: If we're only interested in subtree 0 (positions 00, 01, 02, 03), we'll leave
-	// out position 04 and 05.
-	//
-	// 12
-	// |-------\
-	// 08      09      10
-	// |---\   |---\   |---\
-	// 00  01  02  03  04  05  06
-	subTrees := []uint8{}
-	for _, target := range targets {
-		subTree, _, _, _ := detectOffset(target, numLeaves)
-
-		idx := slices.Index(subTrees, subTree)
-		if idx == -1 {
-			subTrees = append(subTrees, subTree)
-		}
-	}
-
-	// Take out proofs that are not in the subtrees our new targets are located in.
-	for i := 0; i < proofHashesWithPos.Len(); i++ {
-		proof := proofHashesWithPos.positions[i]
-		subTree, _, _, _ := detectOffset(proof, numLeaves)
-
-		if !slices.Contains(subTrees, subTree) {
-			idx := slices.IndexFunc(proofHashesWithPos.positions, func(elem uint64) bool { return elem == proof })
-			proofHashesWithPos.Delete(idx)
-			i--
-		}
-	}
-
-	// These are the positions that we need to calculate the new targets after deletion.
-	wantPositions, calculateable := proofPositions(targets, numLeaves, forestRows)
-	wantPositions = mergeSortedSlicesFunc(wantPositions, calculateable, uint64Cmp)
-
-	// These are all the positions that want to get rid of.
-	removePositions, _ := proofPositions(remTargets, numLeaves, forestRows)
-	removePositions = mergeSortedSlicesFunc(removePositions, remTargets, uint64Cmp)
-
-	// There are some positions we want that are included in the removePositions. Subtract those
-	// from removePositions because we need them.
-	removePositions = subtractSortedSlice(removePositions, wantPositions, uint64Cmp)
-
-	// Go through all the removePositions from the proof, hashing up as needed.
-	proofIdx := 0
-	for i := 0; i < len(removePositions); i++ {
-		if proofIdx >= len(proofHashesWithPos.positions) {
-			break
-		}
-
-		proofPos := proofHashesWithPos.positions[proofIdx]
-		proofHash := proofHashesWithPos.hashes[proofIdx]
-		removePosition := removePositions[i]
-
-		if removePosition == proofPos {
-			// The proofs are always sorted. Look at the next or the previous proof and check for sibling-ness.
-			// Then we call hash siblings and hash up to get the required proof. This needs to be done because
-			// the deleted proof may hash up to a required calculate-able proof.
-			//
-			// Example:
-			// In this below tree, if the targets are [00, 04] and we're deleting 00, then we need to hash up to
-			// 12 when deleting 00 as 12 is a required proof for 04.
-			//
-			// 14
-			// |---------------\
-			// 12              13
-			// |-------\       |-------\
-			// 08      09      10      11
-			// |---\   |---\   |---\   |---\
-			// 00  01  02  03  04  05  06  07
-			if proofIdx < proofHashesWithPos.Len()-1 && proofHashesWithPos.positions[proofIdx+1] == rightSib(proofPos) {
-				proofHashesWithPos = hashSiblings(proofHashesWithPos, proofPos, proofHash, proofHashesWithPos.hashes[proofIdx+1], forestRows)
-
-				proofHashesWithPos.Delete(proofIdx)
-				proofHashesWithPos.Delete(proofIdx)
-			} else if proofIdx >= 1 && proofHashesWithPos.positions[proofIdx-1] == leftSib(proofPos) {
-				proofHashesWithPos = hashSiblings(proofHashesWithPos, proofPos, proofHash, proofHashesWithPos.hashes[proofIdx-1], forestRows)
-
-				proofHashesWithPos.Delete(proofIdx - 1)
-				proofHashesWithPos.Delete(proofIdx - 1)
-				proofIdx-- // decrement since we're taking out an element from the left side.
-			} else {
-				// If there are no siblings present, just remove it.
-				proofHashesWithPos.Delete(proofIdx)
-			}
-
-			sort.Sort(proofHashesWithPos)
-		} else if removePosition < proofPos {
-			continue
-		} else {
-			proofIdx++
-			i--
-		}
-	}
-
-	sort.Sort(proofHashesWithPos)
-
-	return targetHashes, Proof{targets, proofHashesWithPos.hashes}
-}
-
 // AddProof adds the newProof onto the existing proof and return the new cachedDelHashes and proof. Newly calculateable
 // positions and duplicates are excluded in the returned proof.
 func AddProof(proofA, proofB Proof, targetHashesA, targetHashesB []Hash, numLeaves uint64) ([]Hash, Proof) {
@@ -1422,35 +1290,60 @@ func (p *Proof) undoDel(blockTargets []uint64, blockHashes, cachedHashes []Hash,
 // GetProofSubset trims away the un-needed data from the proof and returns a proof only
 // for the passed in removes. An error is returned if the passed in proof does not have
 // all the targets in the removes.
-func GetProofSubset(proof Proof, hashes []Hash, removes []uint64, numLeaves uint64) ([]Hash, Proof, error) {
+//
+// NOTE The returned hashes and proof targets are in the same permutation as the given wants.
+func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64) ([]Hash, Proof, error) {
 	// Copy to avoid mutating the original.
 	proofTargetsCopy := copySortedFunc(proof.Targets, uint64Less)
 
 	// Check that all the targets in removes are also present in the proof.
-	expectedEmpty := copySortedFunc(removes, uint64Less)
+	expectedEmpty := copySortedFunc(wants, uint64Less)
 	expectedEmpty = subtractSortedSlice(expectedEmpty, proofTargetsCopy, uint64Cmp)
 	if len(expectedEmpty) > 0 {
 		err := fmt.Errorf("Missing positions %v from the proof. Deletions %v, proof.Targets %v",
-			expectedEmpty, removes, proof.Targets)
+			expectedEmpty, wants, proof.Targets)
 		return nil, Proof{}, err
 	}
 
-	// Create a copy of the proof that we'll mutate and return.
-	retProof := Proof{
-		make([]uint64, len(proof.Targets)),
-		make([]Hash, len(proof.Proof)),
+	// Match up the targets with their respective hashes.
+	targetHashesWithPos := toHashAndPos(proofTargetsCopy, hashes)
+
+	// calculateHashes provides us with all the intermediate calculated nodes in the tree.
+	// Need to sort the returned positions and hashes as they aren't sorted.
+	posAndHashes, _ := calculateHashes(numLeaves, hashes, proof)
+	sort.Sort(posAndHashes)
+
+	// Put positions onto the proof hashes.
+	positions, _ := proofPositions(proofTargetsCopy, numLeaves, treeRows(numLeaves))
+	proofPos := toHashAndPos(positions, proof.Proof)
+
+	// Merge the proof positions and its hashes along with the calculated intermediate nodes
+	// so we have one big slice to extract the proof for the want slice.
+	posAndHashes = mergeSortedHashAndPos(posAndHashes, proofPos)
+
+	// Copy to avoid mutating the wants.
+	sortedWants := copySortedFunc(wants, uint64Less)
+	targetHashesWithPos = getHashAndPosSubset(targetHashesWithPos, sortedWants)
+
+	// Grab the positions that we need to prove the wants.
+	wantProofPos, _ := proofPositions(targetHashesWithPos.positions, numLeaves, treeRows(numLeaves))
+
+	// Extract the proof positions we want and then sanity check to see that we have everything.
+	posAndHashes = getHashAndPosSubset(posAndHashes, wantProofPos)
+	if posAndHashes.Len() != len(wantProofPos) {
+		return nil, Proof{},
+			fmt.Errorf("Expected %d proofs but got %d", len(wantProofPos), posAndHashes.Len())
 	}
-	copy(retProof.Targets, proof.Targets)
-	copy(retProof.Proof, proof.Proof)
 
-	// These are all the targets that we'll remove so that the returned proof will only
-	// prove the removes passed in.
-	sort.Slice(removes, func(a, b int) bool { return removes[a] < removes[b] })
-	proofTargetsCopy = subtractSortedSlice(proofTargetsCopy, removes, uint64Cmp)
+	// Lastly, we make separate slice of hashes as we guarantee that the hashes
+	// and targets will be in the same permutation as the passed in wants by the caller.
+	retHashes := make([]Hash, len(wants))
+	for i, want := range wants {
+		idx := slices.Index(targetHashesWithPos.positions, want)
+		retHashes[i] = targetHashesWithPos.hashes[idx]
+	}
 
-	// Remove the targets and return the results.
-	retHashes, retProof := RemoveTargets(numLeaves, hashes, retProof, proofTargetsCopy)
-	return retHashes, retProof, nil
+	return retHashes, Proof{wants, posAndHashes.hashes}, nil
 }
 
 // maybeRemap remaps the passed in hash and pos if the treeRows increase after
