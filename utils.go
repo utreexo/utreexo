@@ -344,20 +344,6 @@ func treeRows(n uint64) uint8 {
 	return uint8(bits.Len64(n - 1))
 }
 
-// logicalTreeRows returns the number of
-//
-// Example: The below tree will return 1 as the logical number of rows is 1 for this
-// forest.
-//
-// row 2:
-//        |-------\
-// row 1: 04
-//        |---\   |---\
-// row 0: 00  01  02
-func logicalTreeRows(n uint64) uint8 {
-	return uint8(bits.Len64(n) - 1)
-}
-
 // numRoots returns the number of roots that exist with the given number of leaves.
 func numRoots(numLeaves uint64) uint8 {
 	return uint8(bits.OnesCount64(numLeaves))
@@ -407,18 +393,6 @@ func maxPositionAtRow(row, forestRows uint8, numLeaves uint64) (uint64, error) {
 	return max, nil
 }
 
-// rowLength returns how many elements exist within a given row.
-// Example: below forest has 1 element at row 1 and 3 elements at row 0.
-//
-// row 2:
-//        |-------\
-// row 1: 04
-//        |---\   |---\
-// row 0: 00  01  02
-func rowLength(row, forestRows uint8) uint8 {
-	return uint8(1 << (forestRows - row))
-}
-
 // deTwin goes through the list of sorted deletions and finds the parent deletions.
 // NOTE The caller MUST sort the dels before passing it into the function.
 //
@@ -461,44 +435,6 @@ func insertInOrder(dels []uint64, el uint64) []uint64 {
 	dels[index] = el
 
 	return dels
-}
-
-// extractRow extracts and returns the targets at the requested row.
-func extractRow(targets []uint64, forestRows, rowToExtract uint8) []uint64 {
-	if len(targets) < 0 {
-		return []uint64{}
-	}
-
-	start := -1
-	end := 0
-
-	for i := 0; i < len(targets); i++ {
-		if detectRow(targets[i], forestRows) == rowToExtract {
-			if start == -1 {
-				start = i
-			}
-
-			end = i
-		} else {
-			// If we're not at the desired row and start has already been set
-			// once, that means we've extracted everything we can. This is
-			// possible because the assumption is that the targets are sorted.
-			if start != -1 {
-				break
-			}
-		}
-	}
-
-	if start == -1 {
-		return []uint64{}
-	}
-
-	count := (end + 1) - start
-	row := make([]uint64, count)
-
-	copy(row, targets[start:end+1])
-
-	return row
 }
 
 // proofPositions returns all the positions that are needed to prove targets passed in.
