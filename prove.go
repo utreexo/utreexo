@@ -769,47 +769,6 @@ func GetMissingPositions(numLeaves uint64, proofTargets, desiredTargets []uint64
 	return desiredPositions
 }
 
-// hashSiblings hashes the parent hash of the given hnp and sibHash and then tries to find all
-// the siblings of the resulting parent
-func hashSiblings(proofHashes hashAndPos, pos uint64, currentHash, sibHash Hash, forestRows uint8) hashAndPos {
-	// Calculate the parent hash and the position.
-	var hash Hash
-	if isLeftNiece(pos) {
-		hash = parentHash(currentHash, sibHash)
-	} else {
-		hash = parentHash(sibHash, currentHash)
-	}
-	pos = parent(pos, forestRows)
-	proofHashes.Append(pos, hash)
-
-	// Go through the proofHashes and look for siblings of the newly hashed parent.
-	// If we find the sibling, we'll hash with the sibling to get the parent until we
-	// no longer find siblings.
-	idx := slices.IndexFunc(proofHashes.positions, func(elem uint64) bool { return elem == sibling(pos) })
-	for idx != -1 {
-		// Calculate the parent hash and the position.
-		if isLeftNiece(pos) {
-			hash = parentHash(hash, proofHashes.hashes[idx])
-		} else {
-			hash = parentHash(proofHashes.hashes[idx], hash)
-		}
-		pos = parent(pos, forestRows)
-
-		// Pop off the last appended proofHash and the sibling since
-		// we hashed up.
-		proofHashes.Delete(proofHashes.Len() - 1)
-		proofHashes.Delete(idx)
-
-		// Append the newly created parent.
-		proofHashes.Append(pos, hash)
-
-		// Look for the sibling of the newly created parent.
-		idx = slices.IndexFunc(proofHashes.positions, func(elem uint64) bool { return elem == sibling(pos) })
-	}
-
-	return proofHashes
-}
-
 // AddProof adds the newProof onto the existing proof and return the new cachedDelHashes and proof. Newly calculateable
 // positions and duplicates are excluded in the returned proof.
 func AddProof(proofA, proofB Proof, targetHashesA, targetHashesB []Hash, numLeaves uint64) ([]Hash, Proof) {
