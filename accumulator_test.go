@@ -1251,3 +1251,89 @@ func compareNodeMap(mapA, mapB map[miniHash]*polNode) error {
 
 	return fmt.Errorf(str)
 }
+
+func FuzzRememberNodes(f *testing.F) {
+	var tests = []struct {
+		numAdds  uint32
+		duration uint32
+		seed     int64
+	}{
+		{3, 0x07, 0x07},
+	}
+
+	for _, test := range tests {
+		f.Add(test.numAdds, test.duration, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		// Simulate blocks with simchain
+		sc := newSimChainWithSeed(duration, seed)
+
+		p := NewAccumulator(true)
+		var totalAdds, totalDels int
+		for b := 0; b <= 100; b++ {
+			adds, _, delHashes := sc.NextBlock(numAdds)
+			totalAdds += len(adds)
+			totalDels += len(delHashes)
+
+			proof, err := p.Prove(delHashes)
+			if err != nil {
+				t.Fatalf("FuzzRememberNodes fail at block %d. Error: %v", b, err)
+			}
+
+			err = p.Verify(delHashes, proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for _, target := range proof.Targets {
+				n, _, _, err := p.getNode(target)
+				if err != nil {
+					t.Fatalf("FuzzRememberNodes fail at block %d. Error: %v", b, err)
+				}
+				if n == nil {
+					t.Fatalf("FuzzRememberNodes fail to read %d at block %d.", target, b)
+					continue
+				}
+
+				// Check if the sibling and aunt need to be remembered
+				sibling, err := n.getSibling()
+				if sibling != nil && sibling.remember && sibling.aunt != nil && sibling.aunt.remember {
+					// The required nodes are correctly stored
+					t.Logf("Required nodes are correctly stored for node %s", n.String())
+				} else {
+					t.Errorf("Failed to store required nodes for node %s", n.String())
+				}
+			}
+
+			err = p.Modify(adds, delHashes, proof.Targets)
+			if err != nil {
+				t.Fatalf("FuzzRememberNodes fail at block %d. Error: %v", b, err)
+			}
+
+			if b%10 == 0 {
+				err = p.checkHashes()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			err = p.posMapSanity()
+			if err != nil {
+				t.Fatalf("FuzzRememberNodes fail at block %d. Error: %v",
+					b, err)
+			}
+			if uint64(len(p.NodeMap)) != p.NumLeaves-p.NumDels {
+				err := fmt.Errorf("FuzzRememberNodes fail at block %d: "+
+					"have %d leaves in map but only %d leaves in total",
+					b, len(p.NodeMap), p.NumLeaves-p.NumDels)
+				t.Fatal(err)
+			}
+
+			err = p.positionSanity()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+}
