@@ -56,6 +56,10 @@ func (p *Pollard) GetNumLeaves() uint64 {
 	return p.NumLeaves
 }
 
+func (p *Pollard) GetTreeRows() uint8 {
+	return treeRows(p.NumLeaves)
+}
+
 // Modify takes in the additions and deletions and updates the accumulator accordingly.
 //
 // NOTE Modify does NOT do any validation and assumes that all the positions of the leaves
@@ -380,7 +384,7 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []
 
 // undoSingleAdd undoes one leaf that was added to the accumulator.
 func (p *Pollard) undoSingleAdd() {
-	lowestRootRow := getLowestRoot(p.NumLeaves)
+	lowestRootRow := getLowestRoot(p.NumLeaves, treeRows(p.NumLeaves))
 	for row := int(lowestRootRow); row >= 0; row-- {
 		lowestRoot := p.Roots[len(p.Roots)-1]
 		p.Roots = p.Roots[:len(p.Roots)-1]

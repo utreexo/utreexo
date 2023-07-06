@@ -90,3 +90,22 @@ func TestDeTwinRand(t *testing.T) {
 		}
 	}
 }
+
+//func TestIsRootPosition(t *testing.T) {
+//	var tests = []struct {
+//		position  uint64
+//		numLeaves uint64
+//		totalRows uint8
+//		expect    bool
+//	}{
+//		{position: 2, numLeaves: 2, totalRows: 1}, //fmt.Println(isRootPosition(2, 2, 1)),
+//	}
+//
+//	for _, test := range tests {
+//		got := isRootPosition(test.position, test.numLeaves, test.totalRows)
+//		if test.expect != got {
+//			t.Fatalf("Expected %v but got %v for position:%d, numleaves:%d, totalrows:%d",
+//				test.expect, got, test.position, test.numLeaves, test.totalRows)
+//		}
+//	}
+//}

@@ -33,6 +33,28 @@ func rightChild(position uint64, forestRows uint8) uint64 {
 	return ((position << 1) & mask) | 1
 }
 
+// childMany returns the child that's multiple rows lower. The returned child is always of the left child.
+// In the tree below, position=14, drop=3, forestRows=3 will return 00.
+// Arg of: position=14, drop=2, forestRows=3 will return 08.
+//
+// 14
+// |---------------\
+// 12              13
+// |-------\       |-------\
+// 08      09      10      11
+// |---\   |---\   |---\   |---\
+// 00  01  02  03  04  05  06  07
+func childMany(position uint64, drop, forestRows uint8) (uint64, error) {
+	if drop == 0 {
+		return position, nil
+	}
+	if drop > forestRows {
+		return 0, fmt.Errorf("drop of %d is greater than forestRows of %d", drop, forestRows)
+	}
+	mask := uint64(2<<forestRows) - 1
+	return (position << drop) & mask, nil
+}
+
 // sibling returns the sibling of this node.
 func sibling(pos uint64) uint64 {
 	return pos ^ 1
@@ -98,6 +120,11 @@ func isRootPositionOnRow(position, numLeaves uint64, row, forestRows uint8) bool
 	rootPos := rootPosition(numLeaves, row, forestRows)
 
 	return rootPresent && rootPos == position
+}
+
+// rootExistsOnRow returns whether or not a root exists on the row with the given num leaves.
+func rootExistsOnRow(numLeaves uint64, h uint8) bool {
+	return (numLeaves>>h)&1 == 1
 }
 
 // isAncestor returns true if the higherPos is an ancestor of the lowerPos.
@@ -252,9 +279,7 @@ func detectRow(position uint64, forestRows uint8) uint8 {
 
 // getLowestRoot returns the row of the lowest root given the number of leaves
 // and the forestRows.
-func getLowestRoot(numLeaves uint64) uint8 {
-	forestRows := treeRows(numLeaves)
-
+func getLowestRoot(numLeaves uint64, forestRows uint8) uint8 {
 	row := uint8(0)
 	for ; row <= forestRows; row++ {
 		rootPresent := numLeaves&(1<<row) != 0
@@ -392,6 +417,27 @@ func maxPositionAtRow(row, forestRows uint8, numLeaves uint64) (uint64, error) {
 	return max, nil
 }
 
+// translatePos returns what the given position would be in the to total rows.
+func translatePos(pos uint64, fromTotalRow, toTotalRow uint8) uint64 {
+	row := detectRow(pos, fromTotalRow)
+	if row == 0 {
+		return pos
+	}
+	offset := pos - startPositionAtRow(row, fromTotalRow)
+	return offset + startPositionAtRow(row, toTotalRow)
+}
+
+// translatePositions allocates and returns what the given slice off position would be in
+// the to total rows.
+func translatePositions(positions []uint64, fromTotalRow, toTotalRow uint8) []uint64 {
+	targets := make([]uint64, len(positions))
+	for i := range positions {
+		targets[i] = translatePos(positions[i], fromTotalRow, toTotalRow)
+	}
+
+	return targets
+}
+
 // deTwin goes through the list of sorted deletions and finds the parent deletions.
 // NOTE The caller MUST sort the dels before passing it into the function.
 //
@@ -436,15 +482,47 @@ func insertInOrder(dels []uint64, el uint64) []uint64 {
 	return dels
 }
 
+// inForest states whether or not a position can exist within the given num leaves and rows.
+func inForest(pos, numLeaves uint64, forestRows uint8) bool {
+	if pos < numLeaves {
+		return true
+	}
+	marker := uint64(1 << forestRows)
+	mask := (marker << 1) - 1
+	if pos >= mask {
+		return false
+	}
+	for pos&marker != 0 {
+		pos = ((pos << 1) & mask) | 1
+	}
+	return pos < numLeaves
+}
+
+// proofPosition is a simpler and less memory allocating version of proofPositions.
+// It only works for a singular target and returns only the positions that are needed to
+// prove the given position.
+func proofPosition(target uint64, numLeaves uint64, totalRows uint8) []uint64 {
+	proofs := make([]uint64, 0, totalRows*2)
+
+	pos := target
+	for h := detectRow(target, totalRows); h <= totalRows; h++ {
+		if isRootPosition(pos, numLeaves, totalRows) {
+			break
+		}
+		proofs = append(proofs, sibling(pos))
+		pos = parent(pos, totalRows)
+	}
+
+	return proofs
+}
+
 // proofPositions returns all the positions that are needed to prove targets passed in.
 // NOTE: the passed in targets MUST be sorted.
 func proofPositions(targets []uint64, numLeaves uint64, totalRows uint8) ([]uint64, []uint64) {
-	nextTargets := make([]uint64, 0, len(targets))
-	nextTargetsIdx := 0
+	nextTargets := make([]uint64, 0, len(targets)*int(totalRows)*2)
+	proofPositions := make([]uint64, 0, len(targets)*int(totalRows)*2)
 
-	proofPositions := make([]uint64, 0, len(targets))
-
-	targetsIdx := 0
+	targetsIdx, nextTargetsIdx := 0, 0
 	for row := uint8(0); row <= totalRows; {
 		target, idx, sibIdx := getNextPos(targets, nextTargets, targetsIdx, nextTargetsIdx)
 		if idx == -1 {
@@ -492,12 +570,13 @@ func proofPositions(targets []uint64, numLeaves uint64, totalRows uint8) ([]uint
 type ToString interface {
 	GetRoots() []Hash
 	GetNumLeaves() uint64
+	GetTreeRows() uint8
 	GetHash(uint64) Hash
 }
 
 // String prints out the whole thing. Only viable for forest that have height of 5 and less.
 func String(ts ToString) string {
-	fh := treeRows(ts.GetNumLeaves())
+	fh := ts.GetTreeRows()
 
 	// The accumulator should be less than 6 rows.
 	if fh > 6 {
