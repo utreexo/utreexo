@@ -13,6 +13,10 @@ type UtreexoTest interface {
 	// the implementation doesn't have a node map.
 	nodeMapToString() string
 
+	// cachedMapToString returns the node map as a string. empty string or "n/a" if
+	// the implementation doesn't have a cached map.
+	cachedMapToString() string
+
 	// rootToString returns the roots as a string.
 	rootToString() string
 }
