@@ -144,6 +144,21 @@ func (p *Pollard) calculateNewRoot(node *polNode) *polNode {
 		// Roots point to their children. Those children become nieces here.
 		swapNieces(root, node)
 
+		// Check if the current node should be remembered
+		sibling, err := node.getSibling()
+		if err != nil {
+			panic("Error detected in getting the sibling of a node")
+		}
+		if node.remember {
+			// If the sibling needs to be remembered, store this node
+			sibling.remember = true
+		} else if sibling != nil && sibling.remember {
+			node.remember = true
+		}
+
+		// Recursively remember all aunt nodes
+		p.rememberAunt(node)
+
 		// Calculate the hash of the new root.
 		nHash := parentHash(root.data, node.data)
 
@@ -159,6 +174,37 @@ func (p *Pollard) calculateNewRoot(node *polNode) *polNode {
 	}
 
 	return node
+}
+
+// rememberAunt recursively sets the remember field of all aunt nodes to true.
+func (p *Pollard) rememberAunt(node *polNode) {
+	aunt := node.aunt
+	if aunt != nil {
+		aunt.remember = true
+		p.checkAuntNodes(aunt)
+	}
+}
+
+// checkAuntNodes recursively checks for aunt nodes to remember.
+func (p *Pollard) checkAuntNodes(node *polNode) {
+	aunt := node.aunt
+	if aunt != nil && aunt.remember {
+		// Check if the aunt's sibling needs to be remembered
+		auntSibling, err := aunt.getSibling()
+		if err != nil {
+			panic("Error detected in getting the sibling of a node")
+		}
+		if auntSibling != nil && auntSibling.remember {
+			// Check if the aunt's nieces need to be remembered
+			if aunt.lNiece != nil && aunt.lNiece.remember && aunt.rNiece != nil && aunt.rNiece.remember {
+				// Store the aunt node
+				aunt.remember = true
+			}
+		}
+	}
+
+	// Recursively check for aunt nodes until there are no aunt nodes
+	p.checkAuntNodes(aunt)
 }
 
 // remove removes all the positions that are passed in.
