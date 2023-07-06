@@ -39,9 +39,6 @@ type Pollard struct {
 	// Only Pollards that have the Full value set to true will be able to prove all
 	// the elements.
 	Full bool
-
-	// RequiredNodes is a list of nodes that are required to prove the accumulator.
-	RequiredNodes []*polNode
 }
 
 // NewAccumulator returns a initialized accumulator. To enable the generating proofs
@@ -148,16 +145,19 @@ func (p *Pollard) calculateNewRoot(node *polNode) *polNode {
 		swapNieces(root, node)
 
 		// Check if the current node should be remembered
+		sibling, err := node.getSibling()
+		if err != nil {
+			panic("Error detected in getting the sibling of a node")
+		}
 		if node.remember {
 			// If the sibling needs to be remembered, store this node
-			sibling, err := node.getSibling()
-			if err == nil && sibling != nil && sibling.remember {
-				p.RequiredNodes = append(p.RequiredNodes, node)
-			}
-
-			// Recursively check for aunt nodes
-			p.checkAuntNodes(node)
+			sibling.remember = true
+		} else if sibling != nil && sibling.remember {
+			node.remember = true
 		}
+
+		// Recursively remember all aunt nodes
+		p.rememberAunt(node)
 
 		// Calculate the hash of the new root.
 		nHash := parentHash(root.data, node.data)
@@ -173,35 +173,38 @@ func (p *Pollard) calculateNewRoot(node *polNode) *polNode {
 		node = newRoot
 	}
 
-	// // Print the required nodes
-	// for _, requiredNode := range p.RequiredNodes {
-	// 	fmt.Println(requiredNode)
-	// }
-
 	return node
+}
+
+// rememberAunt recursively sets the remember field of all aunt nodes to true.
+func (p *Pollard) rememberAunt(node *polNode) {
+	aunt := node.aunt
+	if aunt != nil {
+		aunt.remember = true
+		p.checkAuntNodes(aunt)
+	}
 }
 
 // checkAuntNodes recursively checks for aunt nodes to remember.
 func (p *Pollard) checkAuntNodes(node *polNode) {
-	parent, err := node.getParent()
-	if err == nil && parent != nil {
-		// Check if the aunt needs to be remembered
-		aunt, err := parent.getSibling()
-		if err == nil && aunt != nil && aunt.remember {
-			// Check if the aunt's sibling needs to be remembered
-			auntSibling, err := aunt.getSibling()
-			if err == nil && auntSibling != nil && auntSibling.remember {
-				// Check if the aunt's nieces need to be remembered
-				if aunt.lNiece != nil && aunt.lNiece.remember && aunt.rNiece != nil && aunt.rNiece.remember {
-					// Store the aunt node
-					p.RequiredNodes = append(p.RequiredNodes, aunt)
-				}
+	aunt := node.aunt
+	if aunt != nil && aunt.remember {
+		// Check if the aunt's sibling needs to be remembered
+		auntSibling, err := aunt.getSibling()
+		if err != nil {
+			panic("Error detected in getting the sibling of a node")
+		}
+		if auntSibling != nil && auntSibling.remember {
+			// Check if the aunt's nieces need to be remembered
+			if aunt.lNiece != nil && aunt.lNiece.remember && aunt.rNiece != nil && aunt.rNiece.remember {
+				// Store the aunt node
+				aunt.remember = true
 			}
 		}
-
-		// Recursively check for aunt nodes until there are no aunt nodes
-		p.checkAuntNodes(parent)
 	}
+
+	// Recursively check for aunt nodes until there are no aunt nodes
+	p.checkAuntNodes(aunt)
 }
 
 // remove removes all the positions that are passed in.

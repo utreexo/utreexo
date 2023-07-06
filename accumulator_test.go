@@ -1337,3 +1337,38 @@ func FuzzRememberNodes(f *testing.F) {
 		}
 	})
 }
+
+// func TestVerifyNode(t *testing.T) {
+// 	// Create a new Pollard accumulator
+// 	p := NewAccumulator(true)
+
+// 	// Add some leaves to the accumulator
+// 	leaves := []Leaf{
+// 		{hash([]byte("leaf1")), true},
+// 		{hash([]byte("leaf2")), false},
+// 		{hash([]byte("leaf3")), true},
+// 		{hash([]byte("leaf4")), false},
+// 	}
+// 	p.add(leaves)
+
+// 	// Calculate the new root of the accumulator
+// 	newRoot := p.calculateNewRoot(p.NodeMap["3"])
+
+// 	// Verify the third leaf
+// 	proof, err := p.Verify([]Hash{hash([]byte("leaf3"))}, newRoot)
+// 	if err != nil {
+// 		t.Errorf("Error verifying leaf: %v", err)
+// 	}
+
+// 	// Check if all the required nodes are remembered
+// 	if !p.NodeMap["3"].remember || !p.NodeMap["6"].remember || !p.NodeMap["7"].remember || !p.NodeMap["13"].remember {
+// 		t.Errorf("Not all required nodes are remembered")
+// 	}
+
+// 	// Check if all the nodes in the proof are remembered
+// 	for _, node := range proof {
+// 		if !node.remember {
+// 			t.Errorf("Node %v is not remembered", node)
+// 		}
+// 	}
+// }
