@@ -247,12 +247,13 @@ func (n *polNode) deadEnd() bool {
 // prune forgets the nieces of the passed in nodes if they are not
 // marked to be remebered.
 func (n *polNode) prune() {
-	remember := n.lNiece.remember || n.rNiece.remember
-	if n.lNiece.deadEnd() && !remember {
+	remember := (n.lNiece != nil && n.lNiece.remember) ||
+		(n.rNiece != nil && n.rNiece.remember)
+	if n.lNiece != nil && n.lNiece.deadEnd() && !remember {
 		delNode(n.lNiece)
 		n.lNiece = nil
 	}
-	if n.rNiece.deadEnd() && !remember {
+	if n.rNiece != nil && n.rNiece.deadEnd() && !remember {
 		delNode(n.rNiece)
 		n.rNiece = nil
 	}

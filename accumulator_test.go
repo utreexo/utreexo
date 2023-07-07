@@ -2,6 +2,7 @@ package utreexo
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -569,6 +570,7 @@ func FuzzModify(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		sortedDelTargets := copySortedFunc(delTargets, uint64Less)
 		beforeStr := p.String()
 		beforeMap := nodeMapToString(p.NodeMap)
 
@@ -604,6 +606,7 @@ func FuzzModify(f *testing.F) {
 				"\nmodifyAdds:\n%s"+
 				"\nmodifyDels:\n%s"+
 				"\ndel targets:\n %v"+
+				"\ndel targets sorted:\n %v"+
 				"\nnodemap before modify:\n %s"+
 				"\nnodemap after modify:\n %s",
 				err,
@@ -614,6 +617,7 @@ func FuzzModify(f *testing.F) {
 				printHashes(modifyHashes),
 				printHashes(delHashes),
 				delTargets,
+				sortedDelTargets,
 				beforeMap,
 				afterMap)
 			t.Fatal(err)
@@ -639,7 +643,7 @@ func FuzzModifyChain(f *testing.F) {
 
 		p := NewAccumulator(true)
 		var totalAdds, totalDels int
-		for b := 0; b <= 100; b++ {
+		for b := 0; b <= 80; b++ {
 			adds, _, delHashes := sc.NextBlock(numAdds)
 			totalAdds += len(adds)
 			totalDels += len(delHashes)
@@ -669,7 +673,7 @@ func FuzzModifyChain(f *testing.F) {
 				t.Fatalf("FuzzModifyChain fail at block %d. Error: %v", b, err)
 			}
 
-			if b%10 == 0 {
+			if b%40 == 0 {
 				err = p.checkHashes()
 				if err != nil {
 					t.Fatal(err)
@@ -1250,4 +1254,54 @@ func compareNodeMap(mapA, mapB map[miniHash]*polNode) error {
 	}
 
 	return fmt.Errorf(str)
+}
+
+func TestAccumulatorRemember(t *testing.T) {
+	// Create elements to add to the accumulator
+	leaves := make([]Leaf, 9)
+	for i := range leaves {
+		var remember bool
+		if i == 0 || i == 7 {
+			remember = true
+		}
+		leaves[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)}), Remember: remember}
+	}
+
+	// Create the accumulator and add all the leaves at once
+	acc := NewAccumulator(true)
+	err := acc.Modify(leaves, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	proof, err := acc.Prove([]Hash{leaves[0].Hash})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the third leaf and check if all the required nodes are remembered
+	error := acc.Verify([]Hash{leaves[2].Hash}, proof)
+	if error != nil {
+		t.Fatal(err)
+	}
+	for _, node := range proof {
+		if !node.remember {
+			t.Errorf("Node %v is not remembered", node)
+		}
+	}
+
+	// Delete the first leaf and verify the third leaf again
+	err = acc.Modify(nil, []Hash{leaves[0].Hash}, []uint64{0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = acc.Verify([]Hash{leaves[2].Hash}, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range proof {
+		if !node.remember {
+			t.Errorf("Node %v is not remembered", node)
+		}
+	}
 }

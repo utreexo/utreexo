@@ -218,81 +218,109 @@ func (p *Pollard) deleteRoot(del uint64) error {
 
 // deleteSingle deletes one leaf from the accumulator and re-hashes the root.
 func (p *Pollard) deleteSingle(del uint64) error {
-	// Fetch all the needed nodes.
-	from := sibling(del)
-	fromNode, fromNodeSib, _, err := p.getNode(from)
+	moveUpNode, dNode, parentNode, err := p.getNode(sibling(del))
 	if err != nil {
 		return err
 	}
-	toNode, err := fromNodeSib.getParent()
-	if err != nil {
-		return err
-	}
-	toSib := fromNodeSib.aunt
+	aunt := moveUpNode.aunt
 
-	// If the position I'm moving to has an aunt, I'm not becoming a root.
-	if toNode.aunt != nil {
-		// Move myself up.
-		transferAunt(fromNode, toNode)
-		transferNiece(fromNode, toNode)
-
-		// Move my children up.
-		transferNiece(toSib, fromNodeSib)
-
-		updateAunt(toNode.aunt)
-	} else {
-		// My data is given to the root.
-		*toNode = *fromNode
-
-		// Get my children from my sibling as I'm a root now.
-		transferNiece(toNode, fromNodeSib)
-
-		// Update all the nieces to point at me.
-		updateAunt(toNode)
-
-		// Delete my former self.
-		delNode(fromNode)
-
-		// If the node was a leaf, update the map to point to the root.
-		_, found := p.NodeMap[toNode.data.mini()]
-		if found {
-			p.NodeMap[toNode.data.mini()] = toNode
+	// If the aunt is also a parent, the sibling will become a root.
+	if aunt == parentNode {
+		// Find the root and have it point to the sibling that's
+		// moving up.
+		for i := range p.Roots {
+			if p.Roots[i] == aunt {
+				p.Roots[i] = moveUpNode
+			}
 		}
-	}
 
-	// Delete the node from the map.
-	delete(p.NodeMap, fromNodeSib.data.mini())
-	delNode(fromNodeSib)
+		// If the sibling exists, it's pointing to the children.
+		// The sibling moving up should now point to its children.
+		if dNode != nil {
+			transferNiece(moveUpNode, dNode)
+		} else {
+			moveUpNode.lNiece = nil
+			moveUpNode.rNiece = nil
+		}
 
-	// If to position is a root, there's no parent hash to be calculated so
-	// return early.
-	totalRows := treeRows(p.NumLeaves)
-	to := parent(del, totalRows)
-	if isRootPosition(to, p.NumLeaves, totalRows) {
-		toNode.aunt = nil
+		// A root has no aunt so mark it as nil.
+		moveUpNode.aunt = nil
+
+		// Delete the node from the map.
+		delete(p.NodeMap, dNode.data.mini())
+		delNode(dNode)
 		return nil
 	}
-	parentNode, err := toNode.getParent()
+
+	if parentNode != nil {
+		transferNiece(moveUpNode, parentNode)
+		transferAunt(moveUpNode, parentNode)
+	} else {
+		to := parent(del, treeRows(p.NumLeaves))
+		if isLeftNiece(to) {
+			aunt.aunt.lNiece = moveUpNode
+		} else {
+			aunt.aunt.rNiece = moveUpNode
+		}
+
+		updateAunt(aunt.aunt)
+	}
+	aunt.lNiece = nil
+	aunt.rNiece = nil
+
+	if dNode != nil {
+		transferNiece(aunt, dNode)
+	} else {
+		moveUpNode.lNiece = nil
+		moveUpNode.rNiece = nil
+	}
+
+	err = p.calculateHashes(moveUpNode, aunt.data)
 	if err != nil {
 		return err
 	}
 
-	// Set aunt.
-	toNode.aunt, err = parentNode.getSibling()
+	delNode(dNode)
+
+	aunt = moveUpNode.aunt
+	for aunt != nil {
+		aunt.prune()
+		aunt = aunt.aunt
+	}
+
+	return nil
+}
+
+// calculateHashes hashes up to the root, updating the values of parent nodes only if
+// they are cached.
+func (p *Pollard) calculateHashes(node *polNode, sibHash Hash) error {
+	var pHash Hash
+	if node.aunt.lNiece == node {
+		pHash = parentHash(node.data, sibHash)
+	} else if node.aunt.rNiece == node {
+		pHash = parentHash(sibHash, node.data)
+	} else {
+		return fmt.Errorf("Node with hash %s has an incorrect aunt pointer "+
+			"or the aunt with hash %s has incorrect pointer to its nieces",
+			hex.EncodeToString(node.data[:]), hex.EncodeToString(node.aunt.data[:]))
+	}
+
+	sib, err := node.aunt.getSibling()
 	if err != nil {
 		return err
 	}
 
-	// If there's no sibling, it means that toNode is a children of
-	// the root. Make it point to the parent.
-	if toNode.aunt == nil {
-		toNode.aunt = parentNode
+	if sib != nil {
+		sib.data = pHash
 	}
 
-	// Hash this node and all the parents/ancestors of this node.
-	err = hashToRoot(parentNode)
-	if err != nil {
-		return err
+	if node.aunt.aunt != nil {
+		err = p.calculateHashes(node.aunt, pHash)
+		if err != nil {
+			return err
+		}
+	} else {
+		node.aunt.data = pHash
 	}
 
 	return nil
