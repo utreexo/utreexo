@@ -2,6 +2,7 @@ package utreexo
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -1253,4 +1254,54 @@ func compareNodeMap(mapA, mapB map[miniHash]*polNode) error {
 	}
 
 	return fmt.Errorf(str)
+}
+
+func TestAccumulatorRemember(t *testing.T) {
+	// Create elements to add to the accumulator
+	leaves := make([]Leaf, 9)
+	for i := range leaves {
+		var remember bool
+		if i == 0 || i == 7 {
+			remember = true
+		}
+		leaves[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)}), Remember: remember}
+	}
+
+	// Create the accumulator and add all the leaves at once
+	acc := NewAccumulator(true)
+	err := acc.Modify(leaves, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	proof, err := acc.Prove([]Hash{leaves[0].Hash})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the third leaf and check if all the required nodes are remembered
+	error := acc.Verify([]Hash{leaves[2].Hash}, proof)
+	if error != nil {
+		t.Fatal(err)
+	}
+	for _, node := range proof {
+		if !node.remember {
+			t.Errorf("Node %v is not remembered", node)
+		}
+	}
+
+	// Delete the first leaf and verify the third leaf again
+	err = acc.Modify(nil, []Hash{leaves[0].Hash}, []uint64{0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = acc.Verify([]Hash{leaves[2].Hash}, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range proof {
+		if !node.remember {
+			t.Errorf("Node %v is not remembered", node)
+		}
+	}
 }
