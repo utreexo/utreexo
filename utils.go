@@ -732,6 +732,21 @@ func SubTreeToString(ts ToString, position uint64, inHex bool) string {
 	return s
 }
 
+// printLeaves returns the leaves encoded to string.
+func printLeaves(leaves []Leaf) string {
+	str := ""
+	for i, leaf := range leaves {
+		str += " " + fmt.Sprintf("%s:%v",
+			hex.EncodeToString(leaf.Hash[:]), leaf.Remember)
+
+		if i != len(leaves)-1 {
+			str += "\n"
+		}
+	}
+
+	return str
+}
+
 // printHashes returns the hashes encoded to string.
 func printHashes(hashes []Hash) string {
 	str := ""
