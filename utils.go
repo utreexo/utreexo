@@ -100,6 +100,11 @@ func isRootPositionOnRow(position, numLeaves uint64, row, forestRows uint8) bool
 	return rootPresent && rootPos == position
 }
 
+// rootExistsOnRow returns whether or not a root exists on the row with the given num leaves.
+func rootExistsOnRow(numLeaves uint64, h uint8) bool {
+	return (numLeaves>>h)&1 == 1
+}
+
 // isAncestor returns true if the higherPos is an ancestor of the lowerPos.
 //
 // 14
