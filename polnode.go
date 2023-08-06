@@ -157,6 +157,12 @@ func (p *Pollard) getNode(pos uint64) (n, sibling, parent *polNode, err error) {
 	return
 }
 
+// GetHash returns the hash for the given position. Empty hash (all values are 0) is returned
+// if the given position does not exist.
+func (p *Pollard) GetHash(pos uint64) Hash {
+	return p.getHash(pos)
+}
+
 // getHash is a wrapper around getNode. Returns an empty hash if the hash for
 // the given position couldn't be read.
 func (p *Pollard) getHash(pos uint64) Hash {

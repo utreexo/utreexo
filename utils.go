@@ -177,9 +177,9 @@ func addBit(val, place uint64, bit bool) uint64 {
 // 1 needs to go to when we delete 5.
 //
 // row 2: 110
-//        |---------\
+// -      |---------\
 // row 1: 100       101
-//        |----\    |----\
+// -      |----\    |----\
 // row 0: 000  001  010  011
 //
 // TODO? we could have a function that supports moving up multiple rows. Not sure
@@ -211,12 +211,11 @@ func calcNextPosition(position, delPos uint64, forestRows uint8) (uint64, error)
 // a bit of the del row. Since 5 on the right and is on row 1, we add a single 0 bit at
 // the 1st bit and get 001.
 //
-// row 2: 110
-//        |---------\
-// row 1: 100       101
-//        |----\    |----\
-// row 0: 000  001  010  011
-//
+// row 2 - 110
+// -       |---------\
+// row 1 - 100       101
+// -       |----\    |----\
+// row 0 - 000  001  010  011
 func calcPrevPosition(position, delPos uint64, forestRows uint8) uint64 {
 	delRow := detectRow(delPos, forestRows)
 	posRow := detectRow(position, forestRows)
@@ -332,9 +331,9 @@ func detectOffset(position uint64, numLeaves uint64) (uint8, uint8, uint64, erro
 // 4 leaves.
 //
 // row 2:
-//        |-------\
+// .      |-------\
 // row 1: 04
-//        |---\   |---\
+// .      |---\   |---\
 // row 0: 00  01  02
 func treeRows(n uint64) uint8 {
 	if n == 0 {
@@ -488,14 +487,22 @@ func proofPositions(targets []uint64, numLeaves uint64, totalRows uint8) ([]uint
 	return proofPositions, nextTargets
 }
 
+// ToString is an interface that different Utreexo implementations have to meet inorder for
+// it to use the string functionality.
+type ToString interface {
+	GetRoots() []Hash
+	GetNumLeaves() uint64
+	GetHash(uint64) Hash
+}
+
 // String prints out the whole thing. Only viable for forest that have height of 5 and less.
-func (p *Pollard) String() string {
-	fh := treeRows(p.NumLeaves)
+func String(ts ToString) string {
+	fh := treeRows(ts.GetNumLeaves())
 
 	// The accumulator should be less than 6 rows.
 	if fh > 6 {
-		s := fmt.Sprintf("Can't print %d leaves. roots:\n", p.NumLeaves)
-		roots := p.GetRoots()
+		s := fmt.Sprintf("Can't print %d leaves. roots:\n", ts.GetNumLeaves())
+		roots := ts.GetRoots()
 		for i, r := range roots {
 			s += fmt.Sprintf("\t%d %x\n", i, r.mini())
 		}
@@ -509,10 +516,10 @@ func (p *Pollard) String() string {
 
 		for j := uint8(0); j < rowlen; j++ {
 			var valstring string
-			max, err := maxPositionAtRow(h, fh, p.NumLeaves)
+			max, err := maxPositionAtRow(h, fh, ts.GetNumLeaves())
 			ok := max >= uint64(pos)
 			if ok && err == nil {
-				val := p.getHash(uint64(pos))
+				val := ts.GetHash(uint64(pos))
 				if val != empty {
 					valstring = fmt.Sprintf("%x", val[:2])
 
@@ -584,13 +591,13 @@ func getRootPosition(position uint64, numLeaves uint64, forestRows uint8) (uint6
 }
 
 // AllSubTreesToString returns a string of all the individual subtrees in the accumulator.
-func (p *Pollard) AllSubTreesToString() string {
+func AllSubTreesToString(ts ToString) string {
 	str := ""
-	totalRows := treeRows(p.NumLeaves)
+	totalRows := treeRows(ts.GetNumLeaves())
 	for h := uint8(0); h < totalRows; h++ {
-		rootPos := rootPosition(p.NumLeaves, h, totalRows)
-		if isRootPosition(rootPos, p.NumLeaves, totalRows) {
-			str += fmt.Sprintf(p.SubTreeToString(rootPos, false))
+		rootPos := rootPosition(ts.GetNumLeaves(), h, totalRows)
+		if isRootPosition(rootPos, ts.GetNumLeaves(), totalRows) {
+			str += fmt.Sprintf(SubTreeToString(ts, rootPos, false))
 			str += "\n"
 		}
 	}
@@ -599,16 +606,16 @@ func (p *Pollard) AllSubTreesToString() string {
 }
 
 // SubTreeToString returns a string of the subtree that the position is in.
-func (p *Pollard) SubTreeToString(position uint64, inHex bool) string {
-	rootPosition, err := getRootPosition(position, p.NumLeaves, treeRows(p.NumLeaves))
+func SubTreeToString(ts ToString, position uint64, inHex bool) string {
+	rootPosition, err := getRootPosition(position, ts.GetNumLeaves(), treeRows(ts.GetNumLeaves()))
 	if err != nil {
 		return fmt.Sprintf("SubTreeToString error: %v", err.Error())
 	}
-	subTreeRow := detectRow(rootPosition, treeRows(p.NumLeaves))
+	subTreeRow := detectRow(rootPosition, treeRows(ts.GetNumLeaves()))
 
 	if subTreeRow > 7 {
 		s := fmt.Sprintf("Can't print subtree with rows %d. roots:\n", subTreeRow)
-		roots := p.GetRoots()
+		roots := ts.GetRoots()
 		for i, root := range roots {
 			miniRoot := root.mini()
 			s += fmt.Sprintf("%d %s\n", i, hex.EncodeToString(miniRoot[:]))
@@ -627,7 +634,7 @@ func (p *Pollard) SubTreeToString(position uint64, inHex bool) string {
 
 		for _, position := range positionsToRead {
 			var readHashString string
-			readHash := p.getHash(position)
+			readHash := ts.GetHash(position)
 
 			if readHash != empty {
 				if inHex {
@@ -659,7 +666,7 @@ func (p *Pollard) SubTreeToString(position uint64, inHex bool) string {
 				}
 			}
 
-			leftChild := leftChild(position, treeRows(p.NumLeaves))
+			leftChild := leftChild(position, treeRows(ts.GetNumLeaves()))
 			rightChild := rightSib(leftChild)
 			nextPositions = append(nextPositions, leftChild)
 			nextPositions = append(nextPositions, rightChild)
