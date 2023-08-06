@@ -51,6 +51,11 @@ func NewAccumulator(full bool) Pollard {
 	return p
 }
 
+// GetNumLeaves returns the total number of leaves added to the accumulator.
+func (p *Pollard) GetNumLeaves() uint64 {
+	return p.NumLeaves
+}
+
 // Modify takes in the additions and deletions and updates the accumulator accordingly.
 //
 // NOTE Modify does NOT do any validation and assumes that all the positions of the leaves
@@ -515,6 +520,18 @@ func (p *Pollard) GetRoots() []Hash {
 	}
 
 	return roots
+}
+
+// String is a wrapper around utreexo.String(). Returns a string representation of the pollard
+// that's less than 6 rows tall.
+func (p *Pollard) String() string {
+	return String(p)
+}
+
+// AllSubTreesToString is a wrapper around utreexo.AllSubTreesToString(). Returns a string representation
+// of each of the subtrees in the pollard that's less than 6 rows tall.
+func (p *Pollard) AllSubTreesToString() string {
+	return AllSubTreesToString(p)
 }
 
 // GetTotalCount returns the count of all the polNodes in the pollard.
