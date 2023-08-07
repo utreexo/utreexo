@@ -10,6 +10,57 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+func TestChildMany(t *testing.T) {
+	t.Parallel()
+
+	var tests = []struct {
+		position  uint64
+		drop      uint8
+		totalRows uint8
+		expected  uint64
+		err       error
+	}{
+		// 06
+		// |-------\
+		// 04      05
+		// |---\   |---\
+		// 00  01  02  03
+		{position: 4, drop: 1, totalRows: 2, expected: 0, err: nil},
+		{position: 6, drop: 2, totalRows: 2, expected: 0, err: nil},
+		{position: 6, drop: 0, totalRows: 2, expected: 6, err: nil},
+		{position: 5, drop: 0, totalRows: 2, expected: 5, err: nil},
+		{position: 5, drop: 1, totalRows: 2, expected: 2, err: nil},
+		{position: 6, drop: 3, totalRows: 2, expected: 0, err: fmt.Errorf("drop of %d is greater than forestRows of %d", 3, 2)},
+
+		// 14
+		// |---------------\
+		// 12              13
+		// |-------\       |-------\
+		// 08      09      10      11
+		// |---\   |---\   |---\   |---\
+		// 00  01  02  03  04  05  06  07
+		{position: 13, drop: 2, totalRows: 3, expected: 04, err: nil},
+		{position: 13, drop: 0, totalRows: 3, expected: 13, err: nil},
+		{position: 13, drop: 4, totalRows: 3, expected: 0, err: fmt.Errorf("drop of %d is greater than forestRows of %d", 4, 3)},
+		{position: 12, drop: 0, totalRows: 3, expected: 12, err: nil},
+		{position: 12, drop: 1, totalRows: 3, expected: 8, err: nil},
+		{position: 12, drop: 2, totalRows: 3, expected: 0, err: nil},
+	}
+
+	for _, test := range tests {
+		got, err := childMany(test.position, test.drop, test.totalRows)
+		if err != nil {
+			if test.err == nil {
+				t.Errorf("expected error of %v but got %v", test.err, err)
+			}
+		}
+
+		if got != test.expected {
+			t.Errorf("expected %v but got %v", test.expected, got)
+		}
+	}
+}
+
 func TestDeTwin(t *testing.T) {
 	t.Parallel()
 

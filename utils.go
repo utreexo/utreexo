@@ -33,6 +33,28 @@ func rightChild(position uint64, forestRows uint8) uint64 {
 	return ((position << 1) & mask) | 1
 }
 
+// childMany returns the child that's multiple rows lower. The returned child is always of the left child.
+// In the tree below, position=14, drop=3, forestRows=3 will return 00.
+// Arg of: position=14, drop=2, forestRows=3 will return 08.
+//
+// 14
+// |---------------\
+// 12              13
+// |-------\       |-------\
+// 08      09      10      11
+// |---\   |---\   |---\   |---\
+// 00  01  02  03  04  05  06  07
+func childMany(position uint64, drop, forestRows uint8) (uint64, error) {
+	if drop == 0 {
+		return position, nil
+	}
+	if drop > forestRows {
+		return 0, fmt.Errorf("drop of %d is greater than forestRows of %d", drop, forestRows)
+	}
+	mask := uint64(2<<forestRows) - 1
+	return (position << drop) & mask, nil
+}
+
 // sibling returns the sibling of this node.
 func sibling(pos uint64) uint64 {
 	return pos ^ 1
