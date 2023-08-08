@@ -515,6 +515,7 @@ func getAddsAndDels(currentLeaves, addCount, delCount uint32) ([]Leaf, []Hash, [
 
 		delHashes[i] = leaves[idx].Hash
 		delTargets[i] = uint64(idx)
+		leaves[idx].Remember = true
 	}
 
 	return leaves, delHashes, delTargets
