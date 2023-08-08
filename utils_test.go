@@ -10,6 +10,103 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+func TestTranslatePos(t *testing.T) {
+	t.Parallel()
+
+	var tests = []struct {
+		position uint64
+		fromRows uint8
+		toRows   uint8
+		expected uint64
+	}{
+		// From:
+		//
+		// 06
+		// |-------\
+		// 04      05
+		// |---\   |---\
+		// 00  01  02  03
+		//
+		// To:
+		//
+		// |---------------\
+		// 12
+		// |-------\       |-------\
+		// 08      09
+		// |---\   |---\   |---\   |---\
+		// 00  01  02  03
+		//
+		// Row 0 tests.
+		{position: 0, fromRows: 2, toRows: 3, expected: 0},
+		{position: 1, fromRows: 2, toRows: 3, expected: 1},
+		{position: 2, fromRows: 2, toRows: 3, expected: 2},
+		{position: 3, fromRows: 2, toRows: 3, expected: 3},
+		{position: 0, fromRows: 3, toRows: 2, expected: 0},
+		{position: 1, fromRows: 3, toRows: 2, expected: 1},
+		{position: 2, fromRows: 3, toRows: 2, expected: 2},
+		{position: 3, fromRows: 3, toRows: 2, expected: 3},
+		//
+		// Row 1 tests.
+		{position: 4, fromRows: 2, toRows: 3, expected: 8},
+		{position: 5, fromRows: 2, toRows: 3, expected: 9},
+		{position: 8, fromRows: 3, toRows: 2, expected: 4},
+		{position: 9, fromRows: 3, toRows: 2, expected: 5},
+		//
+		// Row 2 tests.
+		{position: 6, fromRows: 2, toRows: 3, expected: 12},
+		{position: 12, fromRows: 3, toRows: 2, expected: 6},
+
+		// From:
+		//
+		// 06
+		// |-------\
+		// 04      05
+		// |---\   |---\
+		// 00  01  02  03
+		//
+		//
+		// To:
+		//
+		// |-------------------------------\
+		//
+		// |---------------\               |---------------\
+		// 24
+		// |-------\       |-------\       |-------\       |-------\
+		// 16      17
+		// |---\   |---\   |---\   |---\   |---\   |---\   |---\   |---\
+		// 00  01  02  03
+		//
+		// Row 0 tests.
+		{position: 0, fromRows: 2, toRows: 4, expected: 0},
+		{position: 1, fromRows: 2, toRows: 4, expected: 1},
+		{position: 2, fromRows: 2, toRows: 4, expected: 2},
+		{position: 3, fromRows: 2, toRows: 4, expected: 3},
+		{position: 0, fromRows: 4, toRows: 2, expected: 0},
+		{position: 1, fromRows: 4, toRows: 2, expected: 1},
+		{position: 2, fromRows: 4, toRows: 2, expected: 2},
+		{position: 3, fromRows: 4, toRows: 2, expected: 3},
+		//
+		// Row 1 tests.
+		{position: 4, fromRows: 2, toRows: 4, expected: 16},
+		{position: 5, fromRows: 2, toRows: 4, expected: 17},
+		{position: 16, fromRows: 4, toRows: 2, expected: 4},
+		{position: 17, fromRows: 4, toRows: 2, expected: 5},
+		//
+		// Row 2 tests.
+		{position: 6, fromRows: 2, toRows: 4, expected: 24},
+		{position: 24, fromRows: 4, toRows: 2, expected: 6},
+	}
+
+	for i, test := range tests {
+		got := translatePos(test.position, test.fromRows, test.toRows)
+		if got != test.expected {
+			t.Errorf("test #%d, for position %d, fromRow %d, toRow %d, "+
+				"expected %d, got %d", i, test.position, test.fromRows,
+				test.toRows, test.expected, got)
+		}
+	}
+}
+
 func TestChildMany(t *testing.T) {
 	t.Parallel()
 
