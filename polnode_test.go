@@ -64,12 +64,12 @@ func TestCalculatePosition(t *testing.T) {
 	for _, test := range tests {
 		p := NewAccumulator(true)
 
-		err := p.Modify(test.adds, nil, nil)
+		err := p.Modify(test.adds, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		err = p.Modify(nil, nil, test.dels)
+		err = p.Modify(nil, nil, Proof{Targets: test.dels})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -147,12 +147,12 @@ func TestReadPosition(t *testing.T) {
 	for _, test := range tests {
 		p := NewAccumulator(true)
 
-		err := p.Modify(test.adds, nil, nil)
+		err := p.Modify(test.adds, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		err = p.Modify(nil, nil, test.dels)
+		err = p.Modify(nil, nil, Proof{Targets: test.dels})
 		if err != nil {
 			t.Fatal(err)
 		}

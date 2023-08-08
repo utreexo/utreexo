@@ -57,7 +57,7 @@ func FuzzStump(f *testing.F) {
 		stump := Stump{}
 
 		leaves, delHashes, _ := getAddsAndDels(uint32(p.NumLeaves), startLeaves, delCount)
-		err := p.Modify(leaves, nil, nil)
+		err := p.Modify(leaves, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -92,7 +92,7 @@ func FuzzStump(f *testing.F) {
 		}
 
 		modifyLeaves, _, _ := getAddsAndDels(uint32(p.NumLeaves), 0, 0)
-		err = p.Modify(modifyLeaves, delHashes, proof.Targets)
+		err = p.Modify(modifyLeaves, delHashes, proof)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -175,7 +175,7 @@ func FuzzStumpChain(f *testing.F) {
 				t.Fatal(err)
 			}
 
-			err = p.Modify(adds, delHashes, proof.Targets)
+			err = p.Modify(adds, delHashes, proof)
 			if err != nil {
 				t.Fatalf("FuzzStumpChain fail at block %d. Error: %v", b, err)
 			}

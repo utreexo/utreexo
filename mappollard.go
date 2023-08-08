@@ -34,7 +34,7 @@ func NewMapPollard() MapPollard {
 	return MapPollard{
 		CachedLeaves: make(map[Hash]uint64),
 		Nodes:        make(map[uint64]Leaf),
-		TotalRows:    0,
+		TotalRows:    30,
 	}
 }
 
@@ -92,6 +92,9 @@ func (m *MapPollard) forgetUnneededDel() error {
 			}
 			if collision && !found {
 				panic("oops")
+			}
+			if found {
+				break
 			}
 
 			neededMap[pos] = struct{}{}
@@ -749,7 +752,7 @@ func (m *MapPollard) Undo(numAdds uint64, proof Proof, hashes, origPrevRoots []H
 		m.Nodes[rootPos[i]] = Leaf{Hash: origPrevRoots[i]}
 	}
 
-	return nil
+	return m.forgetUnneededDel()
 }
 
 // Prove returns a proof of all the targets that are passed in.
@@ -804,14 +807,21 @@ func (m *MapPollard) Prove(proveHashes []Hash) (Proof, error) {
 	return Proof{Targets: origTargets, Proof: hashes}, nil
 }
 
-func (m *MapPollard) Verify(delHashes []Hash, proof Proof) error {
+func (m *MapPollard) Verify(delHashes []Hash, proof Proof, remember bool) error {
 	if treeRows(m.NumLeaves) != m.TotalRows {
 		proof.Targets = translatePositions(proof.Targets, m.TotalRows, treeRows(m.NumLeaves))
 	}
 
 	s := m.GetStump()
 	_, err := Verify(s, delHashes, proof)
-	return err
+	if err != nil {
+		return err
+	}
+
+	if remember {
+		m.Ingest(delHashes, proof)
+	}
+	return nil
 }
 
 // trimProofPos returns a slice of proof positions with the proof positions that

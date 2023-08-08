@@ -9,6 +9,27 @@ import (
 	"testing"
 )
 
+func (m *MapPollard) nodeMapToString() string {
+	return "n/a"
+}
+
+func (m *MapPollard) rootToString() string {
+	return printHashes(m.GetRoots())
+}
+
+func (m *MapPollard) sanityCheck() error {
+	err := m.checkPruned()
+	if err != nil {
+		return err
+	}
+	err = m.checkProofNodes()
+	if err != nil {
+		return err
+	}
+
+	return m.checkHashes()
+}
+
 func (m *MapPollard) checkPruned() error {
 	neededPos := make(map[uint64]struct{})
 	for _, v := range m.CachedLeaves {
@@ -173,13 +194,13 @@ func FuzzMapPollard(f *testing.F) {
 		afterStr := String(&acc)
 
 		accFull := NewAccumulator(true)
-		err = accFull.Modify(leaves, nil, nil)
+		err = accFull.Modify(leaves, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		beforeFullStr := String(&accFull)
-		err = accFull.Modify(modifyLeaves, delHashes, proof.Targets)
+		err = accFull.Modify(modifyLeaves, delHashes, proof)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -295,10 +316,6 @@ func FuzzMapPollardChain(f *testing.F) {
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
-		if numAdds > 3 {
-			return
-		}
-
 		m := NewMapPollard()
 		if numAdds&1 == 1 {
 			m.TotalRows = 50
@@ -316,11 +333,12 @@ func FuzzMapPollardChain(f *testing.F) {
 				t.Fatal(err)
 			}
 
-			copyProof := Proof{Targets: make([]uint64, len(expectProof.Targets)), Proof: make([]Hash, len(expectProof.Proof))}
-			copy(copyProof.Targets, expectProof.Targets)
-			copy(copyProof.Proof, expectProof.Proof)
-
-			m.Ingest(delHashes, copyProof)
+			err = m.Verify(delHashes, expectProof, true)
+			if err != nil {
+				t.Fatalf("%v\nproving delHashes:\nproof:\n%s\n%s\nmap:\n%s\nfull:\n%s\n",
+					err, printHashes(delHashes), expectProof.String(),
+					String(&m), String(&full))
+			}
 
 			proof, err := m.Prove(delHashes)
 			if err != nil {
@@ -334,13 +352,6 @@ func FuzzMapPollardChain(f *testing.F) {
 				t.Fatalf("\nFor delhashes: %v\nexpected proof:\n%s\ngot:\n%s\nerr: %v\n"+
 					"maptreexo:\n%s\nfull:\n%s\n",
 					printHashes(delHashes), expectProof.String(), proof.String(), err,
-					String(&m), String(&full))
-			}
-
-			_, err = Verify(Stump{Roots: m.GetRoots(), NumLeaves: m.NumLeaves}, delHashes, proof)
-			if err != nil {
-				t.Fatalf("%v\nproving delHashes:\nproof:\n%s\n%s\nmap:\n%s\nfull:\n%s\n",
-					err, printHashes(delHashes), proof.String(),
 					String(&m), String(&full))
 			}
 
@@ -361,7 +372,7 @@ func FuzzMapPollardChain(f *testing.F) {
 				t.Fatalf("FuzzMapPollardChain fail at block %d. Error: %v", b, err)
 			}
 
-			err = full.Modify(adds, delHashes, proof.Targets)
+			err = full.Modify(adds, delHashes, proof)
 			if err != nil {
 				t.Fatal(err)
 			}
