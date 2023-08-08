@@ -419,6 +419,16 @@ func maxPositionAtRow(row, forestRows uint8, numLeaves uint64) (uint64, error) {
 	return max, nil
 }
 
+// translatePos returns what the given position would be in the to total rows.
+func translatePos(pos uint64, fromTotalRow, toTotalRow uint8) uint64 {
+	row := detectRow(pos, fromTotalRow)
+	if row == 0 {
+		return pos
+	}
+	offset := pos - startPositionAtRow(row, fromTotalRow)
+	return offset + startPositionAtRow(row, toTotalRow)
+}
+
 // deTwin goes through the list of sorted deletions and finds the parent deletions.
 // NOTE The caller MUST sort the dels before passing it into the function.
 //
