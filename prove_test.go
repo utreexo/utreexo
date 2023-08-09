@@ -142,11 +142,11 @@ func FuzzGetMissingPositions(f *testing.F) {
 		// Create the starting off pollard.
 		p := NewAccumulator(true)
 		leaves, delHashes, delPos := getAddsAndDels(uint32(p.NumLeaves), startLeaves, delCount)
-		err := p.Modify(leaves, nil, nil)
+		err := p.Modify(leaves, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = p.Modify(nil, delHashes, delPos)
+		err = p.Modify(nil, delHashes, Proof{Targets: delPos})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -208,7 +208,7 @@ func FuzzGetMissingPositions(f *testing.F) {
 		if err != nil {
 			t.Fatalf("FuzzGetMissingPositions fail. Error %v", err)
 		}
-		err = p.Verify(newDelHashes, newProof)
+		err = p.Verify(newDelHashes, newProof, false)
 		if err != nil {
 			t.Fatalf("FuzzGetMissingPositions fail: New proof failed to verify. error: %v", err)
 		}
@@ -245,11 +245,11 @@ func FuzzAddProof(f *testing.F) {
 
 		// Create the starting off pollard.
 		p := NewAccumulator(true)
-		err := p.Modify(leaves, nil, nil)
+		err := p.Modify(leaves, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = p.Modify(nil, delHashes, delPos)
+		err = p.Modify(nil, delHashes, Proof{Targets: delPos})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -307,7 +307,7 @@ func FuzzAddProof(f *testing.F) {
 		}
 
 		// Check that the proof verifies.
-		err = p.Verify(leafHashesC, proofC)
+		err = p.Verify(leafHashesC, proofC, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -344,11 +344,11 @@ func FuzzUpdateProofRemove(f *testing.F) {
 
 		// Create the starting off pollard.
 		p := NewAccumulator(true)
-		err := p.Modify(leaves, nil, nil)
+		err := p.Modify(leaves, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = p.Modify(nil, delHashes, delPos)
+		err = p.Modify(nil, delHashes, Proof{Targets: delPos})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -412,7 +412,7 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		leafSubset.hashes = cachedProof.updateProofRemove(blockProof.Targets, leafSubset.hashes, updated, p.NumLeaves)
 
 		// Modify the pollard.
-		err = p.Modify(nil, blockDelHashes, delPositions)
+		err = p.Modify(nil, blockDelHashes, Proof{Targets: delPositions})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -453,7 +453,7 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		}
 
 		// And verify that the proof is correct.
-		err = p.Verify(leafSubset.hashes, cachedProof)
+		err = p.Verify(leafSubset.hashes, cachedProof, false)
 		if err != nil {
 			t.Fatalf("FuzzUpdateProofRemove Fail\nErr: %s\n\n"+
 				"Proof:\n%s\nTarget hashes:\n%s\n"+
@@ -496,11 +496,11 @@ func FuzzUpdateProofAdd(f *testing.F) {
 
 		// Create the starting off pollard.
 		p := NewAccumulator(true)
-		err := p.Modify(leaves, nil, nil)
+		err := p.Modify(leaves, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = p.Modify(nil, delHashes, delPos)
+		err = p.Modify(nil, delHashes, Proof{Targets: delPos})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -552,14 +552,14 @@ func FuzzUpdateProofAdd(f *testing.F) {
 
 		beforePollardStr := p.String()
 		// Modify the pollard.
-		err = p.Modify(addLeaves, nil, nil)
+		err = p.Modify(addLeaves, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
 		}
 		afterPollardStr := p.String()
 
 		// And verify that the proof is correct.
-		err = p.Verify(leafSubset.hashes, cachedProof)
+		err = p.Verify(leafSubset.hashes, cachedProof, false)
 		if err != nil {
 			t.Fatalf("FuzzUpdateProofAdd Fail. Error:\n%v\nleafHashes:\n%s\nProof before:\n%s\n"+
 				"Proof:\n%s\nPollard before:\n%s\nPollard after:\n%s\n",
@@ -603,7 +603,7 @@ func FuzzModifyProofChain(f *testing.F) {
 			}
 
 			// Sanity checking.
-			err = p.Verify(delHashes, blockProof)
+			err = p.Verify(delHashes, blockProof, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -651,12 +651,12 @@ func FuzzModifyProofChain(f *testing.F) {
 				addHashes[i] = adds[i].Hash
 			}
 
-			err = p.Modify(adds, delHashes, blockProof.Targets)
+			err = p.Modify(adds, delHashes, blockProof)
 			if err != nil {
 				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
 			}
 
-			err = p.Undo(uint64(len(adds)), blockProof.Targets, delHashes, stump.Roots)
+			err = p.Undo(uint64(len(adds)), blockProof, delHashes, stump.Roots)
 			if err != nil {
 				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
 			}
@@ -694,14 +694,14 @@ func FuzzModifyProofChain(f *testing.F) {
 				t.Fatalf("FuzzUpdateProofRemove Fail. Expected hashes:\n%s\nbut got:\n%s\n",
 					printHashes(expectedCachedHashes), printHashes(cachedHashes))
 			}
-			err = p.Modify(adds, delHashes, blockProof.Targets)
+			err = p.Modify(adds, delHashes, blockProof)
 			if err != nil {
 				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
 			}
 
 			// Sanity check that the modified proof verifies with the
 			// modified pollard.
-			err = p.Verify(cachedHashes, cachedProof)
+			err = p.Verify(cachedHashes, cachedProof, false)
 			if err != nil {
 				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
 			}
@@ -764,11 +764,11 @@ func FuzzGetProofSubset(f *testing.F) {
 
 		// Create the starting off pollard.
 		p := NewAccumulator(true)
-		err := p.Modify(leaves, nil, nil)
+		err := p.Modify(leaves, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = p.Modify(nil, delHashes, delPos)
+		err = p.Modify(nil, delHashes, Proof{Targets: delPos})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -799,7 +799,7 @@ func FuzzGetProofSubset(f *testing.F) {
 			t.Fatal(err)
 		}
 		// And verify that the proof is correct.
-		err = p.Verify(leafSubset.hashes, cachedProof)
+		err = p.Verify(leafSubset.hashes, cachedProof, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -842,7 +842,7 @@ func FuzzGetProofSubset(f *testing.F) {
 		}
 
 		// Verify the proof.
-		err = p.Verify(subsetHashes, subsetProof)
+		err = p.Verify(subsetHashes, subsetProof, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -906,7 +906,7 @@ func FuzzUndoProofChain(f *testing.F) {
 			}
 
 			// Sanity checking.
-			err = p.Verify(delHashes, blockProof)
+			err = p.Verify(delHashes, blockProof, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1015,14 +1015,14 @@ func FuzzUndoProofChain(f *testing.F) {
 				t.Fatalf("FuzzUndoProofChain Fail. Expected hashes:\n%s\nbut got:\n%s\n",
 					printHashes(expectedCachedHashes), printHashes(cachedHashes))
 			}
-			err = p.Modify(adds, delHashes, blockProof.Targets)
+			err = p.Modify(adds, delHashes, blockProof)
 			if err != nil {
 				t.Fatalf("FuzzUndoProofChain fail at block %d. Error: %v", b, err)
 			}
 
 			// Sanity check that the modified proof verifies with the
 			// modified pollard.
-			err = p.Verify(cachedHashes, cachedProof)
+			err = p.Verify(cachedHashes, cachedProof, false)
 			if err != nil {
 				t.Fatalf("FuzzUndoProofChain fail at block %d. Error: %v", b, err)
 			}
@@ -1146,7 +1146,7 @@ func FuzzUndoProof(f *testing.F) {
 		// Create the starting off pollard.
 		p := NewAccumulator(true)
 		leaves, dels, _ := getAddsAndDels(uint32(p.NumLeaves), uint32(startLeaves), uint32(delCount))
-		err := p.Modify(leaves, nil, nil)
+		err := p.Modify(leaves, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1179,7 +1179,7 @@ func FuzzUndoProof(f *testing.F) {
 			t.Fatal(err)
 		}
 		modifyLeaves, _, _ := getAddsAndDels(uint32(p.NumLeaves), uint32(modifyAdds), 0)
-		err = p.Modify(modifyLeaves, dels, bp.Targets)
+		err = p.Modify(modifyLeaves, dels, bp)
 		if err != nil {
 			t.Fatal(err)
 		}

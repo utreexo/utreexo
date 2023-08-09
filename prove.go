@@ -395,7 +395,7 @@ func deTwinHashAndPos(hnp hashAndPos, forestRows uint8) hashAndPos {
 
 // Verify calculates the root hashes from the passed in proof and delHashes and
 // compares it against the current roots in the pollard.
-func (p *Pollard) Verify(delHashes []Hash, proof Proof) error {
+func (p *Pollard) Verify(delHashes []Hash, proof Proof, remember bool) error {
 	if len(delHashes) == 0 {
 		return nil
 	}

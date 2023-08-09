@@ -8,6 +8,9 @@ import (
 	"sort"
 )
 
+// Assert that Pollard implements the Utreexo interface.
+var _ Utreexo = (*Pollard)(nil)
+
 // Pollard is a representation of the utreexo forest using a collection of
 // binary trees. It may or may not contain the entire set.
 type Pollard struct {
@@ -56,15 +59,20 @@ func (p *Pollard) GetNumLeaves() uint64 {
 	return p.NumLeaves
 }
 
+// GetTreeRows returns the total number of rows the accumulator has allocated for.
+func (p *Pollard) GetTreeRows() uint8 {
+	return treeRows(p.NumLeaves)
+}
+
 // Modify takes in the additions and deletions and updates the accumulator accordingly.
 //
 // NOTE Modify does NOT do any validation and assumes that all the positions of the leaves
 // being deleted have already been verified.
-func (p *Pollard) Modify(adds []Leaf, delHashes []Hash, origDels []uint64) error {
+func (p *Pollard) Modify(adds []Leaf, delHashes []Hash, proof Proof) error {
 	// Make a copy to avoid mutating the deletion slice passed in.
-	delCount := len(origDels)
+	delCount := len(proof.Targets)
 	dels := make([]uint64, delCount)
-	copy(dels, origDels)
+	copy(dels, proof.Targets)
 
 	// Remove the delHashes from the map.
 	p.deleteFromMap(delHashes)
@@ -316,16 +324,16 @@ func (p *Pollard) deleteFromMap(delHashes []Hash) {
 //
 // Ex: If the caller is trying to go back to block 9, the numAdds, dels, and delHashes should be
 // the adds and dels that happened to get to block 10. prevRoots should be the roots at block 9.
-func (p *Pollard) Undo(numAdds uint64, dels []uint64, delHashes []Hash, prevRoots []Hash) error {
+func (p *Pollard) Undo(numAdds uint64, proof Proof, delHashes []Hash, prevRoots []Hash) error {
 	for i := 0; i < int(numAdds); i++ {
 		p.undoSingleAdd()
 	}
-	err := p.undoEmptyRoots(numAdds, dels, prevRoots)
+	err := p.undoEmptyRoots(numAdds, proof.Targets, prevRoots)
 	if err != nil {
 		return err
 	}
 
-	err = p.undoDels(dels, delHashes)
+	err = p.undoDels(proof.Targets, delHashes)
 	if err != nil {
 		return err
 	}
