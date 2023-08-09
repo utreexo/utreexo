@@ -74,9 +74,7 @@ func (p *Pollard) posMapSanity() error {
 	return nil
 }
 
-func TestUndo(t *testing.T) {
-	t.Parallel()
-
+func testUndo(t *testing.T, utreexo UtreexoTest) {
 	var tests = []struct {
 		startAdds []Hash
 		startDels []Hash
@@ -160,8 +158,11 @@ func TestUndo(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		p := NewAccumulator(true)
-
+		switch utreexo.(type) {
+		case *Pollard:
+			v := NewAccumulator(true)
+			utreexo = &v
+		}
 		adds := make([]Leaf, len(test.startAdds))
 		for i := range adds {
 			hash := test.startAdds[i]
@@ -169,21 +170,21 @@ func TestUndo(t *testing.T) {
 		}
 
 		// Create the initial starting off pollard.
-		err := p.Modify(adds, nil, Proof{})
+		err := utreexo.Modify(adds, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		proof, err := p.Prove(test.startDels)
+		proof, err := utreexo.Prove(test.startDels)
 		if err != nil {
 			t.Fatalf("TestUndo failed %d: error %v", i, err)
 		}
-		err = p.Modify(nil, test.startDels, proof)
+		err = utreexo.Modify(nil, test.startDels, proof)
 		if err != nil {
 			t.Fatalf("TestUndo failed %d: error %v", i, err)
 		}
 
-		beforeRoots := p.GetRoots()
-		beforeStr := p.String()
+		beforeRoots := utreexo.GetRoots()
+		beforeStr := utreexo.String()
 
 		modifyAdds := make([]Leaf, len(test.modifyAdds))
 		for i := range modifyAdds {
@@ -191,7 +192,7 @@ func TestUndo(t *testing.T) {
 			modifyAdds[i] = Leaf{Hash: hash}
 		}
 
-		modifyProof, err := p.Prove(test.modifyDels)
+		modifyProof, err := utreexo.Prove(test.modifyDels)
 		if err != nil {
 			t.Fatalf("TestUndo failed %d: error %v", i, err)
 		}
@@ -202,24 +203,13 @@ func TestUndo(t *testing.T) {
 		}
 
 		// Perform the modify to undo.
-		err = p.Modify(modifyAdds, test.modifyDels, modifyProof)
+		err = utreexo.Modify(modifyAdds, test.modifyDels, modifyProof)
 		if err != nil {
 			t.Fatalf("TestUndo failed %d: error %v", i, err)
 		}
-		afterStr := p.String()
+		afterStr := utreexo.String()
 
-		err = p.posMapSanity()
-		if err != nil {
-			str := fmt.Errorf("TestUndo failed %d: error %v"+
-				"\nbefore:\n\n%s"+
-				"\nafter:\n\n%s",
-				i, err,
-				beforeStr,
-				afterStr)
-			t.Fatal(str)
-		}
-
-		err = p.checkHashes()
+		err = utreexo.sanityCheck()
 		if err != nil {
 			str := fmt.Errorf("TestUndo failed %d: error %v"+
 				"\nbefore:\n\n%s"+
@@ -231,7 +221,7 @@ func TestUndo(t *testing.T) {
 		}
 
 		// Perform the undo.
-		err = p.Undo(uint64(len(test.modifyAdds)), modifyProof, test.modifyDels, beforeRoots)
+		err = utreexo.Undo(uint64(len(test.modifyAdds)), modifyProof, test.modifyDels, beforeRoots)
 		if err != nil {
 			err := fmt.Errorf("TestUndo failed %d: error %v"+
 				"\nbefore:\n\n%s"+
@@ -241,9 +231,9 @@ func TestUndo(t *testing.T) {
 				afterStr)
 			t.Fatal(err)
 		}
-		undoStr := p.String()
+		undoStr := utreexo.String()
 
-		afterRoots := p.GetRoots()
+		afterRoots := utreexo.GetRoots()
 		if !reflect.DeepEqual(beforeRoots, afterRoots) {
 			beforeRootsStr := printHashes(beforeRoots)
 			afterRootsStr := printHashes(afterRoots)
@@ -263,7 +253,7 @@ func TestUndo(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		err = p.checkHashes()
+		err = utreexo.sanityCheck()
 		if err != nil {
 			err := fmt.Errorf("TestUndo fail: error %v"+
 				"\nbefore:\n\n%s"+
@@ -275,21 +265,13 @@ func TestUndo(t *testing.T) {
 				undoStr)
 			t.Fatal(err)
 		}
-
-		err = p.posMapSanity()
-		if err != nil {
-			err := fmt.Errorf("TestUndo fail: error %v"+
-				"\nbefore:\n\n%s"+
-				"\nafter:\n\n%s"+
-				"\nundo:\n\n%s",
-				err,
-				beforeStr,
-				afterStr,
-				undoStr)
-			t.Fatal(err)
-		}
-
 	}
+}
+
+func TestUndo(t *testing.T) {
+	t.Parallel()
+
+	testUndo(t, &Pollard{})
 }
 
 // checkHashes moves down the tree and calculates the parent hash from the children.
