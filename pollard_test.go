@@ -731,201 +731,171 @@ func FuzzUndo(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, startLeaves uint8, modifyAdds uint8, delCount uint8) {
-		if startLeaves > 32 || modifyAdds > 32 || startLeaves == 0 {
-			return
-		}
-		// delCount must be less than the current number of leaves.
-		if delCount > startLeaves {
-			return
-		}
-
-		// Create the starting off pollard.
-		p := NewAccumulator(true)
-		leaves, dels, _ := getAddsAndDels(uint32(p.NumLeaves), uint32(startLeaves), uint32(delCount))
-		err := p.Modify(leaves, nil, Proof{})
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		beforeStr := p.String()
-
-		beforeRoots := p.GetRoots()
-		beforeMap := nodeMapToString(p.NodeMap)
-
-		bp, err := p.Prove(dels)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		err = proofSanity(bp)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if p.NumLeaves != 1 && len(bp.Targets) != len(dels) {
-			err := fmt.Errorf("Have %d targets but %d target hashes",
-				len(bp.Targets), len(dels))
-			t.Fatal(err)
-		}
-
-		modifyLeaves, _, _ := getAddsAndDels(uint32(p.NumLeaves), uint32(modifyAdds), 0)
-		err = p.Modify(modifyLeaves, dels, bp)
-		if err != nil {
-			t.Fatal(err)
-		}
-		afterStr := p.String()
-		afterMap := nodeMapToString(p.NodeMap)
-
-		err = p.Undo(uint64(modifyAdds), bp, dels, beforeRoots)
-		if err != nil {
-			startHashes := make([]Hash, len(leaves))
-			for i, leaf := range leaves {
-				startHashes[i] = leaf.Hash
-			}
-
-			modifyHashes := make([]Hash, len(modifyLeaves))
-			for i, leaf := range modifyLeaves {
-				modifyHashes[i] = leaf.Hash
-			}
-			err := fmt.Errorf("FuzzUndo fail: Undo failed, error: %v"+
-				"\nbefore:\n\n%s"+
-				"\nafter:\n\n%s"+
-				"\nstartLeaves %d, modifyAdds %d, delCount %d"+
-				"\nstartHashes:\n%s"+
-				"\nmodifyAdds:\n%s"+
-				"\nmodifyDels:\n%s"+
-				"\ndel targets:\n %v"+
-				"\nnodemap before modify:\n %s"+
-				"\nnodemap after modify:\n %s",
-				err,
-				beforeStr,
-				afterStr,
-				startLeaves, modifyAdds, delCount,
-				printHashes(startHashes),
-				printHashes(modifyHashes),
-				printHashes(dels),
-				bp.Targets,
-				beforeMap,
-				afterMap)
-			t.Fatal(err)
-		}
-		undoStr := p.String()
-		undoMap := nodeMapToString(p.NodeMap)
-
-		// Check that all the parent hashes are correct after the undo.
-		err = p.checkHashes()
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if uint64(len(p.NodeMap)) != p.NumLeaves-p.NumDels {
-			startHashes := make([]Hash, len(leaves))
-			for i, leaf := range leaves {
-				startHashes[i] = leaf.Hash
-			}
-
-			modifyHashes := make([]Hash, len(modifyLeaves))
-			for i, leaf := range modifyLeaves {
-				modifyHashes[i] = leaf.Hash
-			}
-			err := fmt.Errorf("FuzzUndo fail: have %d leaves in map but %d leaves in total. "+
-				"\nbefore:\n\n%s"+
-				"\nafter:\n\n%s"+
-				"\nundo:\n\n%s"+
-				"\nstartLeaves %d, modifyAdds %d, delCount %d, "+
-				"\nstartHashes:\n%s"+
-				"\nmodifyAdds:\n%s"+
-				"\nmodifyDels:\n%s"+
-				"\ndel targets:\n %v"+
-				"\nnodemap before modify:\n %s"+
-				"\nnodemap after modify:\n %s"+
-				"\nnodemap after undo:\n %s",
-				len(p.NodeMap), p.NumLeaves-p.NumDels,
-				beforeStr,
-				afterStr,
-				undoStr,
-				startLeaves, modifyAdds, delCount,
-				printHashes(startHashes),
-				printHashes(modifyHashes),
-				printHashes(dels),
-				bp.Targets,
-				beforeMap,
-				afterMap,
-				undoMap)
-			t.Fatal(err)
-		}
-		err = p.posMapSanity()
-		if err != nil {
-			startHashes := make([]Hash, len(leaves))
-			for i, leaf := range leaves {
-				startHashes[i] = leaf.Hash
-			}
-
-			modifyHashes := make([]Hash, len(modifyLeaves))
-			for i, leaf := range modifyLeaves {
-				modifyHashes[i] = leaf.Hash
-			}
-			t.Fatal(fmt.Errorf("FuzzUndo fail: error %v"+
-				"\nbefore\n %s"+
-				"\nafter\n %s"+
-				"\nundo\n %s"+
-				"\nstartLeaves %d, modifyAdds %d, delCount %d, "+
-				"\nadds:\n%s"+
-				"\nmodifyAdds:\n%s"+
-				"\ndels:\n%s"+
-				"\ndel targets: %v"+
-				"\nnodemap:\n%s",
-				err,
-				beforeStr,
-				afterStr,
-				undoStr,
-				startLeaves, modifyAdds, delCount,
-				printHashes(startHashes),
-				printHashes(modifyHashes),
-				printHashes(dels),
-				bp.Targets,
-				nodeMapToString(p.NodeMap)))
-		}
-
-		afterRoots := p.GetRoots()
-
-		if !reflect.DeepEqual(beforeRoots, afterRoots) {
-			startHashes := make([]Hash, len(leaves))
-			for i, leaf := range leaves {
-				startHashes[i] = leaf.Hash
-			}
-
-			modifyHashes := make([]Hash, len(modifyLeaves))
-			for i, leaf := range modifyLeaves {
-				modifyHashes[i] = leaf.Hash
-			}
-
-			err := fmt.Errorf("FuzzUndo fail: roots don't equal after the undo. "+
-				"\nbefore:\n\n%s"+
-				"\nafter:\n\n%s"+
-				"\nundo:\n\n%s"+
-				"\nstartLeaves %d, modifyAdds %d, delCount %d, "+
-				"\nstartHashes:\n%s"+
-				"\nmodifyAdds:\n%s"+
-				"\nmodifyDels:\n%s"+
-				"\ndel targets:\n %v"+
-				"\nnodemap before modify:\n %s"+
-				"\nnodemap after modify:\n %s"+
-				"\nnodemap after undo:\n %s",
-				beforeStr,
-				afterStr,
-				undoStr,
-				startLeaves, modifyAdds, delCount,
-				printHashes(startHashes),
-				printHashes(modifyHashes),
-				printHashes(dels),
-				bp.Targets,
-				beforeMap,
-				afterMap,
-				undoMap)
-			t.Fatal(err)
-		}
+		fuzzUndo(t, &Pollard{}, startLeaves, modifyAdds, delCount)
 	})
+}
+
+func fuzzUndo(t *testing.T, p UtreexoTest, startLeaves uint8, modifyAdds uint8, delCount uint8) {
+	// delCount must be less than the current number of leaves.
+	if delCount > startLeaves {
+		return
+	}
+
+	// Create the starting off pollard.
+	switch p.(type) {
+	case *Pollard:
+		v := NewAccumulator(true)
+		p = &v
+	}
+	// Create the starting off pollard.
+	leaves, dels, _ := getAddsAndDels(uint32(p.GetNumLeaves()), uint32(startLeaves), uint32(delCount))
+	err := p.Modify(leaves, nil, Proof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	beforeStr := p.String()
+
+	beforeRoots := p.GetRoots()
+	beforeMap := p.nodeMapToString()
+
+	bp, err := p.Prove(dels)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = proofSanity(bp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if p.GetNumLeaves() != 1 && len(bp.Targets) != len(dels) {
+		err := fmt.Errorf("Have %d targets but %d target hashes",
+			len(bp.Targets), len(dels))
+		t.Fatal(err)
+	}
+
+	modifyLeaves, _, _ := getAddsAndDels(uint32(p.GetNumLeaves()), uint32(modifyAdds), 0)
+	err = p.Modify(modifyLeaves, dels, bp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterStr := p.String()
+	afterMap := p.nodeMapToString()
+
+	err = p.Undo(uint64(modifyAdds), bp, dels, beforeRoots)
+	if err != nil {
+		startHashes := make([]Hash, len(leaves))
+		for i, leaf := range leaves {
+			startHashes[i] = leaf.Hash
+		}
+
+		modifyHashes := make([]Hash, len(modifyLeaves))
+		for i, leaf := range modifyLeaves {
+			modifyHashes[i] = leaf.Hash
+		}
+		err := fmt.Errorf("FuzzUndo fail: Undo failed, error: %v"+
+			"\nbefore:\n\n%s"+
+			"\nafter:\n\n%s"+
+			"\nstartLeaves %d, modifyAdds %d, delCount %d"+
+			"\nstartHashes:\n%s"+
+			"\nmodifyAdds:\n%s"+
+			"\nmodifyDels:\n%s"+
+			"\ndel targets:\n %v"+
+			"\nnodemap before modify:\n %s"+
+			"\nnodemap after modify:\n %s",
+			err,
+			beforeStr,
+			afterStr,
+			startLeaves, modifyAdds, delCount,
+			printHashes(startHashes),
+			printHashes(modifyHashes),
+			printHashes(dels),
+			bp.Targets,
+			beforeMap,
+			afterMap)
+		t.Fatal(err)
+	}
+	undoStr := p.String()
+	undoMap := p.nodeMapToString()
+
+	// Check that all the parent hashes are correct after the undo.
+	err = p.sanityCheck()
+	if err != nil {
+		startHashes := make([]Hash, len(leaves))
+		for i, leaf := range leaves {
+			startHashes[i] = leaf.Hash
+		}
+
+		modifyHashes := make([]Hash, len(modifyLeaves))
+		for i, leaf := range modifyLeaves {
+			modifyHashes[i] = leaf.Hash
+		}
+		retErr := fmt.Errorf("FuzzUndo fail: error: %v "+
+			"\nbefore:\n\n%s"+
+			"\nafter:\n\n%s"+
+			"\nundo:\n\n%s"+
+			"\nstartLeaves %d, modifyAdds %d, delCount %d, "+
+			"\nstartHashes:\n%s"+
+			"\nmodifyAdds:\n%s"+
+			"\nmodifyDels:\n%s"+
+			"\ndel targets:\n %v"+
+			"\nnodemap before modify:\n %s"+
+			"\nnodemap after modify:\n %s"+
+			"\nnodemap after undo:\n %s",
+			err,
+			beforeStr,
+			afterStr,
+			undoStr,
+			startLeaves, modifyAdds, delCount,
+			printHashes(startHashes),
+			printHashes(modifyHashes),
+			printHashes(dels),
+			bp.Targets,
+			beforeMap,
+			afterMap,
+			undoMap)
+		t.Fatal(retErr)
+	}
+
+	afterRoots := p.GetRoots()
+
+	if !reflect.DeepEqual(beforeRoots, afterRoots) {
+		startHashes := make([]Hash, len(leaves))
+		for i, leaf := range leaves {
+			startHashes[i] = leaf.Hash
+		}
+
+		modifyHashes := make([]Hash, len(modifyLeaves))
+		for i, leaf := range modifyLeaves {
+			modifyHashes[i] = leaf.Hash
+		}
+
+		err := fmt.Errorf("FuzzUndo fail: roots don't equal after the undo. "+
+			"\nbefore:\n\n%s"+
+			"\nafter:\n\n%s"+
+			"\nundo:\n\n%s"+
+			"\nstartLeaves %d, modifyAdds %d, delCount %d, "+
+			"\nstartHashes:\n%s"+
+			"\nmodifyAdds:\n%s"+
+			"\nmodifyDels:\n%s"+
+			"\ndel targets:\n %v"+
+			"\nnodemap before modify:\n %s"+
+			"\nnodemap after modify:\n %s"+
+			"\nnodemap after undo:\n %s",
+			beforeStr,
+			afterStr,
+			undoStr,
+			startLeaves, modifyAdds, delCount,
+			printHashes(startHashes),
+			printHashes(modifyHashes),
+			printHashes(dels),
+			bp.Targets,
+			beforeMap,
+			afterMap,
+			undoMap)
+		t.Fatal(err)
+	}
 }
 
 func FuzzUndoChain(f *testing.F) {
