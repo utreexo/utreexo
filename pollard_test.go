@@ -571,67 +571,66 @@ func FuzzModify(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, startLeaves uint32, modifyAdds uint32, delCount uint32) {
-		// delCount must be less than the current number of leaves.
-		if delCount > startLeaves {
-			return
-		}
-
 		p := NewAccumulator(true)
-		leaves, delHashes, delTargets := getAddsAndDels(uint32(p.NumLeaves), startLeaves, delCount)
-		err := p.Modify(leaves, nil, Proof{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		beforeStr := p.String()
-		beforeMap := nodeMapToString(p.NodeMap)
-
-		modifyLeaves, _, _ := getAddsAndDels(uint32(p.NumLeaves), modifyAdds, 0)
-		err = p.Modify(modifyLeaves, delHashes, Proof{Targets: delTargets})
-		if err != nil {
-			t.Fatal(err)
-		}
-		afterStr := p.String()
-		afterMap := nodeMapToString(p.NodeMap)
-
-		err = p.checkHashes()
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		err = p.posMapSanity()
-		if err != nil {
-			startHashes := make([]Hash, len(leaves))
-			for i, leaf := range leaves {
-				startHashes[i] = leaf.Hash
-			}
-
-			modifyHashes := make([]Hash, len(modifyLeaves))
-			for i, leaf := range modifyLeaves {
-				modifyHashes[i] = leaf.Hash
-			}
-			err := fmt.Errorf("FuzzModify fail: %v. "+
-				"\nbefore:\n\n%s"+
-				"\nafter:\n\n%s"+
-				"\nstartLeaves %d, modifyAdds %d, delCount %d, "+
-				"\nstartHashes:\n%s"+
-				"\nmodifyAdds:\n%s"+
-				"\nmodifyDels:\n%s"+
-				"\ndel targets:\n %v"+
-				"\nnodemap before modify:\n %s"+
-				"\nnodemap after modify:\n %s",
-				err,
-				beforeStr,
-				afterStr,
-				startLeaves, modifyAdds, delCount,
-				printHashes(startHashes),
-				printHashes(modifyHashes),
-				printHashes(delHashes),
-				delTargets,
-				beforeMap,
-				afterMap)
-			t.Fatal(err)
-		}
+		fuzzModify(t, &p, startLeaves, modifyAdds, delCount)
 	})
+}
+
+func fuzzModify(t *testing.T, p UtreexoTest, startLeaves, modifyAdds, delCount uint32) {
+	// delCount must be less than the current number of leaves.
+	if delCount > startLeaves {
+		return
+	}
+
+	leaves, delHashes, delTargets := getAddsAndDels(uint32(p.GetNumLeaves()), startLeaves, delCount)
+	err := p.Modify(leaves, nil, Proof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeStr := p.String()
+	beforeMap := p.nodeMapToString()
+
+	modifyLeaves, _, _ := getAddsAndDels(uint32(p.GetNumLeaves()), modifyAdds, 0)
+	err = p.Modify(modifyLeaves, delHashes, Proof{Targets: delTargets})
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterStr := p.String()
+	afterMap := p.nodeMapToString()
+
+	err = p.sanityCheck()
+	if err != nil {
+		startHashes := make([]Hash, len(leaves))
+		for i, leaf := range leaves {
+			startHashes[i] = leaf.Hash
+		}
+
+		modifyHashes := make([]Hash, len(modifyLeaves))
+		for i, leaf := range modifyLeaves {
+			modifyHashes[i] = leaf.Hash
+		}
+		err := fmt.Errorf("FuzzModify fail: %v. "+
+			"\nbefore:\n\n%s"+
+			"\nafter:\n\n%s"+
+			"\nstartLeaves %d, modifyAdds %d, delCount %d, "+
+			"\nstartHashes:\n%s"+
+			"\nmodifyAdds:\n%s"+
+			"\nmodifyDels:\n%s"+
+			"\ndel targets:\n %v"+
+			"\nnodemap before modify:\n %s"+
+			"\nnodemap after modify:\n %s",
+			err,
+			beforeStr,
+			afterStr,
+			startLeaves, modifyAdds, delCount,
+			printHashes(startHashes),
+			printHashes(modifyHashes),
+			printHashes(delHashes),
+			delTargets,
+			beforeMap,
+			afterMap)
+		t.Fatal(err)
+	}
 }
 
 func FuzzModifyChain(f *testing.F) {
