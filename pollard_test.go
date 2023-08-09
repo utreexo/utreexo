@@ -10,6 +10,36 @@ import (
 	"testing"
 )
 
+// Assert that Pollard implements the UtreexoTest interface.
+var _ UtreexoTest = (*Pollard)(nil)
+
+// nodeMapToString returns the node map as a string.
+//
+// Implements the UtreexoTest interface.
+func (p *Pollard) nodeMapToString() string {
+	return nodeMapToString(p.NodeMap)
+}
+
+// rootToString returns the roots as a string.
+//
+// Implements the UtreexoTest interface.
+func (p *Pollard) rootToString() string {
+	return printHashes(p.GetRoots())
+}
+
+// sanityCheck checks that the the node map is refering to a node that has the same position
+// and that the leaves hash up to the saved roots.
+//
+// Implements the UtreexoTest interface.
+func (p *Pollard) sanityCheck() error {
+	err := p.posMapSanity()
+	if err != nil {
+		return err
+	}
+
+	return p.checkHashes()
+}
+
 func (p *Pollard) posMapSanity() error {
 	if uint64(len(p.NodeMap)) != p.NumLeaves-p.NumDels {
 		err := fmt.Errorf("Have %d leaves in map but only %d leaves in total",
