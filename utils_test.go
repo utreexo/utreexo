@@ -10,6 +10,40 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+func TestIsRootPositionTotalRows(t *testing.T) {
+	var tests = []struct {
+		position  uint64
+		numLeaves uint64
+		totalRows uint8
+		expect    bool
+	}{
+		// 02
+		// |---\
+		// 00  01
+		{position: 0, numLeaves: 2, totalRows: 50, expect: false},
+		{position: 1, numLeaves: 2, totalRows: 50, expect: false},
+		{position: parent(0, 50), numLeaves: 2, totalRows: 50, expect: true},
+
+		// |-------\
+		// 04
+		// |---\   |---\
+		// 00  01  02
+		{position: 0, numLeaves: 3, totalRows: 50, expect: false},
+		{position: 1, numLeaves: 3, totalRows: 50, expect: false},
+		{position: 2, numLeaves: 3, totalRows: 50, expect: true},
+		{position: 3, numLeaves: 3, totalRows: 50, expect: false},
+		{position: parent(0, 50), numLeaves: 3, totalRows: 50, expect: true},
+	}
+
+	for _, test := range tests {
+		got := isRootPositionTotalRows(test.position, test.numLeaves, test.totalRows)
+		if test.expect != got {
+			t.Fatalf("Expected %v but got %v for position:%d, numleaves:%d",
+				test.expect, got, test.position, test.numLeaves)
+		}
+	}
+}
+
 func TestIsRootPosition(t *testing.T) {
 	var tests = []struct {
 		position  uint64
