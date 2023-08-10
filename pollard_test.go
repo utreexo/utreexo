@@ -1314,8 +1314,9 @@ func TestProofCacheNodes(t *testing.T) {
 	// Check that the nodes are cached correctly.
 	for i := range adds {
 		fmt.Printf("For node at position: %x\n", i)
-		leaves, _, err := p.getLeavesForProof(uint64(i))
+		leaves, _, err := p.getNodesForProof(uint64(i))
 		if err != nil {
+			fmt.Print("hre")
 			fmt.Printf("error: %x\n", i)
 			t.Fatal(err)
 		}

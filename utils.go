@@ -874,49 +874,65 @@ func copySortedFunc[E any](slice []E, less func(a, b E) bool) []E {
 	return sliceCopy
 }
 
+// // Get the nodes needed to prove a target leaf.
+// func (p *Pollard) getLeavesForProof(position uint64) ([]Leaf, []uint64, error) {
+// 	leaves := []Leaf{}
+// 	leavesPos := []uint64{}
+// 	node, _, _, err := p.getNode(position)
+// 	if err != nil {
+// 		return nil, nil, err
+// 	}
+
+// 	// Add sibling leaf
+// 	if position%2 == 0 {
+// 		// Even position, sibling is to the right
+// 		siblingPos := position + 1
+// 		if siblingPos < p.NumLeaves {
+// 			sibling, _, _, err := p.getNode(siblingPos)
+// 			if err != nil {
+// 				return nil, nil, err
+// 			}
+// 			leaves = append(leaves, Leaf{Hash: sibling.data, Remember: sibling.remember})
+// 			leavesPos = append(leavesPos, siblingPos)
+// 		}
+// 	} else {
+// 		// Odd position, sibling is to the left
+// 		siblingPos := position - 1
+// 		if siblingPos >= 0 {
+// 			sibling, _, _, err := p.getNode(siblingPos)
+// 			if err != nil {
+// 				return nil, nil, err
+// 			}
+// 			leaves = append(leaves, Leaf{Hash: sibling.data, Remember: sibling.remember})
+// 			leavesPos = append(leavesPos, siblingPos)
+// 		}
+// 	}
+
+// 	for node.aunt.aunt != nil {
+// 		position := p.calculatePosition(node.aunt)
+// 		aunt, _, _, err := p.getNode(position)
+// 		if err != nil {
+// 			return nil, nil, err
+// 		}
+// 		leaves = append(leaves, Leaf{Hash: aunt.data, Remember: aunt.remember})
+// 		leavesPos = append(leavesPos, position)
+// 		node = aunt
+// 	}
+// 	return leaves, leavesPos, nil
+// }
+
 // Get the nodes needed to prove a target leaf.
-func (p *Pollard) getLeavesForProof(position uint64) ([]Leaf, []uint64, error) {
+func (p *Pollard) getNodesForProof(position uint64) ([]Leaf, []uint64, error) {
 	leaves := []Leaf{}
-	leavesPos := []uint64{}
-	node, _, _, err := p.getNode(position)
-	if err != nil {
-		return nil, nil, err
-	}
+	leavesPos, _ := proofPositions([]uint64{position}, p.NumLeaves, treeRows(p.NumLeaves))
 
-	// Add sibling leaf
-	if position%2 == 0 {
-		// Even position, sibling is to the right
-		siblingPos := position + 1
-		if siblingPos < p.NumLeaves {
-			sibling, _, _, err := p.getNode(siblingPos)
-			if err != nil {
-				return nil, nil, err
-			}
-			leaves = append(leaves, Leaf{Hash: sibling.data, Remember: sibling.remember})
-			leavesPos = append(leavesPos, siblingPos)
-		}
-	} else {
-		// Odd position, sibling is to the left
-		siblingPos := position - 1
-		if siblingPos >= 0 {
-			sibling, _, _, err := p.getNode(siblingPos)
-			if err != nil {
-				return nil, nil, err
-			}
-			leaves = append(leaves, Leaf{Hash: sibling.data, Remember: sibling.remember})
-			leavesPos = append(leavesPos, siblingPos)
-		}
-	}
-
-	for node.aunt.aunt != nil {
-		position := p.calculatePosition(node.aunt)
-		aunt, _, _, err := p.getNode(position)
+	for pos := range leavesPos {
+		node, _, _, err := p.getNode(uint64(pos))
 		if err != nil {
 			return nil, nil, err
 		}
-		leaves = append(leaves, Leaf{Hash: aunt.data, Remember: aunt.remember})
-		leavesPos = append(leavesPos, position)
-		node = aunt
+		leaves = append(leaves, Leaf{Hash: node.data, Remember: node.remember})
 	}
+
 	return leaves, leavesPos, nil
 }
