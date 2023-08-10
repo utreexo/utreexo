@@ -2,6 +2,7 @@ package utreexo
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -1288,4 +1289,76 @@ func compareNodeMap(mapA, mapB map[miniHash]*polNode) error {
 	}
 
 	return fmt.Errorf(str)
+}
+
+// Test that the cached nodes are correct.
+func TestProofCacheNodes(t *testing.T) {
+
+	// Create a new accumulator with 10 leaves.
+	adds := make([]Leaf, 10)
+	for i := range adds {
+		adds[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)})}
+	}
+
+	// Create the accumulator and add one leaf at a time.
+	p := NewAccumulator(true)
+	for _, leaf := range adds {
+		err := p.Modify([]Leaf{leaf}, nil, Proof{})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fmt.Printf("Merkle tree:\n\n%s\n", p.String())
+
+	// Check that the nodes are cached correctly.
+	for i := range adds {
+		fmt.Printf("For node at position: %x\n", i)
+		leaves, _, err := p.getLeavesForProof(uint64(i))
+		if err != nil {
+			fmt.Printf("error: %x\n", i)
+			t.Fatal(err)
+		}
+
+		// Leaf hashes that should be cached ideally
+		cachedLeaves := []Leaf{}
+		for _, leaf := range leaves {
+			if leaf.Remember {
+				cachedLeaves = append(cachedLeaves, leaf)
+			}
+		}
+		cachedLeavesHash := []string{}
+		for i := range cachedLeaves {
+			cachedLeavesHash = append(cachedLeavesHash, fmt.Sprintf("%x", cachedLeaves[i].Hash))
+		}
+		fmt.Printf("Hash of leaves that should be cached:\n")
+		fmt.Print(cachedLeavesHash)
+
+		// Leaf hashes that are actually cached
+		proof, err := p.Prove([]Hash{p.getHash(uint64(i))})
+		if err != nil {
+			fmt.Println("Error generating proof:", err)
+			return
+		}
+		var actualCaches []string
+		for _, p := range proof.Proof {
+			var hexString string
+			for _, b := range p {
+				hexString += hex.EncodeToString([]byte{b})
+			}
+			actualCaches = append(actualCaches, hexString)
+		}
+		fmt.Print("\nHash of leaves that are actually cached:\n")
+		fmt.Println(actualCaches)
+
+		// Check that the cached nodes match.
+		for i := range cachedLeavesHash {
+			if cachedLeavesHash[i] != actualCaches[i] {
+				fmt.Printf("Error: cached node %d does not match (expected %s, got %s)\n", i, cachedLeavesHash[i], actualCaches[i])
+				continue
+			}
+		}
+
+		fmt.Printf("All cached nodes match for leaf: %x\n\n", i)
+	}
 }
