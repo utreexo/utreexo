@@ -2,6 +2,7 @@ package utreexo
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 )
@@ -150,7 +151,7 @@ func (p *Pollard) getNode(pos uint64) (n, sibling, parent *polNode, err error) {
 		// Return early if the path to the node we're looking for
 		// doesn't exist.
 		if n == nil {
-			return nil, nil, nil, nil
+			return nil, nil, nil, errors.New("node is nil")
 		}
 	}
 

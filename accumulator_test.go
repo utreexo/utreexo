@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"hash/fnv"
 	"math/rand"
 	"reflect"
 	"testing"
@@ -1256,7 +1257,670 @@ func compareNodeMap(mapA, mapB map[miniHash]*polNode) error {
 	return fmt.Errorf(str)
 }
 
-func TestAccumulatorRemember(t *testing.T) {
+// func TestAccumulatorRemember(t *testing.T) {
+// 	// Create elements to add to the accumulator
+// 	leaves := make([]Leaf, 9)
+// 	for i := range leaves {
+// 		var remember bool
+// 		if i == 0 || i == 7 {
+// 			remember = true
+// 		}
+// 		leaves[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)}), Remember: remember}
+// 	}
+
+// 	// Create the accumulator and add all the leaves at once
+// 	acc := NewAccumulator(true)
+// 	err := acc.Modify(leaves, nil, nil)
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+
+// 	proof, err := acc.Prove([]Hash{leaves[0].Hash})
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+
+// 	// Verify the third leaf and check if all the required nodes are remembered
+// 	error := acc.Verify([]Hash{leaves[2].Hash}, proof)
+// 	if error != nil {
+// 		t.Fatal(err)
+// 	}
+// 	for _, node := range proof {
+// 		if !node.remember {
+// 			t.Errorf("Node %v is not remembered", node)
+// 		}
+// 	}
+
+// 	// Delete the first leaf and verify the third leaf again
+// 	err = acc.Modify(nil, []Hash{leaves[0].Hash}, []uint64{0})
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	err = acc.Verify([]Hash{leaves[2].Hash}, proof)
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	for _, node := range proof {
+// 		if !node.remember {
+// 			t.Errorf("Node %v is not remembered", node)
+// 		}
+// 	}
+// }
+
+func Test1(t *testing.T) {
+	// This is just the addition.
+
+	// Create elements to add to the accumulator
+	leaves := make([]Leaf, 9)
+	for i := range leaves {
+		var remember bool
+		//if i == 0 || i == 7 {
+		if i == 0 {
+			remember = true
+		}
+		leaves[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)}), Remember: remember}
+	}
+
+	// Create the accumulator and add one leaf at a time.
+	acc := NewAccumulator(false)
+	//acc := NewAccumulator(true)
+	for _, leaf := range leaves {
+		err := acc.Modify([]Leaf{leaf}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fmt.Printf("before deleting:\n\n%s\n", acc.String())
+
+	// Deletion starts from here.
+	positions := []uint64{0}
+	delHashes := make([]Hash, len(positions))
+	for i := range positions {
+		delHashes[i] = leaves[positions[i]].Hash
+	}
+
+	//fmt.Printf("before deleting:\n\n%s\n", acc.String())
+	err := acc.Modify(nil, delHashes, positions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Printf("after deleting:\n\n%s\n", acc.String())
+}
+
+// func TestUndo2(t *testing.T) {
+// 	t.Parallel()
+
+// 	var tests = []struct {
+// 		startAdds []Hash
+// 		startDels []Hash
+
+// 		modifyAdds []Hash
+// 		modifyDels []Hash
+// 	}{
+// 		// existing test cases
+// 		// ...
+
+// 		// new test case
+// 		{
+// 			[]Hash{{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}},
+// 			nil,
+
+// 			nil,
+// 			nil,
+// 		},
+// 	}
+
+// 	for i, test := range tests {
+// 		p := NewAccumulator(true)
+
+// 		adds := make([]Leaf, len(test.startAdds))
+// 		for i := range adds {
+// 			hash := test.startAdds[i]
+// 			adds[i] = Leaf{Hash: hash}
+// 		}
+
+// 		// Create the initial starting off pollard.
+// 		err := p.Modify(adds, nil, nil)
+// 		if err != nil {
+// 			t.Fatal(err)
+// 		}
+// 		proof, err := p.Prove(test.startDels)
+// 		if err != nil {
+// 			t.Fatalf("TestUndo failed %d: error %v", i, err)
+// 		}
+// 		err = p.Modify(nil, test.startDels, proof.Targets)
+// 		if err != nil {
+// 			t.Fatalf("TestUndo failed %d: error %v", i, err)
+// 		}
+
+// 		beforeRoots := p.GetRoots()
+// 		beforeStr := p.String()
+
+// 		modifyAdds := make([]Leaf, len(test.modifyAdds))
+// 		for i := range modifyAdds {
+// 			hash := test.modifyAdds[i]
+// 			modifyAdds[i] = Leaf{Hash: hash}
+// 		}
+
+// 		modifyProof, err := p.Prove(test.modifyDels)
+// 		if err != nil {
+// 			t.Fatalf("TestUndo failed %d: error %v", i, err)
+// 		}
+
+// 		err = proofSanity(modifyProof)
+// 		if err != nil {
+// 			t.Fatalf("TestUndo failed %d: error %v", i, err)
+// 		}
+
+// 		// Perform the modify to undo.
+// 		err = p.Modify(modifyAdds, test.modifyDels, modifyProof.Targets)
+// 		if err != nil {
+// 			t.Fatalf("TestUndo failed %d: error %v", i, err)
+// 		}
+// 		afterStr := p.String()
+
+// 		err = p.posMapSanity()
+// 		if err != nil {
+// 			str := fmt.Errorf("TestUndo failed %d: error %v"+
+// 				"\nbefore:\n\n%s"+
+// 				"\nafter:\n\n%s",
+// 				i, err,
+// 				beforeStr,
+// 				afterStr)
+// 			t.Fatal(str)
+// 		}
+
+// 		err = p.checkHashes()
+// 		if err != nil {
+// 			str := fmt.Errorf("TestUndo failed %d: error %v"+
+// 				"\nbefore:\n\n%s"+
+// 				"\nafter:\n\n%s",
+// 				i, err,
+// 				beforeStr,
+// 				afterStr)
+// 			t.Fatal(str)
+// 		}
+
+// 		// Perform the undo.
+// 		err = p.Undo(uint64(len(test.modifyAdds)), modifyProof.Targets, test.modifyDels, beforeRoots)
+// 		if err != nil {
+// 			err := fmt.Errorf("TestUndo failed %d: error %v"+
+// 				"\nbefore:\n\n%s"+
+// 				"\nafter:\n\n%s",
+// 				i, err,
+// 				beforeStr,
+// 				afterStr)
+// 			t.Fatal(err)
+// 		}
+// 		undoStr := p.String()
+
+// 		afterRoots := p.GetRoots()
+// 		if !reflect.DeepEqual(beforeRoots, afterRoots) {
+// 			beforeRootsStr := printHashes(beforeRoots)
+// 			afterRootsStr := printHashes(afterRoots)
+
+// 			err := fmt.Errorf("TestUndo failed %d: roots don't equal."+
+// 				"\nbefore roots:\n%v"+
+// 				"\nafter roots:\n%v"+
+// 				"\nbefore:\n\n%s"+
+// 				"\nafter:\n\n%s"+
+// 				"\nundo:\n\n%s",
+// 				i,
+// 				beforeRootsStr,
+// 				afterRootsStr,
+// 				beforeStr,
+// 				afterStr,
+// 				undoStr)
+// 			t.Fatal(err)
+// 		}
+
+// 		err = p.checkHashes()
+// 		if err != nil {
+// 			err := fmt.Errorf("TestUndo fail: error %v"+
+// 				"\nbefore:\n\n%s"+
+// 				"\nafter:\n\n%s"+
+// 				"\nundo:\n\n%s",
+// 				err,
+// 				beforeStr,
+// 				afterStr,
+// 				undoStr)
+// 			t.Fatal(err)
+// 		}
+
+// 		err = p.posMapSanity()
+// 		if err != nil {
+// 			err := fmt.Errorf("TestUndo fail: error %v"+
+// 				"\nbefore:\n\n%s"+
+// 				"\nafter:\n\n%s"+
+// 				"\nundo:\n\n%s",
+// 				err,
+// 				beforeStr,
+// 				afterStr,
+// 				undoStr)
+// 			t.Fatal(err)
+// 		}
+
+// 		// new test case
+// 		// check if the accumulator remembers the proof for a particular leaf node
+// 		if len(test.modifyAdds) > 0 {
+// 			// grab the last added leaf
+// 			lastLeaf := modifyAdds[len(modifyAdds)-1]
+
+// 			// grab the node for the last added leaf
+// 			pos := p.calculatePosition(&polNode{lastLeaf})
+// 			node, _, _, err := p.getNode(pos)
+// 			if err != nil {
+// 				t.Fatalf("TestUndo failed %d: error %v", i, err)
+// 			}
+
+// 			// check if the node remembers the proof
+// 			if node.Proof == nil {
+// 				t.Fatalf("TestUndo failed %d: node does not remember proof", i)
+// 			}
+// 		}
+// 	}
+// }
+
+// func TestDeleteSingle(t *testing.T) {
+// 	// Create elements to add to the accumulator
+// 	leaves := make([]Leaf, 9)
+// 	for i := range leaves {
+// 		var remember bool
+// 		if i == 0 {
+// 			remember = true
+// 		}
+// 		leaves[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)}), Remember: remember}
+// 	}
+
+// 	// Create the accumulator and add one leaf at a time.
+// 	acc := NewAccumulator(false)
+// 	for _, leaf := range leaves {
+// 		err := acc.Modify([]Leaf{leaf}, nil, nil)
+// 		if err != nil {
+// 			t.Fatal(err)
+// 		}
+// 	}
+
+// 	// Delete a single leaf from the accumulator
+// 	pos := uint64(0)
+// 	delHash := leaves[pos].Hash
+// 	err := acc.Modify(nil, []Hash{delHash}, []uint64{pos})
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+
+// 	// Check that the leaf was deleted and the accumulator is still valid
+// 	_, _, _, err = acc.getNode(pos)
+// 	if err != nil {
+// 		t.Fatalf("Expected error when fetching deleted node at position %d", pos)
+// 	}
+// 	err = acc.posMapSanity()
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+// }
+
+func miniHashFromUint64(pos uint64) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(fmt.Sprintf("%d", pos)))
+	return h.Sum64()
+}
+
+// func TestDeleteSingle(t *testing.T) {
+// 	// Create elements to add to the accumulator
+// 	leaves := make([]Leaf, 9)
+// 	for i := range leaves {
+// 		var remember bool
+// 		if i == 0 {
+// 			remember = true
+// 		}
+// 		leaves[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)}), Remember: remember}
+// 	}
+
+// 	// Create the accumulator and add one leaf at a time.
+// 	acc := NewAccumulator(false)
+// 	for _, leaf := range leaves {
+// 		err := acc.Modify([]Leaf{leaf}, nil, nil)
+// 		if err != nil {
+// 			t.Fatal(err)
+// 		}
+// 	}
+
+// 	// Add the leaf to the map
+// 	pos := uint64(9)
+// 	hashedPos := miniHashFromUint64(pos)
+// 	addHash := sha256.Sum256([]byte{uint8(pos)})
+// 	acc.NodeMap[hashedPos] = &polNode{Hash: addHash}
+
+// 	// Delete the leaf from the map and the accumulator
+// 	delHash := leaves[pos].Hash
+// 	err := acc.Modify(nil, []Hash{delHash}, []uint64{pos})
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+
+// 	// Check that the leaf was deleted from the map and the accumulator is still valid
+// 	_, ok := acc.NodeMap[pos]
+// 	if ok {
+// 		t.Fatalf("Expected node at position %d to be deleted from map", pos)
+// 	}
+// 	_, _, _, err = acc.getNode(pos)
+// 	if err == nil {
+// 		t.Fatalf("Expected error when fetching deleted node at position %d", pos)
+// 	}
+// 	err = acc.posMapSanity()
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+// }
+
+// // Get the node at the given position and all its ancestors up to the root.
+// func (p *Pollard) getNodesForProof(position uint64) ([]*polNode, error) {
+// 	nodes := []*polNode{}
+// 	node, _, _, err := p.getNode(position)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	nodes = append(nodes, node)
+// 	for node.aunt != nil {
+// 		position := p.calculatePosition(node.aunt)
+// 		parent, _, _, err := p.getNode(position)
+// 		if err != nil {
+// 			return nil, err
+// 		}
+// 		nodes = append(nodes, parent)
+// 		node = parent
+// 	}
+// 	return nodes, nil
+// }
+
+// Get the leaf at the given position and all its ancestors up to the root.
+func (p *Pollard) getLeavesForProof(position uint64) ([]Leaf, error) {
+	leaves := []Leaf{}
+	node, _, _, err := p.getNode(position)
+	if err != nil {
+		return nil, err
+	}
+	leaves = append(leaves, Leaf{Hash: node.data, Remember: node.remember})
+	for node.aunt.aunt != nil {
+		position := p.calculatePosition(node.aunt)
+		aunt, _, _, err := p.getNode(position)
+		if err != nil {
+			return nil, err
+		}
+		leaves = append(leaves, Leaf{Hash: aunt.data, Remember: aunt.remember})
+		node = aunt
+	}
+	return leaves, nil
+}
+
+func TestDeleteSingle(t *testing.T) {
+	// Create a new accumulator with 10 leaves.
+	// p := NewAccumulator(true)
+	adds := make([]Leaf, 10)
+	for i := range adds {
+		adds[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)})}
+	}
+
+	// Create the accumulator and add one leaf at a time.
+	p := NewAccumulator(true)
+	for _, leaf := range adds {
+		err := p.Modify([]Leaf{leaf}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fmt.Printf("before deleting:\n\n%s\n", p.String())
+
+	// Delete the leaf at position 5.
+	// err := p.deleteSingle(5)
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+	delHashes := []Hash{adds[5].Hash}
+	positions := []uint64{05}
+	err := p.Modify(nil, delHashes, positions)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fmt.Printf("after deleting:\n\n%s\n", p.String())
+
+	// Check that the node map has 9 leaves.
+	if len(p.NodeMap) != 9 {
+		t.Errorf("Expected 9 leaves in node map, but got %d", len(p.NodeMap))
+	}
+	fmt.Print("check1\n")
+
+	// Check that the leaf at position 5 has been delete	d.
+	_, _, _, err = p.getNode(5)
+	if err == nil {
+		t.Errorf("Expected error when fetching deleted node, but got nil")
+	}
+
+	// Check that the root has been updated.
+	// roots := p.GetRoots()
+	// fmt.Print(roots)
+	// expectedRoots := []Hash{
+	// 	sha256.Sum256([]byte{0, 1, 2, 3, 4, 6, 7, 8, 9}),
+	// }
+	// if !reflect.DeepEqual(roots, expectedRoots) {
+	// 	t.Errorf("Expected roots %v, but got %v", expectedRoots, roots)
+	// }
+
+	// Delete the leaf at position 8.
+	// err = p.deleteSingle(8)
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+	delHashes = []Hash{adds[8].Hash}
+	positions = []uint64{8}
+	err = p.Modify(nil, delHashes, positions)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fmt.Printf("after deleting:\n\n%s\n", p.String())
+
+	// Check that the node map has 8 leaves.
+	if len(p.NodeMap) != 8 {
+		t.Errorf("Expected 8 leaves in node map, but got %d", len(p.NodeMap))
+	}
+
+	// Check that the leaf at position 8 has been deleted.
+	_, _, _, err = p.getNode(8)
+	if err == nil {
+		t.Errorf("Expected error when fetching deleted node, but got nil")
+	}
+
+	fmt.Print(p.NumDels)
+	fmt.Println("done")
+
+	// // Check that the NodeMap slice contains the map of all the nodes we need to remember.
+	// for i := range adds {
+	// 	if i == 5 || i == 8 {
+	// 		continue
+	// 	}
+	// 	node, _, _, err := p.getNode(uint64(i))
+	// 	if err != nil {
+	// 		t.Fatal(err)
+	// 	}
+	// 	if node == nil {
+	// 		t.Errorf("Expected node at position %d, but got nil", i)
+	// 	}
+	// 	// auntPosition := p.calculatePosition(node.aunt)
+	// 	// aunt, _, _, err := p.getNode(auntPosition)
+	// 	// if err != nil {
+	// 	// 	t.Fatal(err)
+	// 	// }
+	// 	// if aunt == nil {
+	// 	// 	t.Errorf("Expected aunt of node at position %d, but got nil", i)
+	// 	// }
+	// 	// if _, ok := p.NodeMap[aunt.Hash]; !ok {
+	// 	// 	t.Errorf("Expected NodeMap to contain aunt of node at position %d, but it does not", i)
+	// 	// }
+	// 	position := p.calculatePosition(node)
+	// 	getNodesForProof(position)
+	// }
+
+	// Check that the NodeMap slice contains the map of all the nodes we need to remember.
+	for i := range adds {
+		if i == 4 || i == 5 {
+			continue
+		}
+		leaves, err := p.getLeavesForProof(uint64(i))
+		if err != nil {
+			fmt.Printf("error: %x\n", i)
+			t.Fatal(err)
+		}
+
+		// ideally cached nodes
+		cachedLeaves := []Leaf{}
+		for _, leaf := range leaves {
+			if leaf.Remember {
+				cachedLeaves = append(cachedLeaves, leaf)
+				fmt.Printf("Leaf %x should be cached\n", leaf.Hash)
+			} else {
+				fmt.Printf("Leaf %x should not be cached\n", leaf.Hash)
+			}
+		}
+		fmt.Printf("\n")
+
+		// actual cached nodes
+
+		// node, _, _, err := p.getNode(uint64(i))
+		// pos := p.calculatePosition(node)
+		// n, _, _, err := p.getNode(pos)
+		// fmt.Println(n)
+		if err != nil {
+			fmt.Printf("error: %x\n", i)
+		}
+		needToCache := make([]Hash, 3)
+		proof, err := p.Prove([]Hash{p.getHash(uint64(i))})
+		if err != nil {
+			fmt.Println("Error generating proof:", err)
+			return
+		}
+		needToCache[i] = proof.Proof[0]
+
+		fmt.Println(proof.Proof)
+
+		fmt.Printf("next i \n")
+
+		// for j := 0; j < len(cachedLeaves); j++ {
+		// 	proof, err := p.Prove([]Hash{p.getHash(uint64(j))})
+		// 	fmt.Println(proof.Proof)
+
+		// 	needToCache[i] = proof.Proof[0]
+		// }
+	}
+
+	// // // Check that the root has been updated.
+	// // roots = p.GetRoots()
+	// // expectedRoots = []Hash{
+	// // 	sha256.Sum256([]byte{0, 1, 2, 3, 4, 5, 6, 7}),
+	// // }
+	// // if !reflect.DeepEqual(roots, expectedRoots) {
+	// // 	t.Errorf("Expected roots %v, but got %v", expectedRoots, roots)
+	// // }
+
+	// Delete the leaf at position 0.
+	// err = p.deleteSingle(0)
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+
+	// // adds := []Leaf{{0, false}, {1, false}, 2, 3, 4, 5, 6, 7, 8, 9}
+	// delHashes = []Hash{adds[0].Hash}
+	// err = p.Modify(nil, delHashes, []uint64{0})
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+
+	// fmt.Printf("after deleting:\n\n%s\n", p.String())
+
+	// // Check that the node map has 7 leaves.
+	// if len(p.NodeMap) != 8 {
+	// 	t.Errorf("Expected 7 leaves in node map, but got %d", p.NumLeaves-p.NumDels)
+	// }
+
+	fmt.Print(p.NumDels)
+	fmt.Println("done")
+
+	// end for now
+
+	// // Check that the leaf at position 0 has been deleted.
+	// _, _, _, err = p.getNode(0)
+	// if err == nil {
+	// 	t.Errorf("Expected error when fetching deleted node, but got nil")
+	// }
+
+	// // Check that the root has been updated.
+	// roots = p.GetRoots()
+	// expectedRoots = []Hash{
+	// 	sha256.Sum256([]byte{1, 2, 3, 4, 5, 6, 7}),
+	// }
+	// if !reflect.DeepEqual(roots, expectedRoots) {
+	// 	t.Errorf("Expected roots %v, but got %v", expectedRoots, roots)
+	// }
+
+	// // Delete the leaf at position 7.
+	// err = p.deleteSingle(7)
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+
+	// // Check that the node map has 6 leaves.
+	// if len(p.NodeMap) != 6 {
+	// 	t.Errorf("Expected 6 leaves in node map, but got %d", len(p.NodeMap))
+	// }
+
+	// // Check that the leaf at position 7 has been deleted.
+	// _, _, _, err = p.getNode(7)
+	// if err == nil {
+	// 	t.Errorf("Expected error when fetching deleted node, but got nil")
+	// }
+
+	// // Check that the root has been updated.
+	// roots = p.GetRoots()
+	// expectedRoots = []Hash{
+	// 	sha256.Sum256([]byte{1, 2, 3, 4, 5, 6}),
+	// }
+	// if !reflect.DeepEqual(roots, expectedRoots) {
+	// 	t.Errorf("Expected roots %v, but got %v", expectedRoots, roots)
+	// }
+
+	// // Delete the leaf at position 5.
+	// err = p.deleteSingle(5)
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+
+	// // Check that the node map has 5 leaves.
+	// if len(p.NodeMap) != 5 {
+	// 	t.Errorf("Expected 5 leaves in node map, but got %d", len(p.NodeMap))
+	// }
+
+	// // Check that the leaf at position 5 has been deleted.
+	// _, _, _, err = p.getNode(5)
+	// if err == nil {
+	// 	t.Errorf("Expected error when fetching deleted node, but got nil")
+	// }
+
+	// // Check that the root has been updated.
+	// roots = p.GetRoots()
+	// expectedRoots = []Hash{
+	// 	sha256.Sum256([]byte{1, 2, 3, 4, 6}),
+	// }
+	// if !reflect.DeepEqual(roots, expectedRoots) {
+	// 	t.Errorf("Expected roots %v, but got %v", expectedRoots, roots)
+	// }
+}
+
+// Test Delete Node
+func TestDeleteNode(t *testing.T) {
 	// Create elements to add to the accumulator
 	leaves := make([]Leaf, 9)
 	for i := range leaves {
@@ -1267,41 +1931,59 @@ func TestAccumulatorRemember(t *testing.T) {
 		leaves[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)}), Remember: remember}
 	}
 
-	// Create the accumulator and add all the leaves at once
-	acc := NewAccumulator(true)
-	err := acc.Modify(leaves, nil, nil)
+	// Create the accumulator and add one leaf at a time.
+	// acc := NewAccumulator(false)
+	// for _, leaf := range leaves {
+	// 	err := acc.Modify([]Leaf{leaf}, nil, nil)
+	// 	if err != nil {
+	// 		t.Fatal(err)
+	// 	}
+	// }
+
+	// Delete a node
+	// delHashes := []Hash{leaves[4].Hash}
+	// positions := []uint64{4}
+	// err := acc.Modify(nil, delHashes, positions)
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+
+	// Check if the nodes that are required to proof the deleted node have also been made their remember value as false
+	// for _, pos := range []uint64{0, 1, 2, 4} {
+	// 	n, _, _, err := acc.getNode(pos)
+	// 	if err != nil {
+	// 		t.Fatal(err)
+	// 	}
+	// 	if pos == 4 {
+	// 		if n.remember {
+	// 			t.Fatalf("TestDeleteNode error: node at position %d should not be cached", pos)
+	// 		}
+	// 	} else {
+	// 		if !n.remember {
+	// 			t.Fatalf("TestDeleteNode error: node at position %d should be cached", pos)
+	// 		}
+	// 	}
+	// }
+}
+
+func Test111(t *testing.T) {
+	// Create a new accumulator with 10 leaves.
+	p := NewAccumulator(true)
+	adds := make([]Leaf, 10)
+	for i := range adds {
+		adds[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)})}
+	}
+	err := p.Modify(adds, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	proof, err := acc.Prove([]Hash{leaves[0].Hash})
+	fmt.Println(p.String())
+
+	err = p.Modify(nil, []Hash{adds[0].Hash}, []uint64{0})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Verify the third leaf and check if all the required nodes are remembered
-	error := acc.Verify([]Hash{leaves[2].Hash}, proof)
-	if error != nil {
-		t.Fatal(err)
-	}
-	for _, node := range proof {
-		if !node.remember {
-			t.Errorf("Node %v is not remembered", node)
-		}
-	}
-
-	// Delete the first leaf and verify the third leaf again
-	err = acc.Modify(nil, []Hash{leaves[0].Hash}, []uint64{0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = acc.Verify([]Hash{leaves[2].Hash}, proof)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, node := range proof {
-		if !node.remember {
-			t.Errorf("Node %v is not remembered", node)
-		}
-	}
+	fmt.Println(p.String())
 }
