@@ -108,16 +108,16 @@ func rootPosition(leaves uint64, h, forestRows uint8) uint64 {
 
 // isRootPosition checks if the current position is a root given the number of
 // leaves and the entire rows of the forest.
-func isRootPosition(position, numLeaves uint64, forestRows uint8) bool {
-	row := detectRow(position, forestRows)
-	return isRootPositionOnRow(position, numLeaves, row, forestRows)
+func isRootPosition(position, numLeaves uint64) bool {
+	row := detectRow(position, treeRows(numLeaves))
+	return isRootPositionOnRow(position, numLeaves, row)
 }
 
 // isRootPosition checks if the current position is a root given the number of
 // leaves, current row, and the entire rows of the forest.
-func isRootPositionOnRow(position, numLeaves uint64, row, forestRows uint8) bool {
+func isRootPositionOnRow(position, numLeaves uint64, row uint8) bool {
 	rootPresent := numLeaves&(1<<row) != 0
-	rootPos := rootPosition(numLeaves, row, forestRows)
+	rootPos := rootPosition(numLeaves, row, treeRows(numLeaves))
 
 	return rootPresent && rootPos == position
 }
@@ -503,7 +503,7 @@ func proofPositions(targets []uint64, numLeaves uint64, totalRows uint8) ([]uint
 			break
 		}
 
-		if isRootPositionOnRow(target, numLeaves, row, totalRows) {
+		if isRootPositionOnRow(target, numLeaves, row) {
 			continue
 		}
 
@@ -633,7 +633,7 @@ func AllSubTreesToString(ts ToString) string {
 	totalRows := treeRows(ts.GetNumLeaves())
 	for h := uint8(0); h < totalRows; h++ {
 		rootPos := rootPosition(ts.GetNumLeaves(), h, totalRows)
-		if isRootPosition(rootPos, ts.GetNumLeaves(), totalRows) {
+		if isRootPosition(rootPos, ts.GetNumLeaves()) {
 			str += fmt.Sprintf(SubTreeToString(ts, rootPos, false))
 			str += "\n"
 		}

@@ -579,7 +579,7 @@ func calculateHashes(numLeaves uint64, delHashes []Hash, proof Proof) (hashAndPo
 		}
 
 		// This means we hashed all the way to the top of this subtree.
-		if isRootPositionOnRow(provePos, numLeaves, row, totalRows) {
+		if isRootPositionOnRow(provePos, numLeaves, row) {
 			calculatedRootHashes = append(calculatedRootHashes, proveHash)
 			continue
 		}
@@ -847,7 +847,7 @@ func getNewPositions(blockTargets []uint64, slice hashAndPos, numLeaves uint64, 
 
 		nextPos := pos
 		for _, target := range blockTargets {
-			if isRootPositionOnRow(nextPos, numLeaves, row, totalRows) {
+			if isRootPositionOnRow(nextPos, numLeaves, row) {
 				break
 			}
 
@@ -866,7 +866,7 @@ func getNewPositions(blockTargets []uint64, slice hashAndPos, numLeaves uint64, 
 		if appendRoots {
 			newSlice.Append(nextPos, hash)
 		} else {
-			if !isRootPositionOnRow(nextPos, numLeaves, row, totalRows) {
+			if !isRootPositionOnRow(nextPos, numLeaves, row) {
 				newSlice.Append(nextPos, hash)
 			}
 		}

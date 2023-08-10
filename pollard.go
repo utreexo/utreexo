@@ -184,7 +184,7 @@ func (p *Pollard) remove(dels []uint64) error {
 	for _, del := range dels {
 		// If a root is being deleted, then we mark it and all the leaves below
 		// it to be deleted.
-		if isRootPosition(del, p.NumLeaves, totalRows) {
+		if isRootPosition(del, p.NumLeaves) {
 			err := p.deleteRoot(del)
 			if err != nil {
 				return err
@@ -281,7 +281,7 @@ func (p *Pollard) deleteSingle(del uint64) error {
 	// return early.
 	totalRows := treeRows(p.NumLeaves)
 	to := parent(del, totalRows)
-	if isRootPosition(to, p.NumLeaves, totalRows) {
+	if isRootPosition(to, p.NumLeaves) {
 		toNode.aunt = nil
 		return nil
 	}
@@ -359,7 +359,7 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []
 
 	// Add in the empty roots that was removed by the deletions to the prevRoots.
 	for _, del := range dels {
-		if isRootPosition(del, p.NumLeaves, treeRows(p.NumLeaves)) {
+		if isRootPosition(del, p.NumLeaves) {
 			tree, _, _, err := detectOffset(del, p.NumLeaves)
 			if err != nil {
 				return err
@@ -431,7 +431,7 @@ func (p *Pollard) undoDels(dels []uint64, delHashes []Hash) error {
 	for i := len(pnps) - 1; i >= 0; i-- {
 		pnp := pnps[i]
 
-		if isRootPosition(pnp.pos, p.NumLeaves, treeRows(p.NumLeaves)) {
+		if isRootPosition(pnp.pos, p.NumLeaves) {
 			tree, _, _, err := detectOffset(pnp.pos, p.NumLeaves)
 			if err != nil {
 				return err
