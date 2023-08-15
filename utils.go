@@ -106,20 +106,42 @@ func rootPosition(leaves uint64, h, forestRows uint8) uint64 {
 	return shifted & mask
 }
 
+// isRootPositionTotalRows is a wrapper around isRootPosition that will translate the given
+// position if needed.
+func isRootPositionTotalRows(position, numLeaves uint64, totalRows uint8) bool {
+	if totalRows != treeRows(numLeaves) {
+		translated := translatePos(position, totalRows, treeRows(numLeaves))
+		return isRootPosition(translated, numLeaves)
+	}
+
+	return isRootPosition(position, numLeaves)
+}
+
 // isRootPosition checks if the current position is a root given the number of
-// leaves and the entire rows of the forest.
+// leaves.
 func isRootPosition(position, numLeaves uint64) bool {
 	row := detectRow(position, treeRows(numLeaves))
 	return isRootPositionOnRow(position, numLeaves, row)
 }
 
-// isRootPosition checks if the current position is a root given the number of
+// isRootPositionOnRow checks if the current position is a root given the number of
 // leaves, current row, and the entire rows of the forest.
 func isRootPositionOnRow(position, numLeaves uint64, row uint8) bool {
 	rootPresent := numLeaves&(1<<row) != 0
 	rootPos := rootPosition(numLeaves, row, treeRows(numLeaves))
 
 	return rootPresent && rootPos == position
+}
+
+// isRootPositionOnRowTotalRows is a wrapper around isRootPositionOnRow that will translate the given
+// position if needed.
+func isRootPositionOnRowTotalRows(position, numLeaves uint64, row, forestRows uint8) bool {
+	if treeRows(numLeaves) != forestRows {
+		translated := translatePos(position, forestRows, treeRows(numLeaves))
+		return isRootPositionOnRow(translated, numLeaves, row)
+	}
+
+	return isRootPositionOnRow(position, numLeaves, row)
 }
 
 // rootExistsOnRow returns whether or not a root exists on the row with the given num leaves.
@@ -503,7 +525,7 @@ func proofPositions(targets []uint64, numLeaves uint64, totalRows uint8) ([]uint
 			break
 		}
 
-		if isRootPositionOnRow(target, numLeaves, row) {
+		if isRootPositionOnRowTotalRows(target, numLeaves, row, totalRows) {
 			continue
 		}
 
