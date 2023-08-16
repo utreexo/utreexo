@@ -10,6 +10,33 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+func TestRootPositions(t *testing.T) {
+	var tests = []struct {
+		numLeaves uint64
+		totalRows uint8
+	}{
+		{numLeaves: 2, totalRows: 50},
+		{numLeaves: 2, totalRows: 1},
+		{numLeaves: 15, totalRows: 50},
+		{numLeaves: 4454546, totalRows: 50},
+		{numLeaves: 4454546, totalRows: treeRows(4454546)},
+		{numLeaves: 111875, totalRows: 50},
+		{numLeaves: 111875, totalRows: treeRows(111875)},
+	}
+
+	for _, test := range tests {
+		roots := rootPositions(test.numLeaves, test.totalRows)
+
+		for i := range roots {
+			root := roots[i]
+			if !isRootPositionTotalRows(root, test.numLeaves, test.totalRows) {
+				t.Errorf("Calculated %d is not a root for numleaves:%d, totalrows:%d",
+					root, test.numLeaves, test.totalRows)
+			}
+		}
+	}
+}
+
 func TestIsRootPositionTotalRows(t *testing.T) {
 	var tests = []struct {
 		position  uint64
