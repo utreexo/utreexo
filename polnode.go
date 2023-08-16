@@ -13,6 +13,11 @@ var empty [32]byte
 // Hash is the 32 byte of a 256 bit hash.
 type Hash [32]byte
 
+// String returns a hex encoded string of the hash.
+func (h Hash) String() string {
+	return hex.EncodeToString(h[:])
+}
+
 // miniHash is the first 12 bytes of a 256 bit hash.
 type miniHash [12]byte
 
