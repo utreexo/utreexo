@@ -540,7 +540,7 @@ func inForest(pos, numLeaves uint64, forestRows uint8) bool {
 // It only works for a singular target and returns only the positions that are needed to
 // prove the given position.
 func proofPosition(target uint64, numLeaves uint64, totalRows uint8) []uint64 {
-	proofs := make([]uint64, 0, totalRows*2)
+	proofs := make([]uint64, 0, totalRows+1)
 
 	pos := target
 	for h := detectRow(target, totalRows); h <= totalRows; h++ {
@@ -557,12 +557,10 @@ func proofPosition(target uint64, numLeaves uint64, totalRows uint8) []uint64 {
 // proofPositions returns all the positions that are needed to prove targets passed in.
 // NOTE: the passed in targets MUST be sorted.
 func proofPositions(targets []uint64, numLeaves uint64, totalRows uint8) ([]uint64, []uint64) {
-	nextTargets := make([]uint64, 0, len(targets))
-	nextTargetsIdx := 0
+	nextTargets := make([]uint64, 0, (len(targets) * int(totalRows+1)))
+	proofPositions := make([]uint64, 0, (len(targets) * int(totalRows+1)))
 
-	proofPositions := make([]uint64, 0, len(targets))
-
-	targetsIdx := 0
+	targetsIdx, nextTargetsIdx := 0, 0
 	for row := uint8(0); row <= totalRows; {
 		target, idx, sibIdx := getNextPos(targets, nextTargets, targetsIdx, nextTargetsIdx)
 		if idx == -1 {
