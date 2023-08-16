@@ -522,6 +522,22 @@ func insertInOrder(dels []uint64, el uint64) []uint64 {
 	return dels
 }
 
+// inForest states whether or not a position can exist within the given num leaves and rows.
+func inForest(pos, numLeaves uint64, forestRows uint8) bool {
+	if pos < numLeaves {
+		return true
+	}
+	marker := uint64(1 << forestRows)
+	mask := (marker << 1) - 1
+	if pos >= mask {
+		return false
+	}
+	for pos&marker != 0 {
+		pos = ((pos << 1) & mask) | 1
+	}
+	return pos < numLeaves
+}
+
 // proofPositions returns all the positions that are needed to prove targets passed in.
 // NOTE: the passed in targets MUST be sorted.
 func proofPositions(targets []uint64, numLeaves uint64, totalRows uint8) ([]uint64, []uint64) {
