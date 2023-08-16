@@ -10,6 +10,50 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+func TestInForest(t *testing.T) {
+	var tests = []struct {
+		position  uint64
+		numLeaves uint64
+		totalRows uint8
+		expect    bool
+	}{
+		{position: 0, numLeaves: 2, totalRows: 50, expect: true},
+		{position: 4, numLeaves: 2, totalRows: 50, expect: false},
+		{position: 5, numLeaves: 2, totalRows: 50, expect: false},
+		{position: 35, numLeaves: 40, totalRows: 50, expect: true},
+		{position: 43, numLeaves: 40, totalRows: 50, expect: false},
+		{position: parent(59, 50), numLeaves: 40, totalRows: 50, expect: false},
+
+		{position: 150_004, numLeaves: 152_121, totalRows: 50, expect: true},
+		{position: 156_004, numLeaves: 152_121, totalRows: 50, expect: false},
+		{position: parent(156_004, 50), numLeaves: 152_121, totalRows: 50, expect: false},
+		{position: parent(parent(156_004, 50), 50), numLeaves: 152_121, totalRows: 50, expect: false},
+	}
+
+	for _, test := range tests {
+		got := inForest(test.position, test.numLeaves, test.totalRows)
+		if test.expect != got {
+			t.Fatalf("Expected %v but got %v for position:%d, numleaves:%d",
+				test.expect, got, test.position, test.numLeaves)
+		}
+
+		// Sanity check.
+		row := detectRow(test.position, test.totalRows)
+		max, err := maxPositionAtRow(row, test.totalRows, test.numLeaves)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got && test.position > max {
+			t.Fatalf("Expected %v but got %v for position:%d, numleaves:%d",
+				false, got, test.position, test.numLeaves)
+		}
+		if !got && test.position <= max {
+			t.Fatalf("Expected %v but got %v for position:%d, numleaves:%d",
+				true, got, test.position, test.numLeaves)
+		}
+	}
+}
+
 func TestRootPositions(t *testing.T) {
 	var tests = []struct {
 		numLeaves uint64
