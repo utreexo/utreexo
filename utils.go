@@ -608,12 +608,13 @@ func proofPositions(targets []uint64, numLeaves uint64, totalRows uint8) ([]uint
 type ToString interface {
 	GetRoots() []Hash
 	GetNumLeaves() uint64
+	GetTreeRows() uint8
 	GetHash(uint64) Hash
 }
 
 // String prints out the whole thing. Only viable for forest that have height of 5 and less.
 func String(ts ToString) string {
-	fh := treeRows(ts.GetNumLeaves())
+	fh := ts.GetTreeRows()
 
 	// The accumulator should be less than 6 rows.
 	if fh > 6 {
