@@ -467,6 +467,17 @@ func translatePos(pos uint64, fromTotalRow, toTotalRow uint8) uint64 {
 	return offset + startPositionAtRow(row, toTotalRow)
 }
 
+// translatePositions allocates and returns what the given slice off position would be in
+// the to total rows.
+func translatePositions(positions []uint64, fromTotalRow, toTotalRow uint8) []uint64 {
+	targets := make([]uint64, len(positions))
+	for i := range positions {
+		targets[i] = translatePos(positions[i], fromTotalRow, toTotalRow)
+	}
+
+	return targets
+}
+
 // deTwin goes through the list of sorted deletions and finds the parent deletions.
 // NOTE The caller MUST sort the dels before passing it into the function.
 //
