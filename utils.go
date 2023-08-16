@@ -106,6 +106,22 @@ func rootPosition(leaves uint64, h, forestRows uint8) uint64 {
 	return shifted & mask
 }
 
+// rootPositions returns all the rootPositions for the given numLeaves and totalRows.
+func rootPositions(numLeaves uint64, totalRows uint8) []uint64 {
+	nRoots := numRoots(numLeaves)
+	rootPositions := make([]uint64, 0, nRoots)
+	for h := int(totalRows); h >= 0; h-- {
+		if !rootExistsOnRow(numLeaves, uint8(h)) {
+			continue
+		}
+
+		rootPos := rootPosition(numLeaves, uint8(h), totalRows)
+		rootPositions = append(rootPositions, rootPos)
+	}
+
+	return rootPositions
+}
+
 // isRootPositionTotalRows is a wrapper around isRootPosition that will translate the given
 // position if needed.
 func isRootPositionTotalRows(position, numLeaves uint64, totalRows uint8) bool {
