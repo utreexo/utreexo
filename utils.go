@@ -316,12 +316,10 @@ func detectRow(position uint64, forestRows uint8) uint8 {
 }
 
 // getLowestRoot returns the row of the lowest root given the number of leaves
-// and the forestRows.
-func getLowestRoot(numLeaves uint64) uint8 {
-	forestRows := treeRows(numLeaves)
-
+// and the total rows.
+func getLowestRoot(numLeaves uint64, totalRows uint8) uint8 {
 	row := uint8(0)
-	for ; row <= forestRows; row++ {
+	for ; row <= totalRows; row++ {
 		rootPresent := numLeaves&(1<<row) != 0
 		if rootPresent {
 			break
