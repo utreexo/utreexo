@@ -538,6 +538,24 @@ func inForest(pos, numLeaves uint64, forestRows uint8) bool {
 	return pos < numLeaves
 }
 
+// proofPosition is a simpler and less memory allocating version of proofPositions.
+// It only works for a singular target and returns only the positions that are needed to
+// prove the given position.
+func proofPosition(target uint64, numLeaves uint64, totalRows uint8) []uint64 {
+	proofs := make([]uint64, 0, totalRows*2)
+
+	pos := target
+	for h := detectRow(target, totalRows); h <= totalRows; h++ {
+		if isRootPositionTotalRows(pos, numLeaves, totalRows) {
+			break
+		}
+		proofs = append(proofs, sibling(pos))
+		pos = parent(pos, totalRows)
+	}
+
+	return proofs
+}
+
 // proofPositions returns all the positions that are needed to prove targets passed in.
 // NOTE: the passed in targets MUST be sorted.
 func proofPositions(targets []uint64, numLeaves uint64, totalRows uint8) ([]uint64, []uint64) {

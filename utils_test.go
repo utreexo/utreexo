@@ -3,12 +3,36 @@ package utreexo
 import (
 	"fmt"
 	"math/rand"
+	"reflect"
 	"sort"
 	"testing"
 	"time"
 
 	"golang.org/x/exp/slices"
 )
+
+func TestProofPosition(t *testing.T) {
+	var tests = []struct {
+		position  uint64
+		numLeaves uint64
+		totalRows uint8
+	}{
+		{numLeaves: 2, totalRows: 50},
+		{numLeaves: 2, totalRows: 1},
+		{numLeaves: 15, totalRows: 50},
+		{numLeaves: 4454546, totalRows: 50},
+	}
+
+	for _, test := range tests {
+		got := proofPosition(test.position, test.numLeaves, test.totalRows)
+		expect, _ := proofPositions([]uint64{test.position}, test.numLeaves, test.totalRows)
+
+		if !reflect.DeepEqual(got, expect) {
+			t.Fatalf("expected %v, got %v for numleaves %d, totalrows %d",
+				expect, got, test.numLeaves, test.totalRows)
+		}
+	}
+}
 
 func TestInForest(t *testing.T) {
 	var tests = []struct {
