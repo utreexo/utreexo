@@ -1538,7 +1538,21 @@ func TestCachedNodesToProve(t *testing.T) {
 					fmt.Println("Successfully fetched all nodes to prove node number:", i)
 				}
 			}
-			fmt.Println()
+
+			// Call the verify function
+			var rememberHashes []Hash
+			for _, idx := range test.rememberIndices {
+				rememberHashes = append(rememberHashes, adds[idx].Hash)
+			}
+			proof, err := p.Prove(rememberHashes)
+			if err != nil {
+				t.Fatalf("Failed to generate proof: %v", err)
+			}
+			err = p.Verify(rememberHashes, proof, false)
+			if err != nil {
+				t.Fatalf("Failed to verify proof: %v", err)
+			}
+			fmt.Println("Successfully verified all the target nodes")
 		})
 	}
 }
