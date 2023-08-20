@@ -1435,3 +1435,110 @@ func TestCachedNodesAfterDelete(t *testing.T) {
 		})
 	}
 }
+
+func TestCachedNodesToProve(t *testing.T) {
+	// Define the test cases as a table.
+	tests := []struct {
+		name            string
+		numAdds         int
+		rememberIndices []int
+	}{
+		{
+			name:            "prove one node",
+			numAdds:         10,
+			rememberIndices: []int{4},
+		},
+		{
+			name:            "prove two nodes",
+			numAdds:         10,
+			rememberIndices: []int{3, 7},
+		},
+		{
+			name:            "prove three nodes",
+			numAdds:         10,
+			rememberIndices: []int{0, 1, 7},
+		},
+		{
+			name:            "prove four nodes",
+			numAdds:         10,
+			rememberIndices: []int{0, 1, 2, 3},
+		},
+		{
+			name:            "prove five nodes",
+			numAdds:         10,
+			rememberIndices: []int{0, 2, 4, 6, 8},
+		},
+		{
+			name:            "prove six nodes",
+			numAdds:         10,
+			rememberIndices: []int{0, 1, 3, 5, 7, 9},
+		},
+		{
+			name:            "prove seven nodes",
+			numAdds:         10,
+			rememberIndices: []int{0, 1, 2, 4, 6, 8, 9},
+		},
+		{
+			name:            "prove eight nodes",
+			numAdds:         10,
+			rememberIndices: []int{0, 1, 2, 3, 5, 6, 8, 9},
+		},
+		{
+			name:            "prove nine nodes",
+			numAdds:         10,
+			rememberIndices: []int{0, 1, 2, 3, 4, 6, 7, 8, 9},
+		},
+		{
+			name:            "prove ten nodes",
+			numAdds:         10,
+			rememberIndices: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Create a new accumulator with 10 leaves.
+			fmt.Println("\nTest case:", test.name)
+
+			adds := make([]Leaf, test.numAdds)
+
+			// Create the accumulator and add the leaves.
+			p := NewAccumulator(false)
+
+			for i := range adds {
+				if contains(test.rememberIndices, i) {
+					adds[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)}), Remember: true}
+				} else {
+					adds[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)})}
+				}
+			}
+
+			err := p.Modify(adds, nil, Proof{})
+			if err != nil {
+				fmt.Println("Failed to add node:", err)
+			}
+
+			fmt.Printf("Merkle tree:\n\n%s\n", p.String())
+
+			// Range through the target nodes (rememberIndices) and for the nodes
+			// fetch their proof nodes and ensure that they exist
+			for _, i := range test.rememberIndices {
+				n, _, _, _ := p.getNode(uint64(i))
+				if n != nil {
+					fmt.Println("Node number:", i)
+					proofNodes, _ := proofPositions([]uint64{uint64(i)}, p.NumLeaves, treeRows(p.NumLeaves))
+
+					// range through proofNodes and fetch them
+					for _, pos := range proofNodes {
+						n, _, _, err := p.getNode(uint64(pos))
+						if n == nil {
+							t.Fatalf("Failed to get node: %v", err)
+						}
+					}
+					fmt.Println("Successfully fetched all nodes to prove node number:", i)
+				}
+			}
+			fmt.Println()
+		})
+	}
+}
