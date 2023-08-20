@@ -1413,16 +1413,15 @@ func TestCachedNodesAfterDelete(t *testing.T) {
 
 			fmt.Printf("Merkle tree after deletion of %d nodes:\n\n%s\n", test.numDels, p.String())
 
-			// Range through adds and for the nodes which are not yet deleted, fetch
-			// their proof nodes and ensure that they exist
-
+			// Range through the target nodes (rememberIndices) and for the nodes
+			// which are not yet deleted, fetch their proof nodes and ensure that they exist
 			for _, i := range test.rememberIndices {
 				n, _, _, _ := p.getNode(uint64(i))
 				if n != nil {
 					fmt.Println("Node number:", i)
 					proofNodes, _ := proofPositions([]uint64{uint64(i)}, p.NumLeaves, treeRows(p.NumLeaves))
 
-					// range through proofNodes
+					// range through proofNodes and fetch them
 					for _, pos := range proofNodes {
 						n, _, _, err := p.getNode(uint64(pos))
 						if n == nil {
