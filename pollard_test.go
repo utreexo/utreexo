@@ -1291,75 +1291,148 @@ func compareNodeMap(mapA, mapB map[miniHash]*polNode) error {
 	return fmt.Errorf(str)
 }
 
-// Test that the cached nodes are correct.
-func TestProofCacheNodes(t *testing.T) {
-
-	// Create a new accumulator with 10 leaves.
-	adds := make([]Leaf, 10)
-	for i := range adds {
-		adds[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)})}
+func TestCachedNodesAfterDelete(t *testing.T) {
+	// Define the test cases as a table.
+	tests := []struct {
+		name            string
+		numAdds         int
+		numDels         int
+		delIndices      []int
+		rememberIndices []int
+	}{
+		{
+			name:            "delete one node",
+			numAdds:         10,
+			numDels:         1,
+			delIndices:      []int{4},
+			rememberIndices: []int{1, 3, 4, 5, 6},
+		},
+		{
+			name:            "delete two nodes",
+			numAdds:         10,
+			numDels:         2,
+			delIndices:      []int{3, 7},
+			rememberIndices: []int{1, 3, 5, 7, 9},
+		},
+		{
+			name:            "delete three nodes",
+			numAdds:         10,
+			numDels:         3,
+			delIndices:      []int{0, 1, 7},
+			rememberIndices: []int{0, 1, 2, 3, 4, 7, 8, 9},
+		},
+		{
+			name:            "delete four nodes",
+			numAdds:         10,
+			numDels:         4,
+			delIndices:      []int{0, 1, 2, 3},
+			rememberIndices: []int{0, 1, 2, 3, 4, 5, 8, 9},
+		},
+		{
+			name:            "delete five nodes",
+			numAdds:         10,
+			numDels:         5,
+			delIndices:      []int{0, 2, 4, 6, 8},
+			rememberIndices: []int{0, 1, 2, 4, 5, 6, 8, 9},
+		},
+		{
+			name:            "delete six nodes",
+			numAdds:         10,
+			numDels:         6,
+			delIndices:      []int{0, 1, 3, 5, 7, 9},
+			rememberIndices: []int{0, 1, 2, 3, 4, 5, 6, 7, 9},
+		},
+		{
+			name:            "delete seven nodes",
+			numAdds:         10,
+			numDels:         7,
+			delIndices:      []int{0, 1, 2, 4, 6, 8, 9},
+			rememberIndices: []int{0, 1, 2, 4, 5, 6, 8, 9},
+		},
+		{
+			name:            "delete eight nodes",
+			numAdds:         10,
+			numDels:         8,
+			delIndices:      []int{0, 1, 2, 3, 5, 6, 8, 9},
+			rememberIndices: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+		},
+		{
+			name:            "delete nine nodes",
+			numAdds:         10,
+			numDels:         9,
+			delIndices:      []int{0, 1, 2, 3, 4, 6, 7, 8, 9},
+			rememberIndices: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+		},
+		{
+			name:            "delete ten nodes",
+			numAdds:         10,
+			numDels:         10,
+			delIndices:      []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+			rememberIndices: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+		},
 	}
 
-	// Create the accumulator and add one leaf at a time.
-	p := NewAccumulator(true)
-	for _, leaf := range adds {
-		err := p.Modify([]Leaf{leaf}, nil, Proof{})
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Create a new accumulator with 10 leaves.
+			fmt.Println("\nTest case:", test.name)
 
-	fmt.Printf("Merkle tree:\n\n%s\n", p.String())
+			adds := make([]Leaf, test.numAdds)
 
-	// Check that the nodes are cached correctly.
-	for i := range adds {
-		fmt.Printf("For node at position: %x\n", i)
-		leaves, _, err := p.getNodesForProof(uint64(i))
-		if err != nil {
-			fmt.Print("hre")
-			fmt.Printf("error: %x\n", i)
-			t.Fatal(err)
-		}
+			// Create the accumulator and add the leaves.
+			p := NewAccumulator(false)
 
-		// Leaf hashes that should be cached ideally
-		cachedLeaves := []Leaf{}
-		for _, leaf := range leaves {
-			if leaf.Remember {
-				cachedLeaves = append(cachedLeaves, leaf)
+			for i := range adds {
+				if contains(test.rememberIndices, i) {
+					adds[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)}), Remember: true}
+				} else {
+					adds[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)})}
+				}
 			}
-		}
-		cachedLeavesHash := []string{}
-		for i := range cachedLeaves {
-			cachedLeavesHash = append(cachedLeavesHash, fmt.Sprintf("%x", cachedLeaves[i].Hash))
-		}
-		fmt.Printf("Hash of leaves that should be cached:\n")
-		fmt.Print(cachedLeavesHash)
 
-		// Leaf hashes that are actually cached
-		proof, err := p.Prove([]Hash{p.getHash(uint64(i))})
-		if err != nil {
-			fmt.Println("Error generating proof:", err)
-			return
-		}
-		var actualCaches []string
-		for _, p := range proof.Proof {
-			var hexString string
-			for _, b := range p {
-				hexString += hex.EncodeToString([]byte{b})
+			err := p.Modify(adds, nil, Proof{})
+			if err != nil {
+				fmt.Println("Failed to add node:", err)
 			}
-			actualCaches = append(actualCaches, hexString)
-		}
-		fmt.Print("\nHash of leaves that are actually cached:\n")
-		fmt.Println(actualCaches)
 
-		// Check that the cached nodes match.
-		for i := range cachedLeavesHash {
-			if cachedLeavesHash[i] != actualCaches[i] {
-				fmt.Printf("Error: cached node %d does not match (expected %s, got %s)\n", i, cachedLeavesHash[i], actualCaches[i])
-				continue
+			fmt.Printf("Merkle tree:\n\n%s\n", p.String())
+
+			// Delete the specified nodes.
+			dels := make([]Hash, test.numDels)
+			for i, idx := range test.delIndices {
+				dels[i] = adds[idx].Hash
 			}
-		}
+			proof, err := p.Prove(dels)
+			if err != nil {
+				t.Fatalf("Failed to generate proof: %v", err)
+			}
+			err = p.Modify(nil, dels, proof)
+			if err != nil {
+				t.Fatalf("Failed to delete nodes: %v", err)
+			}
 
-		fmt.Printf("All cached nodes match for leaf: %x\n\n", i)
+			fmt.Printf("Merkle tree after deletion of %d nodes:\n\n%s\n", test.numDels, p.String())
+
+			// Range through adds and for the nodes which are not yet deleted, fetch
+			// their proof nodes and ensure that they exist
+
+			for _, i := range test.rememberIndices {
+				n, _, _, _ := p.getNode(uint64(i))
+				if n != nil {
+					fmt.Println("Node number:", i)
+					proofNodes, _ := proofPositions([]uint64{uint64(i)}, p.NumLeaves, treeRows(p.NumLeaves))
+
+					// range through proofNodes
+					for _, pos := range proofNodes {
+						n, _, _, err := p.getNode(uint64(pos))
+						if n == nil {
+							t.Fatalf("Failed to get node: %v", err)
+						}
+					}
+					fmt.Println("Successfully fetched all nodes to prove node number:", i)
+				}
+			}
+			fmt.Println()
+		})
 	}
 }

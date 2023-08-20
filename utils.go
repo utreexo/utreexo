@@ -889,3 +889,12 @@ func (p *Pollard) getNodesForProof(position uint64) ([]Leaf, []uint64, error) {
 
 	return leaves, leavesPos, nil
 }
+
+func contains(s []int, x int) bool {
+	for _, v := range s {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
