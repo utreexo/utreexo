@@ -874,22 +874,6 @@ func copySortedFunc[E any](slice []E, less func(a, b E) bool) []E {
 	return sliceCopy
 }
 
-// Get the nodes needed to prove a target leaf.
-func (p *Pollard) getNodesForProof(position uint64) ([]Leaf, []uint64, error) {
-	leaves := []Leaf{}
-	leavesPos, _ := proofPositions([]uint64{position}, p.NumLeaves, treeRows(p.NumLeaves))
-
-	for pos := range leavesPos {
-		node, _, _, err := p.getNode(uint64(pos))
-		if err != nil {
-			return nil, nil, err
-		}
-		leaves = append(leaves, Leaf{Hash: node.data, Remember: node.remember})
-	}
-
-	return leaves, leavesPos, nil
-}
-
 func contains(s []int, x int) bool {
 	for _, v := range s {
 		if v == x {
