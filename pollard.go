@@ -388,7 +388,7 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []
 
 // undoSingleAdd undoes one leaf that was added to the accumulator.
 func (p *Pollard) undoSingleAdd() {
-	lowestRootRow := getLowestRoot(p.NumLeaves)
+	lowestRootRow := getLowestRoot(p.NumLeaves, treeRows(p.NumLeaves))
 	for row := int(lowestRootRow); row >= 0; row-- {
 		lowestRoot := p.Roots[len(p.Roots)-1]
 		p.Roots = p.Roots[:len(p.Roots)-1]
