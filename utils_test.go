@@ -12,6 +12,8 @@ import (
 )
 
 func TestProofPosition(t *testing.T) {
+	t.Parallel()
+
 	var tests = []struct {
 		position  uint64
 		numLeaves uint64
@@ -35,6 +37,8 @@ func TestProofPosition(t *testing.T) {
 }
 
 func TestInForest(t *testing.T) {
+	t.Parallel()
+
 	var tests = []struct {
 		position  uint64
 		numLeaves uint64
@@ -79,6 +83,8 @@ func TestInForest(t *testing.T) {
 }
 
 func TestRootPositions(t *testing.T) {
+	t.Parallel()
+
 	var tests = []struct {
 		numLeaves uint64
 		totalRows uint8
@@ -106,6 +112,8 @@ func TestRootPositions(t *testing.T) {
 }
 
 func TestIsRootPositionTotalRows(t *testing.T) {
+	t.Parallel()
+
 	var tests = []struct {
 		position  uint64
 		numLeaves uint64
@@ -140,6 +148,8 @@ func TestIsRootPositionTotalRows(t *testing.T) {
 }
 
 func TestIsRootPosition(t *testing.T) {
+	t.Parallel()
+
 	var tests = []struct {
 		position  uint64
 		numLeaves uint64

@@ -582,6 +582,8 @@ func FuzzModify(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, startLeaves uint32, modifyAdds uint32, delCount uint32) {
+		t.Parallel()
+
 		p := NewAccumulator(true)
 		fuzzModify(t, &p, startLeaves, modifyAdds, delCount)
 
@@ -666,6 +668,8 @@ func FuzzModifyChain(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
@@ -751,6 +755,8 @@ func FuzzUndo(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, startLeaves uint8, modifyAdds uint8, delCount uint8) {
+		t.Parallel()
+
 		fuzzUndo(t, &Pollard{}, startLeaves, modifyAdds, delCount)
 		fuzzUndo(t, &MapPollard{}, startLeaves, modifyAdds, delCount)
 	})
@@ -935,6 +941,8 @@ func FuzzUndoChain(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
 		// We have to do this because the fuzz will give process hung or
 		// terminated unexpectedly error.
 		if numAdds > 1500 {
@@ -1159,6 +1167,8 @@ func FuzzWriteAndRead(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
 		rand.Seed(seed)
 
 		// simulate blocks with simchain

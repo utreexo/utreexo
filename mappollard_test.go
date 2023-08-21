@@ -231,6 +231,8 @@ func FuzzMapPollardChain(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
@@ -362,6 +364,8 @@ func FuzzMapPollardWriteAndRead(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
 		rand.Seed(seed)
 
 		// simulate blocks with simchain
