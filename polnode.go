@@ -33,6 +33,11 @@ type Leaf struct {
 	Remember bool
 }
 
+// String returns the leaf as a human-readable string.
+func (l Leaf) String() string {
+	return fmt.Sprintf("%s:%v", l.Hash, l.Remember)
+}
+
 // polNode is a node in the pollard.
 type polNode struct {
 	lNiece, rNiece *polNode
