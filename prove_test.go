@@ -131,6 +131,8 @@ func FuzzGetMissingPositions(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, startLeaves uint32, delCount uint32, seed int64) {
+		t.Parallel()
+
 		rand.Seed(seed)
 
 		// It'll error out if we try to delete more than we have. >= since we want
@@ -232,6 +234,8 @@ func FuzzAddProof(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, startLeaves uint32, delCount uint32, seed int64) {
+		t.Parallel()
+
 		rand.Seed(seed)
 
 		// It'll error out if we try to delete more than we have. >= since we want
@@ -331,6 +335,8 @@ func FuzzUpdateProofRemove(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, startLeaves uint32, delCount uint32, seed int64) {
+		t.Parallel()
+
 		rand.Seed(seed)
 
 		// It'll error out if we try to delete more than we have. >= since we want
@@ -483,6 +489,8 @@ func FuzzUpdateProofAdd(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, startLeaves, delCount, addCount uint32, seed int64) {
+		t.Parallel()
+
 		rand.Seed(seed)
 
 		// It'll error out if we try to delete more than we have. >= since we want
@@ -582,6 +590,8 @@ func FuzzModifyProofChain(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
@@ -751,6 +761,8 @@ func FuzzGetProofSubset(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, startLeaves uint32, delCount uint32, seed int64) {
+		t.Parallel()
+
 		rand.Seed(seed)
 
 		// It'll error out if we try to delete more than we have. >= since we want
@@ -874,6 +886,8 @@ func FuzzUndoProofChain(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
@@ -1132,6 +1146,8 @@ func FuzzUndoProof(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, seed int64, startLeaves uint8, modifyAdds uint8, delCount uint8) {
+		t.Parallel()
+
 		rand.Seed(seed)
 		// delCount must be less than the current number of leaves.
 		if delCount > startLeaves {
