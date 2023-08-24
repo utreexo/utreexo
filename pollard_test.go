@@ -1295,80 +1295,80 @@ func TestCachedNodesAfterDelete(t *testing.T) {
 	// Define the test cases as a table.
 	tests := []struct {
 		name            string
-		numAdds         int
+		numAdds         uint64
 		numDels         int
-		delIndices      []int
-		rememberIndices []int
+		delIndices      []uint64
+		rememberIndices []uint64
 	}{
 		{
 			name:            "delete one node",
 			numAdds:         10,
 			numDels:         1,
-			delIndices:      []int{4},
-			rememberIndices: []int{1, 3, 4, 5, 6},
+			delIndices:      []uint64{4},
+			rememberIndices: []uint64{1, 3, 4, 5, 6},
 		},
 		{
 			name:            "delete two nodes",
 			numAdds:         10,
 			numDels:         2,
-			delIndices:      []int{3, 7},
-			rememberIndices: []int{1, 3, 5, 7, 9},
+			delIndices:      []uint64{3, 7},
+			rememberIndices: []uint64{1, 3, 5, 7, 9},
 		},
 		{
 			name:            "delete three nodes",
 			numAdds:         10,
 			numDels:         3,
-			delIndices:      []int{0, 1, 7},
-			rememberIndices: []int{0, 1, 2, 3, 4, 7, 8, 9},
+			delIndices:      []uint64{0, 1, 7},
+			rememberIndices: []uint64{0, 1, 2, 3, 4, 7, 8, 9},
 		},
 		{
 			name:            "delete four nodes",
 			numAdds:         10,
 			numDels:         4,
-			delIndices:      []int{0, 1, 2, 3},
-			rememberIndices: []int{0, 1, 2, 3, 4, 5, 8, 9},
+			delIndices:      []uint64{0, 1, 2, 3},
+			rememberIndices: []uint64{0, 1, 2, 3, 4, 5, 8, 9},
 		},
 		{
 			name:            "delete five nodes",
 			numAdds:         10,
 			numDels:         5,
-			delIndices:      []int{0, 2, 4, 6, 8},
-			rememberIndices: []int{0, 1, 2, 4, 5, 6, 8, 9},
+			delIndices:      []uint64{0, 2, 4, 6, 8},
+			rememberIndices: []uint64{0, 1, 2, 4, 5, 6, 8, 9},
 		},
 		{
 			name:            "delete six nodes",
 			numAdds:         10,
 			numDels:         6,
-			delIndices:      []int{0, 1, 3, 5, 7, 9},
-			rememberIndices: []int{0, 1, 2, 3, 4, 5, 6, 7, 9},
+			delIndices:      []uint64{0, 1, 3, 5, 7, 9},
+			rememberIndices: []uint64{0, 1, 2, 3, 4, 5, 6, 7, 9},
 		},
 		{
 			name:            "delete seven nodes",
 			numAdds:         10,
 			numDels:         7,
-			delIndices:      []int{0, 1, 2, 4, 6, 8, 9},
-			rememberIndices: []int{0, 1, 2, 4, 5, 6, 8, 9},
+			delIndices:      []uint64{0, 1, 2, 4, 6, 8, 9},
+			rememberIndices: []uint64{0, 1, 2, 4, 5, 6, 8, 9},
 		},
 		{
 			name:            "delete eight nodes",
 			numAdds:         10,
 			numDels:         8,
-			delIndices:      []int{0, 1, 2, 3, 5, 6, 8, 9},
-			rememberIndices: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+			delIndices:      []uint64{0, 1, 2, 3, 5, 6, 8, 9},
+			rememberIndices: []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
 		{
 			name:            "delete nine nodes",
 			numAdds:         10,
 			numDels:         9,
-			delIndices:      []int{0, 1, 2, 3, 4, 6, 7, 8, 9},
-			rememberIndices: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+			delIndices:      []uint64{0, 1, 2, 3, 4, 6, 7, 8, 9},
+			rememberIndices: []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
 		{
 			name:            "delete ten nodes",
 			numAdds:         10,
 			numDels:         10,
-			delIndices:      []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
-			rememberIndices: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+			delIndices:      []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+			rememberIndices: []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
 	}
 
@@ -1383,7 +1383,7 @@ func TestCachedNodesAfterDelete(t *testing.T) {
 			p := NewAccumulator(false)
 
 			for i := range adds {
-				if contains(test.rememberIndices, i) {
+				if contains(test.rememberIndices, uint64(i)) {
 					adds[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)}), Remember: true}
 				} else {
 					adds[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)})}
@@ -1416,14 +1416,14 @@ func TestCachedNodesAfterDelete(t *testing.T) {
 			// Range through the target nodes (rememberIndices) and for the nodes
 			// which are not yet deleted, fetch their proof nodes and ensure that they exist
 			for _, i := range test.rememberIndices {
-				n, _, _, _ := p.getNode(uint64(i))
+				n, _, _, _ := p.getNode(i)
 				if n != nil {
 					fmt.Println("Node number:", i)
 					proofNodes, _ := proofPositions([]uint64{uint64(i)}, p.NumLeaves, treeRows(p.NumLeaves))
 
 					// range through proofNodes and fetch them
 					for _, pos := range proofNodes {
-						n, _, _, err := p.getNode(uint64(pos))
+						n, _, _, err := p.getNode(pos)
 						if n == nil {
 							t.Fatalf("Failed to get node: %v", err)
 						}
@@ -1441,57 +1441,57 @@ func TestCachedNodesToProve(t *testing.T) {
 	tests := []struct {
 		name            string
 		numAdds         int
-		rememberIndices []int
+		rememberIndices []uint64
 	}{
 		{
 			name:            "prove one node",
 			numAdds:         10,
-			rememberIndices: []int{4},
+			rememberIndices: []uint64{4},
 		},
 		{
 			name:            "prove two nodes",
 			numAdds:         10,
-			rememberIndices: []int{3, 7},
+			rememberIndices: []uint64{3, 7},
 		},
 		{
 			name:            "prove three nodes",
 			numAdds:         10,
-			rememberIndices: []int{0, 1, 7},
+			rememberIndices: []uint64{0, 1, 7},
 		},
 		{
 			name:            "prove four nodes",
 			numAdds:         10,
-			rememberIndices: []int{0, 1, 2, 3},
+			rememberIndices: []uint64{0, 1, 2, 3},
 		},
 		{
 			name:            "prove five nodes",
 			numAdds:         10,
-			rememberIndices: []int{0, 2, 4, 6, 8},
+			rememberIndices: []uint64{0, 2, 4, 6, 8},
 		},
 		{
 			name:            "prove six nodes",
 			numAdds:         10,
-			rememberIndices: []int{0, 1, 3, 5, 7, 9},
+			rememberIndices: []uint64{0, 1, 3, 5, 7, 9},
 		},
 		{
 			name:            "prove seven nodes",
 			numAdds:         10,
-			rememberIndices: []int{0, 1, 2, 4, 6, 8, 9},
+			rememberIndices: []uint64{0, 1, 2, 4, 6, 8, 9},
 		},
 		{
 			name:            "prove eight nodes",
 			numAdds:         10,
-			rememberIndices: []int{0, 1, 2, 3, 5, 6, 8, 9},
+			rememberIndices: []uint64{0, 1, 2, 3, 5, 6, 8, 9},
 		},
 		{
 			name:            "prove nine nodes",
 			numAdds:         10,
-			rememberIndices: []int{0, 1, 2, 3, 4, 6, 7, 8, 9},
+			rememberIndices: []uint64{0, 1, 2, 3, 4, 6, 7, 8, 9},
 		},
 		{
 			name:            "prove ten nodes",
 			numAdds:         10,
-			rememberIndices: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+			rememberIndices: []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
 		},
 	}
 
@@ -1506,7 +1506,7 @@ func TestCachedNodesToProve(t *testing.T) {
 			p := NewAccumulator(false)
 
 			for i := range adds {
-				if contains(test.rememberIndices, i) {
+				if contains(test.rememberIndices, uint64(i)) {
 					adds[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)}), Remember: true}
 				} else {
 					adds[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)})}
@@ -1523,14 +1523,14 @@ func TestCachedNodesToProve(t *testing.T) {
 			// Range through the target nodes (rememberIndices) and for the nodes
 			// fetch their proof nodes and ensure that they exist
 			for _, i := range test.rememberIndices {
-				n, _, _, _ := p.getNode(uint64(i))
+				n, _, _, _ := p.getNode(i)
 				if n != nil {
 					fmt.Println("Node number:", i)
 					proofNodes, _ := proofPositions([]uint64{uint64(i)}, p.NumLeaves, treeRows(p.NumLeaves))
 
 					// range through proofNodes and fetch them
 					for _, pos := range proofNodes {
-						n, _, _, err := p.getNode(uint64(pos))
+						n, _, _, err := p.getNode(pos)
 						if n == nil {
 							t.Fatalf("Failed to get node: %v", err)
 						}
