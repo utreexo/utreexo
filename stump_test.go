@@ -45,6 +45,8 @@ func FuzzStump(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, startLeaves uint32, modifyAdds uint32, delCount uint32, seed int64) {
+		t.Parallel()
+
 		// Set seed to make sure the test is reproducible.
 		rand.Seed(seed)
 
@@ -145,6 +147,8 @@ func FuzzStumpChain(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 

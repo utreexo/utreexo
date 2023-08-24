@@ -14,6 +14,13 @@ import (
 // Assert that Pollard implements the UtreexoTest interface.
 var _ UtreexoTest = (*Pollard)(nil)
 
+// cachedMapToString returns "n/a" as it's not present in Pollard
+//
+// Implements the UtreexoTest interface.
+func (p *Pollard) cachedMapToString() string {
+	return "n/a"
+}
+
 // nodeMapToString returns the node map as a string.
 //
 // Implements the UtreexoTest interface.
@@ -163,11 +170,14 @@ func testUndo(t *testing.T, utreexo UtreexoTest) {
 		case *Pollard:
 			v := NewAccumulator(true)
 			utreexo = &v
+		case *MapPollard:
+			v := NewMapPollard()
+			utreexo = &v
 		}
 		adds := make([]Leaf, len(test.startAdds))
 		for i := range adds {
 			hash := test.startAdds[i]
-			adds[i] = Leaf{Hash: hash}
+			adds[i] = Leaf{Hash: hash, Remember: true}
 		}
 
 		// Create the initial starting off pollard.
@@ -273,6 +283,7 @@ func TestUndo(t *testing.T) {
 	t.Parallel()
 
 	testUndo(t, &Pollard{})
+	testUndo(t, &MapPollard{})
 }
 
 // checkHashes moves down the tree and calculates the parent hash from the children.
@@ -572,8 +583,13 @@ func FuzzModify(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, startLeaves uint32, modifyAdds uint32, delCount uint32) {
+		t.Parallel()
+
 		p := NewAccumulator(true)
 		fuzzModify(t, &p, startLeaves, modifyAdds, delCount)
+
+		p1 := NewMapPollard()
+		fuzzModify(t, &p1, startLeaves, modifyAdds, delCount)
 	})
 }
 
@@ -590,6 +606,7 @@ func fuzzModify(t *testing.T, p UtreexoTest, startLeaves, modifyAdds, delCount u
 	}
 	beforeStr := p.String()
 	beforeMap := p.nodeMapToString()
+	beforeCached := p.cachedMapToString()
 
 	modifyLeaves, _, _ := getAddsAndDels(uint32(p.GetNumLeaves()), modifyAdds, 0)
 	err = p.Modify(modifyLeaves, delHashes, Proof{Targets: delTargets})
@@ -598,6 +615,7 @@ func fuzzModify(t *testing.T, p UtreexoTest, startLeaves, modifyAdds, delCount u
 	}
 	afterStr := p.String()
 	afterMap := p.nodeMapToString()
+	afterCached := p.cachedMapToString()
 
 	err = p.sanityCheck()
 	if err != nil {
@@ -619,7 +637,9 @@ func fuzzModify(t *testing.T, p UtreexoTest, startLeaves, modifyAdds, delCount u
 			"\nmodifyDels:\n%s"+
 			"\ndel targets:\n %v"+
 			"\nnodemap before modify:\n %s"+
-			"\nnodemap after modify:\n %s",
+			"\nnodemap after modify:\n %s"+
+			"\ncachedmap before modify:\n %s"+
+			"\ncachedmap after modify:\n %s",
 			err,
 			beforeStr,
 			afterStr,
@@ -629,7 +649,9 @@ func fuzzModify(t *testing.T, p UtreexoTest, startLeaves, modifyAdds, delCount u
 			printHashes(delHashes),
 			delTargets,
 			beforeMap,
-			afterMap)
+			afterMap,
+			beforeCached,
+			afterCached)
 		t.Fatal(err)
 	}
 }
@@ -647,6 +669,8 @@ func FuzzModifyChain(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
@@ -732,7 +756,10 @@ func FuzzUndo(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, startLeaves uint8, modifyAdds uint8, delCount uint8) {
+		t.Parallel()
+
 		fuzzUndo(t, &Pollard{}, startLeaves, modifyAdds, delCount)
+		fuzzUndo(t, &MapPollard{}, startLeaves, modifyAdds, delCount)
 	})
 }
 
@@ -746,6 +773,9 @@ func fuzzUndo(t *testing.T, p UtreexoTest, startLeaves uint8, modifyAdds uint8, 
 	switch p.(type) {
 	case *Pollard:
 		v := NewAccumulator(true)
+		p = &v
+	case *MapPollard:
+		v := NewMapPollard()
 		p = &v
 	}
 	// Create the starting off pollard.
@@ -912,15 +942,31 @@ func FuzzUndoChain(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
 		// We have to do this because the fuzz will give process hung or
 		// terminated unexpectedly error.
+		if numAdds > 1500 {
+			return
+		}
 		numBlocks := uint32(100)
-		if numAdds > 500 {
+		if numAdds > 1000 {
+			numBlocks = 20
+		} else if numAdds > 500 {
 			numBlocks = 30
+		} else if numAdds > 100 {
+			numBlocks = 50
 		}
 
-		p := NewAccumulator(true)
-		fuzzUndoChain(t, &p, numBlocks, numAdds, duration, seed)
+		// Only run either or since if we run both the fuzz test will give process
+		// hung or terminated unexpectedly error.
+		if numAdds&1 == 1 {
+			p := NewAccumulator(true)
+			fuzzUndoChain(t, &p, numBlocks, numAdds, duration, seed)
+		} else {
+			p1 := NewMapPollard()
+			fuzzUndoChain(t, &p1, numBlocks, numAdds, duration, seed)
+		}
 	})
 }
 
@@ -1023,6 +1069,11 @@ func fuzzUndoChain(t *testing.T, p UtreexoTest, blockCount, numAdds, duration ui
 			t.Fatal(err)
 		}
 
+		err = p.sanityCheck()
+		if err != nil {
+			t.Fatal(err)
+		}
+
 		// Undo the last 10 modifies and re-do them.
 		if b%10 == 9 {
 			for i := 9; i >= 0; i-- {
@@ -1031,6 +1082,12 @@ func fuzzUndoChain(t *testing.T, p UtreexoTest, blockCount, numAdds, duration ui
 				copy(copyProof.Proof, undoData[i].proof.Proof)
 
 				err := p.Undo(uint64(len(undoData[i].adds)), copyProof, undoData[i].hashes, undoData[i].prevRoots)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				// Sanity check after the undo.
+				err = p.sanityCheck()
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1070,40 +1127,31 @@ func fuzzUndoChain(t *testing.T, p UtreexoTest, blockCount, numAdds, duration ui
 				}
 			}
 
-			// Sanity check after the undos.
-			err = p.sanityCheck()
-			if err != nil {
-				t.Fatal(err)
-			}
-
 			// Undo the undos.
 			for i := 0; i < 10; i++ {
-				adds, delHashes := undoData[i].adds, undoData[i].hashes
+				adds, delHashes, bp := undoData[i].adds, undoData[i].hashes, undoData[i].proof
 
-				bp := undoData[i].proof
-				err = p.Verify(delHashes, bp, true)
-				if err != nil {
-					t.Fatal(err)
+				switch v := p.(type) {
+				case *Pollard:
+				case *MapPollard:
+					v.Ingest(delHashes, bp)
+					err = p.sanityCheck()
+					if err != nil {
+						t.Fatal(err)
+					}
 				}
 				err = p.Modify(adds, delHashes, bp)
 				if err != nil {
 					t.Fatalf("FuzzUndoChain fail at block %d. Error: %v", b, err)
 				}
+				err = p.sanityCheck()
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 
-			// Sanity check after undoing the undos.
-			err = p.sanityCheck()
-			if err != nil {
-				t.Fatal(err)
-			}
 			undoData = undoData[:0]
 		}
-	}
-
-	// Sanity check after it's all finished.
-	err := p.sanityCheck()
-	if err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -1120,6 +1168,8 @@ func FuzzWriteAndRead(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
 		rand.Seed(seed)
 
 		// simulate blocks with simchain
