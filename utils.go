@@ -953,12 +953,3 @@ func copySortedFunc[E any](slice []E, less func(a, b E) bool) []E {
 	slices.SortFunc(sliceCopy, less)
 	return sliceCopy
 }
-
-func contains(s []uint64, x uint64) bool {
-	for _, v := range s {
-		if v == x {
-			return true
-		}
-	}
-	return false
-}
