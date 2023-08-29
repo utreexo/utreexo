@@ -1442,7 +1442,7 @@ func TestCachedNodesAfterDelete(t *testing.T) {
 		for _, i := range test.rememberIndices {
 			n, _, _, _ := p.getNode(i)
 			if n != nil {
-				proofNodes, _ := proofPositions([]uint64{uint64(i)}, p.NumLeaves, treeRows(p.NumLeaves))
+				proofNodes, _ := proofPositions([]uint64{(i)}, p.NumLeaves, treeRows(p.NumLeaves))
 				// range through proofNodes and fetch them
 				for _, pos := range proofNodes {
 					n, _, _, err := p.getNode(pos)
@@ -1490,7 +1490,7 @@ func TestCachedNodesAfterDelete(t *testing.T) {
 		for _, i := range test.rememberIndices {
 			n, _, _, _ := p.getNode(i)
 			if n != nil {
-				proofNodes, _ := proofPositions([]uint64{uint64(i)}, p.NumLeaves, treeRows(p.NumLeaves))
+				proofNodes, _ := proofPositions([]uint64{(i)}, p.NumLeaves, treeRows(p.NumLeaves))
 
 				// range through proofNodes and fetch them
 				for _, pos := range proofNodes {
@@ -1518,7 +1518,7 @@ func TestCachedNodesAfterDelete(t *testing.T) {
 					if err != nil {
 						t.Fatal("Error fetching node", err)
 					}
-					proofNodes, _ := proofPositions([]uint64{uint64(parentPos)}, p.NumLeaves, treeRows(p.NumLeaves))
+					proofNodes, _ := proofPositions([]uint64{(parentPos)}, p.NumLeaves, treeRows(p.NumLeaves))
 					// range through proofNodes and fetch them
 					for _, pos := range proofNodes {
 						n, _, _, err := p.getNode(pos)
