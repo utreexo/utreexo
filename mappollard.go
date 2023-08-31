@@ -664,7 +664,7 @@ func (m *MapPollard) getRootsAfterDel(numAdds uint64, targets, prevRootPos []uin
 // getWrittenOverEmptyRoots returns the positions of the empty roots that have been written
 // over after the addition to the accumulator.
 func (m *MapPollard) getWrittenOverEmptyRoots(numAdds uint64, origTargets []uint64, origPrevRoots []Hash) ([]uint64, error) {
-	prevRootPos := rootPositions(m.NumLeaves-numAdds, m.TotalRows)
+	prevRootPos := RootPositions(m.NumLeaves-numAdds, m.TotalRows)
 
 	// Get the roots after the deletion has happened.
 	prevRoots := m.getRootsAfterDel(numAdds, origTargets, prevRootPos, origPrevRoots)
@@ -886,7 +886,7 @@ func (m *MapPollard) getRoots() ([]Hash, []uint64) {
 	nRoots := numRoots(m.NumLeaves)
 
 	roots := make([]Hash, 0, nRoots)
-	rootPositions := rootPositions(m.NumLeaves, m.TotalRows)
+	rootPositions := RootPositions(m.NumLeaves, m.TotalRows)
 	for _, rootPosition := range rootPositions {
 		node := m.Nodes[rootPosition]
 		roots = append(roots, node.Hash)

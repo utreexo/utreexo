@@ -85,7 +85,7 @@ func (m *MapPollard) checkPruned() error {
 		}
 	}
 
-	for _, pos := range rootPositions(m.NumLeaves, m.TotalRows) {
+	for _, pos := range RootPositions(m.NumLeaves, m.TotalRows) {
 		neededPos[pos] = struct{}{}
 	}
 
