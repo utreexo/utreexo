@@ -106,8 +106,8 @@ func rootPosition(leaves uint64, h, forestRows uint8) uint64 {
 	return shifted & mask
 }
 
-// rootPositions returns all the rootPositions for the given numLeaves and totalRows.
-func rootPositions(numLeaves uint64, totalRows uint8) []uint64 {
+// RootPositions returns all the rootPositions for the given numLeaves and totalRows.
+func RootPositions(numLeaves uint64, totalRows uint8) []uint64 {
 	nRoots := numRoots(numLeaves)
 	rootPositions := make([]uint64, 0, nRoots)
 	for h := int(totalRows); h >= 0; h-- {
