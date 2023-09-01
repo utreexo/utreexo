@@ -99,7 +99,7 @@ func TestRootPositions(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		roots := rootPositions(test.numLeaves, test.totalRows)
+		roots := RootPositions(test.numLeaves, test.totalRows)
 
 		for i := range roots {
 			root := roots[i]
