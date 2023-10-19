@@ -159,7 +159,10 @@ func (m *MapPollard) checkHashes() error {
 	}
 
 	// Check roots.
-	intermediate, gotRoots := calculateHashes(m.NumLeaves, leafHashes, proof)
+	intermediate, gotRoots, err := calculateHashes(m.NumLeaves, leafHashes, proof)
+	if err != nil {
+		return err
+	}
 	if len(gotRoots) != len(rootIndexes) {
 		return fmt.Errorf("expected %d calculated roots but got %d", len(gotRoots), len(rootIndexes))
 	}

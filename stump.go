@@ -77,7 +77,10 @@ func Verify(stump Stump, delHashes []Hash, proof Proof) ([]int, error) {
 			"hashes for those targets", len(proof.Targets), len(delHashes))
 	}
 
-	_, rootCandidates := calculateHashes(stump.NumLeaves, delHashes, proof)
+	_, rootCandidates, err := calculateHashes(stump.NumLeaves, delHashes, proof)
+	if err != nil {
+		return nil, err
+	}
 	rootIndexes := make([]int, 0, len(rootCandidates))
 	for i := range stump.Roots {
 		if len(rootCandidates) > len(rootIndexes) &&
@@ -109,7 +112,10 @@ func (s *Stump) del(delHashes []Hash, proof Proof) ([]Hash, []uint64, error) {
 	}
 
 	// Then calculate the modified roots.
-	intermediate, modifiedRoots := calculateHashes(s.NumLeaves, nil, proof)
+	intermediate, modifiedRoots, err := calculateHashes(s.NumLeaves, nil, proof)
+	if err != nil {
+		return nil, nil, err
+	}
 	if len(modifiedRoots) != len(rootIndexes) {
 		return nil, nil, fmt.Errorf("Stump update fail: expected %d modified roots but got %d",
 			len(rootIndexes), len(modifiedRoots))
