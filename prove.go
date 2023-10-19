@@ -405,7 +405,10 @@ func (p *Pollard) Verify(delHashes []Hash, proof Proof, remember bool) error {
 			len(proof.Targets), len(delHashes))
 	}
 
-	_, rootCandidates := calculateHashes(p.NumLeaves, delHashes, proof)
+	_, rootCandidates, err := calculateHashes(p.NumLeaves, delHashes, proof)
+	if err != nil {
+		return err
+	}
 	if len(rootCandidates) == 0 {
 		return fmt.Errorf("Pollard.Verify fail. No roots calculated "+
 			"but have %d deletions", len(delHashes))
@@ -532,7 +535,7 @@ func getNextPos(slice1, slice2 []uint64, slice1Idx, slice2Idx int) (uint64, int,
 // were used to calculate the roots. Passing nil delHashes will return the
 // hashes of the roots and the nodes used to calculate the roots after the
 // deletion of the targets.
-func calculateHashes(numLeaves uint64, delHashes []Hash, proof Proof) (hashAndPos, []Hash) {
+func calculateHashes(numLeaves uint64, delHashes []Hash, proof Proof) (hashAndPos, []Hash, error) {
 	totalRows := treeRows(numLeaves)
 
 	// Where all the parent hashes we've calculated in a given row will go to.
@@ -595,6 +598,10 @@ func calculateHashes(numLeaves uint64, delHashes []Hash, proof Proof) (hashAndPo
 				nextProvesIdx++
 			}
 		} else {
+			if len(proof.Proof) <= proofHashIdx {
+				return hashAndPos{}, nil, fmt.Errorf("invalid proof. Proof too short.")
+			}
+
 			// If the next prove isn't the sibling of this prove, we fetch
 			// the next proof hash to calculate the parent.
 			sibHash = proof.Proof[proofHashIdx]
@@ -609,7 +616,7 @@ func calculateHashes(numLeaves uint64, delHashes []Hash, proof Proof) (hashAndPo
 	// Add in the targets as well since we need them as well to calculate up
 	// to the roots.
 	nextProves = mergeSortedHashAndPos(nextProves, toProve)
-	return nextProves, calculatedRootHashes
+	return nextProves, calculatedRootHashes, nil
 }
 
 func mergeSortedSlicesFunc[E any](a, b []E, cmp func(E, E) int) (c []E) {
@@ -1216,7 +1223,10 @@ func (p *Proof) undoDel(blockTargets []uint64, blockHashes, cachedHashes []Hash,
 	// Add in the new proofs.
 	proofWithPos = mergeSortedHashAndPos(proofWithPos, newProofs)
 
-	before, _ := calculateHashes(numLeaves, blockHashes, blockProof)
+	before, _, err := calculateHashes(numLeaves, blockHashes, blockProof)
+	if err != nil {
+		return nil, err
+	}
 	beforeIdx := 0
 
 	// Replace the proof hashes with the before hashes. This is needed
@@ -1269,7 +1279,10 @@ func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64
 
 	// calculateHashes provides us with all the intermediate calculated nodes in the tree.
 	// Need to sort the returned positions and hashes as they aren't sorted.
-	posAndHashes, _ := calculateHashes(numLeaves, hashes, proof)
+	posAndHashes, _, err := calculateHashes(numLeaves, hashes, proof)
+	if err != nil {
+		return nil, Proof{}, err
+	}
 	sort.Sort(posAndHashes)
 
 	// Put positions onto the proof hashes.

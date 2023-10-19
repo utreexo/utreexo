@@ -258,8 +258,11 @@ func checkUpdateData(updateData UpdateData, adds, delHashes, prevRoots []Hash, p
 	}
 
 	// Calculate the modified roots after the remove.
-	intermediate, roots := calculateHashes(updateData.PrevNumLeaves,
+	intermediate, roots, err := calculateHashes(updateData.PrevNumLeaves,
 		targetsWithHash.hashes, Proof{targetsWithHash.positions, proofWithPositions.hashes})
+	if err != nil {
+		return err
+	}
 
 	// Check that the intermidate hashes and positions are the same.
 	if !reflect.DeepEqual(intermediate, hashAndPos{updateData.NewDelPos, updateData.NewDelHash}) {

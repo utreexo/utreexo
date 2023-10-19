@@ -414,7 +414,10 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		cachedTargetsAndHash = subtractSortedHashAndPos(cachedTargetsAndHash, blockDelTargetsAndHash.positions, uint64Cmp)
 
 		// Update the cached proof with the block proof.
-		updated, _ := calculateHashes(p.NumLeaves, nil, blockProof)
+		updated, _, err := calculateHashes(p.NumLeaves, nil, blockProof)
+		if err != nil {
+			t.Fatal(err)
+		}
 		leafSubset.hashes = cachedProof.updateProofRemove(blockProof.Targets, leafSubset.hashes, updated, p.NumLeaves)
 
 		// Modify the pollard.

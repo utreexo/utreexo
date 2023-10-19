@@ -608,7 +608,10 @@ func (m *MapPollard) undoDeletion(proof Proof, hashes []Hash) error {
 	}
 
 	// Calculate the previous hashes and their positions and translate them if needed.
-	newhnp, _ := calculateHashes(m.NumLeaves, hashes, proof)
+	newhnp, _, err := calculateHashes(m.NumLeaves, hashes, proof)
+	if err != nil {
+		return err
+	}
 	if treeRows(m.NumLeaves) != m.TotalRows {
 		newhnp.positions = translatePositions(newhnp.positions, treeRows(m.NumLeaves), m.TotalRows)
 		sort.Sort(newhnp)
@@ -833,7 +836,7 @@ func (m *MapPollard) trimProofPos(proofPos []uint64, numLeaves uint64) []uint64 
 //
 // NOTE: there's no verification done that the passed in proof is valid. It's the
 // caller's responsibility to verify that the given proof is valid.
-func (m *MapPollard) Ingest(delHashes []Hash, proof Proof) {
+func (m *MapPollard) Ingest(delHashes []Hash, proof Proof) error {
 	hnp := toHashAndPos(proof.Targets, delHashes)
 	if m.TotalRows != treeRows(m.NumLeaves) {
 		hnp.positions = translatePositions(hnp.positions, treeRows(m.NumLeaves), m.TotalRows)
@@ -853,7 +856,10 @@ func (m *MapPollard) Ingest(delHashes []Hash, proof Proof) {
 	}
 
 	// Calculate the intermediate positions and their hashes.
-	intermediate, _ := calculateHashes(m.NumLeaves, delHashes, proof)
+	intermediate, _, err := calculateHashes(m.NumLeaves, delHashes, proof)
+	if err != nil {
+		return err
+	}
 	if m.TotalRows != treeRows(m.NumLeaves) {
 		intermediate.positions = translatePositions(intermediate.positions, treeRows(m.NumLeaves), m.TotalRows)
 		sort.Sort(intermediate)
@@ -873,6 +879,8 @@ func (m *MapPollard) Ingest(delHashes []Hash, proof Proof) {
 			m.CachedLeaves[intermediate.hashes[i]] = pos
 		}
 	}
+
+	return nil
 }
 
 // getRoots returns the hashes of the roots.
