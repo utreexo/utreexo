@@ -7,6 +7,8 @@ import (
 	"math/rand"
 	"reflect"
 	"testing"
+
+	"golang.org/x/exp/slices"
 )
 
 // Assert that MapPollard implements the UtreexoTest interface.
@@ -424,6 +426,103 @@ func FuzzMapPollardWriteAndRead(f *testing.F) {
 		err = m1.checkHashes()
 		if err != nil {
 			t.Fatal(err)
+		}
+	})
+}
+
+func FuzzMapPollardPrune(f *testing.F) {
+	var tests = []struct {
+		startLeaves uint32
+		modifyAdds  uint32
+		delCount    uint32
+	}{
+		{3, 4, 1},
+	}
+	for _, test := range tests {
+		f.Add(test.startLeaves, test.modifyAdds, test.delCount)
+	}
+
+	f.Fuzz(func(t *testing.T, startLeaves uint32, modifyAdds uint32, delCount uint32) {
+		t.Parallel()
+
+		// delCount must be less than the current number of leaves.
+		if delCount >= startLeaves {
+			return
+		}
+
+		// Boilerplate for generating a pollard.
+		leaves, delHashes, _ := getAddsAndDels(0, startLeaves, delCount)
+		acc := NewMapPollard()
+		err := acc.Modify(leaves, nil, Proof{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		proof, err := acc.Prove(delHashes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		modifyLeaves, _, _ := getAddsAndDels(uint32(acc.GetNumLeaves()), modifyAdds, 0)
+		err = acc.Modify(modifyLeaves, delHashes, proof)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Return now since we don't have anything to prune.
+		if len(acc.CachedLeaves) == 0 {
+			return
+		}
+
+		// Randomly choose targets to prune.
+		count := rand.Intn(len(acc.CachedLeaves))
+		prunedPositions := make([]uint64, 0, count)
+		targets := make([]uint64, 0, len(acc.CachedLeaves))
+
+		toPrune := make([]Hash, 0, count)
+		notPruned := make([]Hash, 0, len(acc.CachedLeaves)-count)
+		for k, v := range acc.CachedLeaves {
+			if len(toPrune) >= count {
+				targets = append(targets, v)
+				notPruned = append(notPruned, k)
+				continue
+			}
+			if rand.Int()%2 == 0 {
+				toPrune = append(toPrune, k)
+				prunedPositions = append(prunedPositions, v)
+			} else {
+				targets = append(targets, v)
+				notPruned = append(notPruned, k)
+			}
+		}
+		slices.Sort(targets)
+		slices.Sort(prunedPositions)
+
+		// Calculate the nodes that should not exist after the prune.
+		shouldNotExist, _ := proofPositions(prunedPositions, acc.NumLeaves, acc.TotalRows)
+		exist, _ := proofPositions(targets, acc.NumLeaves, acc.TotalRows)
+		shouldNotExist = subtractSortedSlice(shouldNotExist, exist, uint64Cmp)
+
+		// Prune the randomly chosen hashes from the accumulator.
+		err = acc.Prune(toPrune)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Check that the not pruned hashes are able to be proven.
+		proof, err = acc.Prove(notPruned)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = acc.Verify(notPruned, proof, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Check that the positions that should not exist actually don't exist.
+		for _, pos := range shouldNotExist {
+			_, found := acc.Nodes[pos]
+			if found {
+				t.Fatalf("position %d shouldn't exist", pos)
+			}
 		}
 	})
 }

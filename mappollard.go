@@ -98,8 +98,11 @@ func (m *MapPollard) niecesPresent(pos uint64) bool {
 }
 
 // prunePosition prunes the node and its sibling at the given position if:
-// 1: it and its sibling aren't marked as remembered.
-// 2: it or the sibling has no nieces present.
+// 1: the position isn't a root.
+// 2: it and its sibling aren't marked as remembered.
+//
+// NOTE: prunePosition will prune roots as well (needed for undo). The caller
+// must check that roots aren't pruned.
 func (m *MapPollard) prunePosition(pos uint64) {
 	node := m.Nodes[pos]
 	sibNode := m.Nodes[sibling(pos)]
@@ -877,6 +880,41 @@ func (m *MapPollard) Ingest(delHashes []Hash, proof Proof) error {
 		m.Nodes[pos] = Leaf{Hash: intermediate.hashes[i], Remember: remember}
 		if remember {
 			m.CachedLeaves[intermediate.hashes[i]] = pos
+		}
+	}
+
+	return nil
+}
+
+// Prune prunes the passed in hashes and the proofs for them. Will not prune the proof if it's
+// needed for another cached hash.
+func (m *MapPollard) Prune(hashes []Hash) error {
+	for _, hash := range hashes {
+		pos, found := m.CachedLeaves[hash]
+		if !found {
+			continue
+		}
+
+		delete(m.CachedLeaves, hash)
+
+		leaf, found := m.Nodes[pos]
+		if !found {
+			return fmt.Errorf("node map inconsistent as the hash %s was found"+
+				"in the cache but not the node map", leaf.Hash)
+		}
+
+		// Mark the remember field as false and put that leaf in the map.
+		leaf.Remember = false
+		m.Nodes[pos] = leaf
+
+		// Call prune positions until the root.
+		for row := detectRow(pos, m.TotalRows); row <= treeRows(m.NumLeaves); row++ {
+			// Break if we're on a root.
+			if isRootPositionTotalRows(pos, m.NumLeaves, m.TotalRows) {
+				break
+			}
+			m.prunePosition(pos)
+			pos = parent(pos, m.TotalRows)
 		}
 	}
 
