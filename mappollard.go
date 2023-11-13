@@ -848,7 +848,7 @@ func (m *MapPollard) Ingest(delHashes []Hash, proof Proof) error {
 
 	// Calculate and ingest the proof.
 	proofPos, _ := proofPositions(hnp.positions, m.NumLeaves, m.TotalRows)
-	if treeRows(m.NumLeaves) > m.TotalRows {
+	if treeRows(m.NumLeaves) != m.TotalRows && len(proofPos) != len(proof.Proof) {
 		proofPos = m.trimProofPos(proofPos, m.NumLeaves)
 	}
 	for i, pos := range proofPos {
