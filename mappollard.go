@@ -798,6 +798,39 @@ func (m *MapPollard) Prove(proveHashes []Hash) (Proof, error) {
 	return Proof{Targets: origTargets, Proof: hashes}, nil
 }
 
+// GetMissingPositions returns all the missing positions that are needed to verify the given
+// targets.
+func (m *MapPollard) GetMissingPositions(origTargets []uint64) []uint64 {
+	if len(origTargets) == 0 {
+		return []uint64{}
+	}
+	// Sort targets first. Copy to avoid mutating the original.
+	targets := copySortedFunc(origTargets, uint64Less)
+
+	// Generate the positions needed to prove this.
+	proofPos, _ := proofPositions(targets, m.NumLeaves, treeRows(m.NumLeaves))
+	if treeRows(m.NumLeaves) != m.TotalRows {
+		proofPos = translatePositions(proofPos, treeRows(m.NumLeaves), m.TotalRows)
+	}
+
+	// Go through all the proof positions and mark the ones that are missing.
+	missingPositions := make([]uint64, 0, len(proofPos))
+	for i := range proofPos {
+		pos := proofPos[i]
+		_, ok := m.Nodes[pos]
+		if !ok {
+			missingPositions = append(missingPositions, pos)
+		}
+	}
+
+	if treeRows(m.NumLeaves) != m.TotalRows {
+		missingPositions = translatePositions(missingPositions, m.TotalRows, treeRows(m.NumLeaves))
+		missingPositions = m.trimProofPos(missingPositions, m.NumLeaves)
+	}
+
+	return missingPositions
+}
+
 // Verify returns an error if the given proof and the delHashes do not hash up to the stored roots.
 // Passing the remember flag as true will cause the proof to be cached.
 func (m *MapPollard) Verify(delHashes []Hash, proof Proof, remember bool) error {
