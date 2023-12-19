@@ -711,3 +711,139 @@ func TestGetMissingPositions(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifyPartialProof(t *testing.T) {
+	type toProve struct {
+		proveLeafHash []Hash
+		proveTargets  []uint64
+	}
+
+	tests := []struct {
+		mods     []singleModify
+		toProves []toProve
+	}{
+		// Generates an accumulator like so.
+		// Leaves with * appended to it are the ones that
+		// are cached.
+		//
+		// |-----------------------\
+		// 28
+		// |-----------\           |-----------\
+		// 24          25
+		// |-----\     |-----\     |-----\     |-----\
+		// 16*   17    18*   19
+		// |--\  |--\  |--\  |--\  |--\  |--\  |--\  |--\
+		//       02*03       06 07 08
+		{
+			mods: []singleModify{
+				{
+					[]Leaf{
+						{Hash{0, 0xff}, true},
+						{Hash{1, 0xff}, false},
+						{Hash{2, 0xff}, true},
+						{Hash{3, 0xff}, false},
+						{Hash{4, 0xff}, true},
+						{Hash{5, 0xff}, true},
+						{Hash{6, 0xff}, false},
+						{Hash{7, 0xff}, false},
+					},
+					nil,
+				},
+				{
+					[]Leaf{
+						{Hash{8, 0xff}, false},
+					},
+					[]Hash{{4, 0xff}, {0, 0xff}},
+				},
+			},
+
+			toProves: []toProve{
+				{
+					proveLeafHash: []Hash{{7, 0xff}},
+					proveTargets:  []uint64{7},
+				},
+
+				{
+					proveLeafHash: []Hash{{1, 0xff}},
+					proveTargets:  []uint64{16},
+				},
+
+				{
+					proveLeafHash: []Hash{{2, 0xff}},
+					proveTargets:  []uint64{2},
+				},
+			},
+		},
+	}
+
+	genAcc := func(utreexo Utreexo, test []singleModify) error {
+		for _, mod := range test {
+			err := applySingleModify(utreexo, mod.adds, mod.dels)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
+
+	for _, test := range tests {
+		// Create the starting off pollard.
+		p := NewMapPollard()
+
+		// Generate the 2 pollards.
+		err := genAcc(&p, test.mods)
+		if err != nil {
+			t.Fatal(err)
+		}
+		full := NewAccumulator(true)
+		err = genAcc(&full, test.mods)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, toProve := range test.toProves {
+			// Generate the missing positions of the hashes we need to
+			// prove the targets.
+			missing := p.GetMissingPositions(toProve.proveTargets)
+
+			// Grab the missing hashes from the full accumulator.
+			// This simulates another utreexo peer returning the missing hashes
+			// after requesting for them.
+			hashes := make([]Hash, len(missing))
+			for i := range hashes {
+				hashes[i] = full.GetHash(missing[i])
+			}
+
+			cached := true
+			for _, leafHash := range toProve.proveLeafHash {
+				_, found := p.CachedLeaves[leafHash]
+				if !found {
+					cached = false
+				}
+			}
+
+			// Call VerifyPartialProof and make sure that with the given hashes,
+			// we can verify the targets.
+			err = p.VerifyPartialProof(toProve.proveTargets, toProve.proveLeafHash, hashes, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = p.Prove(toProve.proveLeafHash)
+			if !cached && err == nil {
+				t.Fatalf("Shouldn't be able to prove uncached leaf")
+			}
+
+			// Now call with remember as true.
+			err = p.VerifyPartialProof(toProve.proveTargets, toProve.proveLeafHash, hashes, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = p.Prove(toProve.proveLeafHash)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}

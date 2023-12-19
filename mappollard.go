@@ -798,6 +798,47 @@ func (m *MapPollard) Prove(proveHashes []Hash) (Proof, error) {
 	return Proof{Targets: origTargets, Proof: hashes}, nil
 }
 
+// VerifyPartialProof takes partial proof of the targets and attempts to prove their existence.
+// If the remember bool is false, the accumulator is not modified. If it is true, the necessary
+// hashes to prove the targets are cached.
+//
+// NOTE: proofHashes MUST be sorted in relation to their positions in the accumulator.
+func (m *MapPollard) VerifyPartialProof(origTargets []uint64, delHashes, proofHashes []Hash, remember bool) error {
+	// Sort targets first. Copy to avoid mutating the original.
+	targets := copySortedFunc(origTargets, uint64Less)
+
+	// Figure out what hashes at which positions are needed.
+	proofPositions, _ := proofPositions(targets, m.NumLeaves, treeRows(m.NumLeaves))
+
+	// Translate the proof positions if needed.
+	if treeRows(m.NumLeaves) != m.TotalRows {
+		proofPositions = translatePositions(proofPositions, treeRows(m.NumLeaves), m.TotalRows)
+	}
+
+	// Where we'll merge the hashes that we already have with the proofHashes provided.
+	allProofHashes := make([]Hash, 0, len(proofPositions))
+
+	proofHashIdx := 0
+	for _, pos := range proofPositions {
+		hash := m.GetHash(pos)
+		if hash == empty {
+			// We couldn't fetch the hash from the accumulator so it should
+			// be provided in the proofHashes.
+			if len(proofHashes) <= proofHashIdx {
+				return fmt.Errorf("proof too short")
+			}
+			allProofHashes = append(allProofHashes, proofHashes[proofHashIdx])
+			proofHashIdx++
+		} else {
+			// We have the hash so use that instead.
+			allProofHashes = append(allProofHashes, hash)
+		}
+	}
+
+	// Verify the proof we put together.
+	return m.Verify(delHashes, Proof{origTargets, allProofHashes}, remember)
+}
+
 // GetMissingPositions returns all the missing positions that are needed to verify the given
 // targets.
 func (m *MapPollard) GetMissingPositions(origTargets []uint64) []uint64 {
