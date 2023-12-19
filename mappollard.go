@@ -1001,6 +1001,21 @@ func (m *MapPollard) GetStump() Stump {
 	return Stump{Roots: m.GetRoots(), NumLeaves: m.NumLeaves}
 }
 
+// GetLeafHashPositions returns the positions for the given leaf hashes.
+// If the leaf hash doesn't exist or if the leaf hash isn't cached, it'll be the
+// default value of 0.
+func (m *MapPollard) GetLeafHashPositions(hashes []Hash) []uint64 {
+	positions := make([]uint64, len(hashes))
+	for i := range positions {
+		position, found := m.CachedLeaves[hashes[i]]
+		if found {
+			positions[i] = position
+		}
+	}
+
+	return positions
+}
+
 // Write writes the entire pollard to the writer.
 func (m *MapPollard) Write(w io.Writer) (int, error) {
 	totalBytes := 0
