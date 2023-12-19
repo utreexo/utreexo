@@ -526,3 +526,188 @@ func FuzzMapPollardPrune(f *testing.F) {
 		}
 	})
 }
+
+// singleModify is a struct with adds and dels that makes it easier to create mock
+// accumulators for testing purposes.
+type singleModify struct {
+	adds []Leaf
+	dels []Hash
+}
+
+// applySingleModify applies a single modify to the passed in accumulator.
+func applySingleModify(utreexo Utreexo, adds []Leaf, dels []Hash) error {
+	// No leaves means that it's just been created. In that case, don't
+	// add and delete in a single modify as that'll cause an error.
+	if utreexo.GetNumLeaves() == 0 {
+		err := utreexo.Modify(adds, nil, Proof{})
+		if err != nil {
+			return err
+		}
+		proof, err := utreexo.Prove(dels)
+		if err != nil {
+			return err
+		}
+		err = utreexo.Modify(nil, dels, proof)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+	proof, err := utreexo.Prove(dels)
+	if err != nil {
+		return err
+	}
+	err = utreexo.Modify(adds, dels, proof)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func TestGetMissingPositions(t *testing.T) {
+	tests := []struct {
+		mods   []singleModify
+		proves [][]uint64
+	}{
+		// Creates a tree like below.
+		//
+		// |-----------------------\
+		// 28
+		// |-----------\           |-----------\
+		//             25
+		// |-----\     |-----\     |-----\     |-----\
+		// 16
+		// |--\  |--\  |--\  |--\  |--\  |--\  |--\  |--\
+		//       02 03             08
+		{
+			mods: []singleModify{
+				// 1st modify.
+				{
+					[]Leaf{
+						{Hash{1}, true},
+						{Hash{2}, false},
+						{Hash{3}, true},
+						{Hash{4}, false},
+						{Hash{5}, false},
+						{Hash{6}, true},
+						{Hash{7}, false},
+						{Hash{8}, false},
+					},
+					nil,
+				},
+				// 2nd modify.
+				{
+					[]Leaf{
+						{Hash{9}, false},
+					},
+					[]Hash{
+						{6}, {1},
+					},
+				},
+			},
+			proves: [][]uint64{{2}, {8}, {16}, {35}, {2, 19}, {2, 16, 19}},
+		},
+
+		// Creates a tree like below.
+		//
+		// 14
+		// |-----------\
+		//             13
+		// |-----\     |-----\
+		//       09
+		// |--\  |--\  |--\  |--\
+		// 01 02
+		{
+			mods: []singleModify{
+				{
+					[]Leaf{
+						{Hash{1}, true},
+						{Hash{2}, false},
+						{Hash{3}, false},
+						{Hash{4}, false},
+						{Hash{5}, false},
+						{Hash{6}, false},
+						{Hash{7}, false},
+						{Hash{8}, false},
+					},
+					nil,
+				},
+			},
+			proves: [][]uint64{{0}, {1}, {0, 1}, {2}, {5}, {5, 6}},
+		},
+	}
+
+	// Closure for checking that the positions from the GetMissingPositions method
+	// was correct.
+	sanityCheck := func(t *testing.T, p *MapPollard, proves, missing []uint64) {
+		// Check that all the positions can actually exist.
+		for i := range missing {
+			if !inForest(missing[i], p.NumLeaves, treeRows(p.NumLeaves)) {
+				t.Fatalf("pos %d cannot exist in an accumulator with %d leaves",
+					missing[i], p.NumLeaves)
+			}
+		}
+
+		// Translate if needed.
+		if treeRows(p.NumLeaves) != p.TotalRows {
+			missing = translatePositions(missing, treeRows(p.NumLeaves), p.TotalRows)
+		}
+
+		// Check for duplicates and turn the slice into a map for easy lookup.
+		missingMap := make(map[uint64]struct{}, len(missing))
+		for _, elem := range missing {
+			// There might be duplicates if there was some positions that couldn't
+			// exist in the accumulator as they get translated.
+			_, found := missingMap[elem]
+			if found {
+				t.Fatalf("duplicates found in missing positions of %v", missing)
+			}
+			missingMap[elem] = struct{}{}
+		}
+
+		// Calculate the positions actually needed.
+		needs, _ := proofPositions(proves, p.NumLeaves, treeRows(p.NumLeaves))
+		if treeRows(p.NumLeaves) != p.TotalRows {
+			needs = translatePositions(needs, treeRows(p.NumLeaves), p.TotalRows)
+		}
+
+		// Check that the missing positions are indeed missing.
+		for _, need := range needs {
+			if empty == p.GetHash(need) {
+				// It's not in the accumulator so it should be in the
+				// missing map.
+				_, found := missingMap[need]
+				if !found {
+					t.Fatalf("%d was stated as not missing but "+
+						"wasn't found in the accumulator.", need)
+				}
+			} else {
+				// It's in the accumulator so it shouldn't be in the
+				// missing map.
+				_, found := missingMap[need]
+				if found {
+					t.Fatalf("%d was stated as missing but "+
+						"it exists in the accumulator.", need)
+				}
+			}
+		}
+	}
+
+	for i, test := range tests {
+		p := NewMapPollard()
+
+		for _, mod := range test.mods {
+			err := applySingleModify(&p, mod.adds, mod.dels)
+			if err != nil {
+				t.Fatalf("failed modify on %d. %v", i, err)
+			}
+		}
+
+		for _, prove := range test.proves {
+			missing := p.GetMissingPositions(prove)
+			sanityCheck(t, &p, prove, missing)
+		}
+	}
+}
