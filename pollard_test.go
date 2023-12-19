@@ -1339,3 +1339,56 @@ func compareNodeMap(mapA, mapB map[miniHash]*polNode) error {
 
 	return fmt.Errorf(str)
 }
+
+func TestGetLeafPositions(t *testing.T) {
+	tests := []struct {
+		p        Pollard
+		hashes   []Hash
+		expected []uint64
+	}{
+		{
+			p: func() Pollard {
+				p := NewAccumulator(true)
+				leaves := make([]Leaf, 10)
+				for i := range leaves {
+					leaves[i] = Leaf{Hash: Hash{uint8(i + 1)}}
+				}
+				err := p.Modify(leaves, nil, Proof{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return p
+			}(),
+			hashes: []Hash{
+				{1},
+				{2},
+				{3},
+				{4},
+				{5},
+				{6},
+				{7},
+				{8},
+				{9},
+				{10},
+				parentHash(Hash{1}, Hash{2}),
+				parentHash(Hash{3}, Hash{4}),
+				parentHash(Hash{5}, Hash{6}),
+				parentHash(Hash{7}, Hash{8}),
+				parentHash(Hash{9}, Hash{10}),
+				parentHash(parentHash(Hash{1}, Hash{2}), parentHash(Hash{3}, Hash{4})),
+				parentHash(parentHash(Hash{5}, Hash{6}), parentHash(Hash{7}, Hash{8})),
+				parentHash(
+					parentHash(parentHash(Hash{1}, Hash{2}), parentHash(Hash{3}, Hash{4})),
+					parentHash(parentHash(Hash{5}, Hash{6}), parentHash(Hash{7}, Hash{8}))),
+			},
+			expected: []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0, 0, 0, 0, 0, 0},
+		},
+	}
+
+	for _, test := range tests {
+		gotPositions := test.p.GetLeafPositions(test.hashes)
+		if !reflect.DeepEqual(gotPositions, test.expected) {
+			t.Fatalf("expected %v but got %v", test.expected, gotPositions)
+		}
+	}
+}
