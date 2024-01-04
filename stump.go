@@ -3,6 +3,7 @@ package utreexo
 import (
 	"encoding/hex"
 	"fmt"
+	"sort"
 )
 
 // Stump is bare-minimum data required to validate and update changes in the accumulator.
@@ -139,7 +140,7 @@ func (s *Stump) add(adds []Hash) ([]Hash, []uint64, []uint64) {
 	// allDeleted is all the empty roots that get deleted by the additions.
 	allDeleted := rootsToDestory(uint64(len(adds)), s.NumLeaves, s.Roots)
 
-	subTrees := make([]hashAndPos, 0, len(adds))
+	updatedNodes := make(map[Hash]uint64, len(adds))
 	for i, add := range adds {
 		pos := s.NumLeaves
 
@@ -163,7 +164,6 @@ func (s *Stump) add(adds []Hash) ([]Hash, []uint64, []uint64) {
 		// a '1'. If there is a '1', we'll hash the root being added with that root
 		// until we hit a '0'.
 		newRoot := add
-		subTreeUpdated := hashAndPos{}
 		for h := uint8(0); (s.NumLeaves>>h)&1 == 1; h++ {
 			root := s.Roots[len(s.Roots)-1]
 			s.Roots = s.Roots[:len(s.Roots)-1]
@@ -189,33 +189,27 @@ func (s *Stump) add(adds []Hash) ([]Hash, []uint64, []uint64) {
 			// |---\   |---\   |---\
 			// 00  01  02  03  --  --
 			if root != empty {
-				subTreeUpdated.Append(leftSib(pos), root)
-				subTreeUpdated.Append(pos, newRoot)
+				updatedNodes[root] = leftSib(pos)
+				updatedNodes[newRoot] = pos
 
 				// Calculate the hash of the new root and append it.
 				newRoot = parentHash(root, newRoot)
 				pos = parent(pos, afterRows)
 			}
 		}
-		subTreeUpdated.Append(pos, newRoot)
 
-		subTrees = append(subTrees, subTreeUpdated)
 		s.Roots = append(s.Roots, newRoot)
 		s.NumLeaves++
 	}
 
-	updated := hashAndPos{}
-	for i, subTree := range subTrees {
-		// If there are duplicates in the next subtree, skip the current subtree
-		// as all the positions in this subtree will get added in the next subtree.
-		if i+1 < len(subTrees) {
-			duplicates := getHashAndPosHashSubset(subTree, subTrees[i+1].hashes)
-			if duplicates.Len() > 0 {
-				continue
-			}
-		}
-		updated = mergeSortedHashAndPos(updated, subTree)
+	// Turn the map into slices.
+	updated := hashAndPos{make([]uint64, 0, len(updatedNodes)), make([]Hash, 0, len(updatedNodes))}
+	for hash, pos := range updatedNodes {
+		updated.Append(pos, hash)
 	}
+
+	// Sort before returning.
+	sort.Sort(updated)
 
 	return updated.hashes, updated.positions, allDeleted
 }
