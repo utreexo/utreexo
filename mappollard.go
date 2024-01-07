@@ -229,19 +229,25 @@ func (m *MapPollard) moveUpDescendants(position, delPos, numLeaves uint64) error
 	toMoveUp := []uint64{position, sibling(position)}
 	slices.Sort(toMoveUp)
 
-	next := make([]uint64, 0, len(toMoveUp)*2)
 	for h := row; h >= 0; h-- {
+		next := make(map[uint64]struct{}, len(toMoveUp))
 		for i := range toMoveUp {
 			nextChildren, err := m.moveUpNieces(toMoveUp[i], delPos, numLeaves)
 			if err != nil {
 				return err
 			}
 
-			next = mergeSortedSlicesFunc(next, nextChildren, uint64Cmp)
+			for _, child := range nextChildren {
+				next[child] = struct{}{}
+			}
 		}
 
-		toMoveUp = next
-		next = next[:0]
+		n := make([]uint64, 0, len(next))
+		for elem := range next {
+			n = append(n, elem)
+		}
+
+		toMoveUp = n
 	}
 
 	return nil
