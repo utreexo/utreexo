@@ -217,6 +217,17 @@ func (s *Stump) add(adds []Hash) ([]Hash, []uint64, []uint64) {
 // rootsToDestory returns the empty roots that get written over after numAdds
 // amount of leaves have been added.
 func rootsToDestory(numAdds, numLeaves uint64, origRoots []Hash) []uint64 {
+	// Check if there are any empty roots. If there are not, return early.
+	exists := false
+	for _, root := range origRoots {
+		if root == empty {
+			exists = true
+		}
+	}
+	if !exists {
+		return []uint64{}
+	}
+
 	roots := make([]Hash, len(origRoots))
 	copy(roots, origRoots)
 
