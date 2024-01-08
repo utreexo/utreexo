@@ -222,6 +222,7 @@ func rootsToDestory(numAdds, numLeaves uint64, origRoots []Hash) []uint64 {
 	for _, root := range origRoots {
 		if root == empty {
 			exists = true
+			break
 		}
 	}
 	if !exists {
