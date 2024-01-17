@@ -38,7 +38,7 @@ func NewMapPollard() MapPollard {
 	return MapPollard{
 		CachedLeaves: make(map[Hash]uint64),
 		Nodes:        make(map[uint64]Leaf),
-		TotalRows:    50,
+		TotalRows:    63,
 	}
 }
 
