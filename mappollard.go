@@ -1063,6 +1063,20 @@ func (m *MapPollard) GetLeafHashPositions(hashes []Hash) []uint64 {
 	return positions
 }
 
+// NewMapPollardFromRoots returns a new MapPollard initialized with the roots and the
+// numLeaves that was passed in.
+func NewMapPollardFromRoots(rootHashes []Hash, numLeaves uint64) MapPollard {
+	m := NewMapPollard()
+	m.NumLeaves = numLeaves
+
+	rootPositions := RootPositions(m.NumLeaves, m.TotalRows)
+	for i, rootPosition := range rootPositions {
+		m.Nodes[rootPosition] = Leaf{Hash: rootHashes[i]}
+	}
+
+	return m
+}
+
 // Write writes the entire pollard to the writer.
 func (m *MapPollard) Write(w io.Writer) (int, error) {
 	totalBytes := 0
