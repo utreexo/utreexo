@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"sync"
 
 	"golang.org/x/exp/slices"
 )
@@ -15,6 +16,9 @@ var _ Utreexo = (*MapPollard)(nil)
 // MapPollard is an implementation of the utreexo accumulators that supports pollard
 // functionality.
 type MapPollard struct {
+	// rwLock protects the below maps from concurrent accesses.
+	rwLock *sync.RWMutex
+
 	// CachedLeaves are the positions of the leaves that we always have cached.
 	CachedLeaves map[Hash]uint64
 
@@ -36,6 +40,7 @@ type MapPollard struct {
 // pretty printing.
 func NewMapPollard() MapPollard {
 	return MapPollard{
+		rwLock:       new(sync.RWMutex),
 		CachedLeaves: make(map[Hash]uint64),
 		Nodes:        make(map[uint64]Leaf),
 		TotalRows:    63,
@@ -44,6 +49,9 @@ func NewMapPollard() MapPollard {
 
 // Modify takes in the additions and deletions and updates the accumulator accordingly.
 func (m *MapPollard) Modify(adds []Leaf, delHashes []Hash, proof Proof) error {
+	m.rwLock.Lock()
+	defer m.rwLock.Unlock()
+
 	err := m.remove(proof, delHashes)
 	if err != nil {
 		return err
@@ -729,6 +737,9 @@ func (m *MapPollard) undoAdd(numAdds uint64, origTargets []uint64, origPrevRoots
 // Undo will undo the last modify. The numAdds, proof, hashes, MUST be the data from the previous modify.
 // The origPrevRoots MUST be the roots that this Undo will go back to.
 func (m *MapPollard) Undo(numAdds uint64, proof Proof, hashes, origPrevRoots []Hash) error {
+	m.rwLock.Lock()
+	defer m.rwLock.Unlock()
+
 	err := m.undoAdd(numAdds, proof.Targets, origPrevRoots)
 	if err != nil {
 		return err
@@ -757,6 +768,9 @@ func (m *MapPollard) Undo(numAdds uint64, proof Proof, hashes, origPrevRoots []H
 // There may be some leaves that it could prove that's not cached due to the proofs
 // overlapping.
 func (m *MapPollard) Prove(proveHashes []Hash) (Proof, error) {
+	m.rwLock.RLock()
+	defer m.rwLock.RUnlock()
+
 	// Check that the targets are proveable.
 	if !m.cached(proveHashes) {
 		return Proof{}, fmt.Errorf("Cannot prove:\n%s\nas not all of them are cached",
@@ -810,6 +824,9 @@ func (m *MapPollard) Prove(proveHashes []Hash) (Proof, error) {
 //
 // NOTE: proofHashes MUST be sorted in relation to their positions in the accumulator.
 func (m *MapPollard) VerifyPartialProof(origTargets []uint64, delHashes, proofHashes []Hash, remember bool) error {
+	m.rwLock.Lock()
+	defer m.rwLock.Unlock()
+
 	// Sort targets first. Copy to avoid mutating the original.
 	targets := copySortedFunc(origTargets, uint64Less)
 
@@ -826,7 +843,7 @@ func (m *MapPollard) VerifyPartialProof(origTargets []uint64, delHashes, proofHa
 
 	proofHashIdx := 0
 	for _, pos := range proofPositions {
-		hash := m.GetHash(pos)
+		hash := m.Nodes[pos].Hash
 		if hash == empty {
 			// We couldn't fetch the hash from the accumulator so it should
 			// be provided in the proofHashes.
@@ -842,7 +859,7 @@ func (m *MapPollard) VerifyPartialProof(origTargets []uint64, delHashes, proofHa
 	}
 
 	// Verify the proof we put together.
-	return m.Verify(delHashes, Proof{origTargets, allProofHashes}, remember)
+	return m.verify(delHashes, Proof{origTargets, allProofHashes}, remember)
 }
 
 // GetMissingPositions returns all the missing positions that are needed to verify the given
@@ -851,6 +868,10 @@ func (m *MapPollard) GetMissingPositions(origTargets []uint64) []uint64 {
 	if len(origTargets) == 0 {
 		return []uint64{}
 	}
+
+	m.rwLock.RLock()
+	defer m.rwLock.RUnlock()
+
 	// Sort targets first. Copy to avoid mutating the original.
 	targets := copySortedFunc(origTargets, uint64Less)
 
@@ -881,18 +902,29 @@ func (m *MapPollard) GetMissingPositions(origTargets []uint64) []uint64 {
 // Verify returns an error if the given proof and the delHashes do not hash up to the stored roots.
 // Passing the remember flag as true will cause the proof to be cached.
 func (m *MapPollard) Verify(delHashes []Hash, proof Proof, remember bool) error {
+	m.rwLock.Lock()
+	defer m.rwLock.Unlock()
+
+	return m.verify(delHashes, proof, remember)
+}
+
+// verify returns an error if the given proof and the delHashes do not hash up to the stored roots.
+// Passing the remember flag as true will cause the proof to be cached.
+//
+// This function is different from Verify() in that it's not safe for concurrent access.
+func (m *MapPollard) verify(delHashes []Hash, proof Proof, remember bool) error {
 	if treeRows(m.NumLeaves) != m.TotalRows {
 		proof.Targets = translatePositions(proof.Targets, m.TotalRows, treeRows(m.NumLeaves))
 	}
 
-	s := m.GetStump()
+	s := m.getStump()
 	_, err := Verify(s, delHashes, proof)
 	if err != nil {
 		return err
 	}
 
 	if remember {
-		m.Ingest(delHashes, proof)
+		m.ingest(delHashes, proof)
 	}
 
 	return nil
@@ -920,6 +952,19 @@ func (m *MapPollard) trimProofPos(proofPos []uint64, numLeaves uint64) []uint64 
 // NOTE: there's no verification done that the passed in proof is valid. It's the
 // caller's responsibility to verify that the given proof is valid.
 func (m *MapPollard) Ingest(delHashes []Hash, proof Proof) error {
+	m.rwLock.Lock()
+	defer m.rwLock.Unlock()
+
+	return m.ingest(delHashes, proof)
+}
+
+// Ingest places the proof in the tree and remembers them.
+//
+// NOTE: there's no verification done that the passed in proof is valid. It's the
+// caller's responsibility to verify that the given proof is valid.
+//
+// This function is different from Ingest() in that it's not safe for concurrent access.
+func (m *MapPollard) ingest(delHashes []Hash, proof Proof) error {
 	hnp := toHashAndPos(proof.Targets, delHashes)
 	if m.TotalRows != treeRows(m.NumLeaves) {
 		hnp.positions = translatePositions(hnp.positions, treeRows(m.NumLeaves), m.TotalRows)
@@ -969,6 +1014,9 @@ func (m *MapPollard) Ingest(delHashes []Hash, proof Proof) error {
 // Prune prunes the passed in hashes and the proofs for them. Will not prune the proof if it's
 // needed for another cached hash.
 func (m *MapPollard) Prune(hashes []Hash) error {
+	m.rwLock.Lock()
+	defer m.rwLock.Unlock()
+
 	for _, hash := range hashes {
 		pos, found := m.CachedLeaves[hash]
 		if !found {
@@ -1003,11 +1051,16 @@ func (m *MapPollard) Prune(hashes []Hash) error {
 
 // getRoots returns the hashes of the roots.
 func (m *MapPollard) GetRoots() []Hash {
+	m.rwLock.RLock()
+	defer m.rwLock.RUnlock()
+
 	roots, _ := m.getRoots()
 	return roots
 }
 
 // getRoots returns the root hashes and their positions.
+//
+// This function is different from GetRoots() in that it's not safe for concurrent access.
 func (m *MapPollard) getRoots() ([]Hash, []uint64) {
 	nRoots := numRoots(m.NumLeaves)
 
@@ -1024,6 +1077,9 @@ func (m *MapPollard) getRoots() ([]Hash, []uint64) {
 // GetHash returns the hash for the given position. Empty hash (all values are 0) is returned
 // if the given position is not cached.
 func (m *MapPollard) GetHash(pos uint64) Hash {
+	m.rwLock.RLock()
+	defer m.rwLock.RUnlock()
+
 	return m.Nodes[pos].Hash
 }
 
@@ -1045,13 +1101,27 @@ func (m *MapPollard) GetTreeRows() uint8 {
 
 // GetStump returns a stump with the values fetched from the pollard.
 func (m *MapPollard) GetStump() Stump {
-	return Stump{Roots: m.GetRoots(), NumLeaves: m.NumLeaves}
+	m.rwLock.RLock()
+	defer m.rwLock.RUnlock()
+
+	return m.getStump()
+}
+
+// getStump returns a stump with the values fetched from the pollard.
+//
+// This function is different from GetStump() in that it's not safe for concurrent access.
+func (m *MapPollard) getStump() Stump {
+	roots, _ := m.getRoots()
+	return Stump{Roots: roots, NumLeaves: m.NumLeaves}
 }
 
 // GetLeafHashPositions returns the positions for the given leaf hashes.
 // If the leaf hash doesn't exist or if the leaf hash isn't cached, it'll be the
 // default value of 0.
 func (m *MapPollard) GetLeafHashPositions(hashes []Hash) []uint64 {
+	m.rwLock.RLock()
+	defer m.rwLock.RUnlock()
+
 	positions := make([]uint64, len(hashes))
 	for i := range positions {
 		position, found := m.CachedLeaves[hashes[i]]
@@ -1065,6 +1135,9 @@ func (m *MapPollard) GetLeafHashPositions(hashes []Hash) []uint64 {
 
 // Write writes the entire pollard to the writer.
 func (m *MapPollard) Write(w io.Writer) (int, error) {
+	m.rwLock.RLock()
+	defer m.rwLock.RUnlock()
+
 	totalBytes := 0
 
 	var buf [8]byte
@@ -1143,6 +1216,9 @@ func (m *MapPollard) Write(w io.Writer) (int, error) {
 
 // Read reads the pollard from the reader into the map pollard variable.
 func (m *MapPollard) Read(r io.Reader) (int, error) {
+	m.rwLock.Lock()
+	defer m.rwLock.Unlock()
+
 	totalBytes := 0
 
 	var buf [8]byte
