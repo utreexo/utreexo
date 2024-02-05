@@ -25,6 +25,8 @@ It allows for a compact representation of a set of elements and supports the fol
 - Prove Elements
 - Verify Merkle Proofs
 
+Detailed writeup with playground links on the 4 operations are available at this [Github Gist](https://gist.github.com/kcalvinalvin/a790d524832e1b7f96a70c642315fffc).
+
 A prover keeps the entire merkle forest and is able to support all 4 operations.
 
 A verifier only keeps the roots of the merkle forest and is not able to support
