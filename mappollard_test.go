@@ -58,7 +58,7 @@ func (m *MapPollard) sanityCheck() error {
 // marked to be remembered.
 func (m *MapPollard) checkCachedNodesAreRemembered() error {
 	return m.CachedLeaves.ForEach(func(k Hash, v uint64) error {
-		leaf, found := m.Nodes[v]
+		leaf, found := m.Nodes.Get(v)
 		if !found {
 			return fmt.Errorf("Cached node of %s at pos %d not cached in m.Nodes", k, v)
 		}
@@ -92,16 +92,16 @@ func (m *MapPollard) checkPruned() error {
 		neededPos[pos] = struct{}{}
 	}
 
-	for k, v := range m.Nodes {
+	return m.Nodes.ForEach(func(k uint64, v Leaf) error {
 		_, found := neededPos[k]
 		if !found {
 			return fmt.Errorf("Have node %s at pos %d in map "+
 				"even though it's not needed.\nCachedLeaves:\n%v\nm.Nodes:\n%v\n",
 				v, k, m.CachedLeaves, m.Nodes)
 		}
-	}
 
-	return nil
+		return nil
+	})
 }
 
 // checkProofNodes checks that all the proof positions needed to cache a proof exists in the map
@@ -109,7 +109,7 @@ func (m *MapPollard) checkPruned() error {
 func (m *MapPollard) checkProofNodes() error {
 	// Sanity check.
 	return m.CachedLeaves.ForEach(func(k Hash, v uint64) error {
-		leaf, found := m.Nodes[v]
+		leaf, found := m.Nodes.Get(v)
 		if !found {
 			return fmt.Errorf("Corrupted pollard. Missing cached leaf %s at %d", k, v)
 		}
@@ -121,7 +121,7 @@ func (m *MapPollard) checkProofNodes() error {
 
 		proofPos := proofPosition(v, m.NumLeaves, m.TotalRows)
 		for _, pos := range proofPos {
-			_, found := m.Nodes[pos]
+			_, found := m.Nodes.Get(pos)
 			if !found {
 				return fmt.Errorf("Corrupted pollard. Missing pos %d "+
 					"needed for proving %d", pos, v)
@@ -181,7 +181,7 @@ func (m *MapPollard) checkHashes() error {
 
 	// Check all intermediate nodes.
 	for i, pos := range intermediate.positions {
-		haveNode, found := m.Nodes[pos]
+		haveNode, found := m.Nodes.Get(pos)
 		if !found {
 			continue
 		}
@@ -524,7 +524,7 @@ func FuzzMapPollardPrune(f *testing.F) {
 
 		// Check that the positions that should not exist actually don't exist.
 		for _, pos := range shouldNotExist {
-			_, found := acc.Nodes[pos]
+			_, found := acc.Nodes.Get(pos)
 			if found {
 				t.Fatalf("position %d shouldn't exist", pos)
 			}
