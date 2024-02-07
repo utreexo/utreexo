@@ -248,7 +248,7 @@ func FuzzMapPollardChain(f *testing.F) {
 		if numAdds&1 == 1 {
 			m.TotalRows = 50
 		}
-		full := NewAccumulator(true)
+		full := NewAccumulator()
 
 		var totalAdds, totalDels int
 		for b := 0; b <= 50; b++ {
@@ -802,7 +802,7 @@ func TestVerifyPartialProof(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		full := NewAccumulator(true)
+		full := NewAccumulator()
 		err = genAcc(&full, test.mods)
 		if err != nil {
 			t.Fatal(err)

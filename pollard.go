@@ -12,7 +12,7 @@ import (
 var _ Utreexo = (*Pollard)(nil)
 
 // Pollard is a representation of the utreexo forest using a collection of
-// binary trees. It may or may not contain the entire set.
+// binary trees. It contains the entire set.
 type Pollard struct {
 	// NodeMap maps hashes to polNodes. Used during proving individual elements
 	// in the accumulator.
@@ -38,18 +38,21 @@ type Pollard struct {
 	// NumDels is the number of all elements that were deleted from the accumulator.
 	NumDels uint64
 
-	// Full indicates that this pollard will keep all the leaves in the accumulator.
+	// full indicates that this pollard will keep all the leaves in the accumulator.
 	// Only Pollards that have the Full value set to true will be able to prove all
 	// the elements.
-	Full bool
+	full bool
 }
 
 // NewAccumulator returns a initialized accumulator. To enable the generating proofs
 // for all elements, set Full to true.
-func NewAccumulator(full bool) Pollard {
+func NewAccumulator() Pollard {
 	var p Pollard
 	p.NodeMap = make(map[miniHash]*polNode)
-	p.Full = full
+
+	// Always set to true for now. Doesn't have to be though, the code just doesn't
+	// support it.
+	p.full = true
 
 	return p
 }
@@ -111,7 +114,7 @@ func (p *Pollard) add(adds []Leaf) {
 		// Create a node from the hash. If the pollard is Full, then remember
 		// every node.
 		node := &polNode{data: add.Hash, remember: add.Remember}
-		if p.Full {
+		if p.full {
 			node.remember = true
 		}
 
@@ -177,7 +180,7 @@ func (p *Pollard) calculateNewRoot(node *polNode) *polNode {
 		nHash := parentHash(root.data, node.data)
 
 		newRoot := &polNode{data: nHash, lNiece: root, rNiece: node}
-		if p.Full {
+		if p.full {
 			newRoot.remember = true
 		}
 
@@ -388,13 +391,13 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []
 	for i, prevRoot := range copyRoots {
 		if prevRoot == empty {
 			for i >= len(p.Roots) {
-				p.Roots = append(p.Roots, &polNode{remember: p.Full})
+				p.Roots = append(p.Roots, &polNode{remember: p.full})
 				continue
 			}
 			if p.Roots[i].data != empty {
 				p.Roots = append(p.Roots, nil)
 				copy(p.Roots[i+1:], p.Roots[i:])
-				p.Roots[i] = &polNode{data: prevRoot, remember: p.Full}
+				p.Roots[i] = &polNode{data: prevRoot, remember: p.full}
 			}
 		}
 	}
@@ -433,7 +436,7 @@ func (p *Pollard) undoDels(dels []uint64, delHashes []Hash) error {
 
 	pnps := make([]nodeAndPos, len(dels))
 	for i := range dels {
-		pn := &polNode{data: delHashes[i], remember: p.Full}
+		pn := &polNode{data: delHashes[i], remember: p.full}
 		pnps[i] = nodeAndPos{pn, dels[i]}
 
 		p.NodeMap[delHashes[i].mini()] = pn
@@ -478,7 +481,7 @@ func (p *Pollard) undoSingleDel(node *polNode, pos uint64) error {
 	}
 
 	pHash := calculateParentHash(pos, node, sibling)
-	parent := &polNode{data: pHash, remember: p.Full}
+	parent := &polNode{data: pHash, remember: p.full}
 
 	// If the original parent of the deleted node is not a root.
 	if sibling.aunt != nil {
@@ -675,7 +678,7 @@ func writeOne(n *polNode, w io.Writer) (int64, error) {
 
 // RestorePollardFrom restores the pollard from the reader.
 func RestorePollardFrom(r io.Reader) (int64, *Pollard, error) {
-	p := NewAccumulator(true)
+	p := NewAccumulator()
 	totalBytes := int64(0)
 
 	// Read numleaves.

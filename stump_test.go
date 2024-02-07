@@ -55,7 +55,7 @@ func FuzzStump(f *testing.F) {
 			return
 		}
 
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		stump := Stump{}
 
 		leaves, delHashes, _ := getAddsAndDels(uint32(p.NumLeaves), startLeaves, delCount)
@@ -152,7 +152,7 @@ func FuzzStumpChain(f *testing.F) {
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		stump := Stump{}
 
 		var totalAdds, totalDels int

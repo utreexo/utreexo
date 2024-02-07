@@ -167,7 +167,7 @@ func testUndo(t *testing.T, utreexo UtreexoTest) {
 	for i, test := range tests {
 		switch utreexo.(type) {
 		case *Pollard:
-			v := NewAccumulator(true)
+			v := NewAccumulator()
 			utreexo = &v
 		case *MapPollard:
 			v := NewMapPollard(false)
@@ -584,7 +584,7 @@ func FuzzModify(f *testing.F) {
 	f.Fuzz(func(t *testing.T, startLeaves uint32, modifyAdds uint32, delCount uint32) {
 		t.Parallel()
 
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		fuzzModify(t, &p, startLeaves, modifyAdds, delCount)
 
 		p1 := NewMapPollard(false)
@@ -673,7 +673,7 @@ func FuzzModifyChain(f *testing.F) {
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		var totalAdds, totalDels int
 		for b := 0; b <= 100; b++ {
 			adds, _, delHashes := sc.NextBlock(numAdds)
@@ -771,7 +771,7 @@ func fuzzUndo(t *testing.T, p UtreexoTest, startLeaves uint8, modifyAdds uint8, 
 	// Create the starting off pollard.
 	switch p.(type) {
 	case *Pollard:
-		v := NewAccumulator(true)
+		v := NewAccumulator()
 		p = &v
 	case *MapPollard:
 		v := NewMapPollard(false)
@@ -960,7 +960,7 @@ func FuzzUndoChain(f *testing.F) {
 		// Only run either or since if we run both the fuzz test will give process
 		// hung or terminated unexpectedly error.
 		if numAdds&1 == 1 {
-			p := NewAccumulator(true)
+			p := NewAccumulator()
 			fuzzUndoChain(t, &p, numBlocks, numAdds, duration, seed)
 		} else {
 			p1 := NewMapPollard(false)
@@ -970,7 +970,7 @@ func FuzzUndoChain(f *testing.F) {
 }
 
 func fuzzUndoChain(t *testing.T, p UtreexoTest, blockCount, numAdds, duration uint32, seed int64) {
-	full := NewAccumulator(true)
+	full := NewAccumulator()
 
 	undoData := []struct {
 		proof     Proof
@@ -1174,7 +1174,7 @@ func FuzzWriteAndRead(f *testing.F) {
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		var totalAdds, totalDels int
 		for b := 0; b <= 100; b++ {
 			adds, _, delHashes := sc.NextBlock(numAdds)
@@ -1348,7 +1348,7 @@ func TestGetLeafPositions(t *testing.T) {
 	}{
 		{
 			p: func() Pollard {
-				p := NewAccumulator(true)
+				p := NewAccumulator()
 				leaves := make([]Leaf, 10)
 				for i := range leaves {
 					leaves[i] = Leaf{Hash: Hash{uint8(i + 1)}}

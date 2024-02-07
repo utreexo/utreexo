@@ -142,7 +142,7 @@ func FuzzGetMissingPositions(f *testing.F) {
 		}
 
 		// Create the starting off pollard.
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		leaves, delHashes, delPos := getAddsAndDels(uint32(p.NumLeaves), startLeaves, delCount)
 		err := p.Modify(leaves, nil, Proof{})
 		if err != nil {
@@ -248,7 +248,7 @@ func FuzzAddProof(f *testing.F) {
 		leaves, delHashes, delPos := getAddsAndDels(0, startLeaves, delCount)
 
 		// Create the starting off pollard.
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		err := p.Modify(leaves, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
@@ -349,7 +349,7 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		leaves, delHashes, delPos := getAddsAndDels(0, startLeaves, delCount)
 
 		// Create the starting off pollard.
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		err := p.Modify(leaves, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
@@ -506,7 +506,7 @@ func FuzzUpdateProofAdd(f *testing.F) {
 		leaves, delHashes, delPos := getAddsAndDels(0, startLeaves, delCount)
 
 		// Create the starting off pollard.
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		err := p.Modify(leaves, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
@@ -598,7 +598,7 @@ func FuzzModifyProofChain(f *testing.F) {
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		stump := Stump{}
 
 		// We'll store the cached utxos here. This would be the equivalent
@@ -778,7 +778,7 @@ func FuzzGetProofSubset(f *testing.F) {
 		leaves, delHashes, delPos := getAddsAndDels(0, startLeaves, delCount)
 
 		// Create the starting off pollard.
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		err := p.Modify(leaves, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
@@ -894,7 +894,7 @@ func FuzzUndoProofChain(f *testing.F) {
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		stump := Stump{}
 
 		undoData := []struct {
@@ -1163,7 +1163,7 @@ func FuzzUndoProof(f *testing.F) {
 		}
 
 		// Create the starting off pollard.
-		p := NewAccumulator(true)
+		p := NewAccumulator()
 		leaves, dels, _ := getAddsAndDels(uint32(p.NumLeaves), uint32(startLeaves), uint32(delCount))
 		err := p.Modify(leaves, nil, Proof{})
 		if err != nil {
