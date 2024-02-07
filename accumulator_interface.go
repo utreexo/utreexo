@@ -25,6 +25,12 @@ type Utreexo interface {
 	// doesn't exist or if the position is not cached.
 	GetHash(position uint64) Hash
 
+	// GetLeafPosition returns the position for the given leaf hash. The boolean returns false if the
+	// hash wasn't found.
+	//
+	// NOTE It always returns false for any non-leaf hashes.
+	GetLeafPosition(Hash) (uint64, bool)
+
 	// GetNumLeaves returns the number of total additions the accumulator has ever had.
 	GetNumLeaves() uint64
 

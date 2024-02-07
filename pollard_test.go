@@ -1340,11 +1340,16 @@ func compareNodeMap(mapA, mapB map[miniHash]*polNode) error {
 	return fmt.Errorf(str)
 }
 
-func TestGetLeafPositions(t *testing.T) {
+func TestGetLeafPosition(t *testing.T) {
+	type expectedRes struct {
+		pos   uint64
+		found bool
+	}
 	tests := []struct {
 		p        Pollard
+		mp       MapPollard
 		hashes   []Hash
-		expected []uint64
+		expected []expectedRes
 	}{
 		{
 			p: func() Pollard {
@@ -1358,6 +1363,18 @@ func TestGetLeafPositions(t *testing.T) {
 					t.Fatal(err)
 				}
 				return p
+			}(),
+			mp: func() MapPollard {
+				mp := NewMapPollard(true)
+				leaves := make([]Leaf, 10)
+				for i := range leaves {
+					leaves[i] = Leaf{Hash: Hash{uint8(i + 1)}}
+				}
+				err := mp.Modify(leaves, nil, Proof{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return mp
 			}(),
 			hashes: []Hash{
 				{1},
@@ -1381,14 +1398,47 @@ func TestGetLeafPositions(t *testing.T) {
 					parentHash(parentHash(Hash{1}, Hash{2}), parentHash(Hash{3}, Hash{4})),
 					parentHash(parentHash(Hash{5}, Hash{6}), parentHash(Hash{7}, Hash{8}))),
 			},
-			expected: []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0, 0, 0, 0, 0, 0},
+			expected: []expectedRes{
+				{0, true},
+				{1, true},
+				{2, true},
+				{3, true},
+				{4, true},
+				{5, true},
+				{6, true},
+				{7, true},
+				{8, true},
+				{9, true},
+				{0, false},
+				{0, false},
+				{0, false},
+				{0, false},
+				{0, false},
+				{0, false},
+				{0, false},
+				{0, false},
+			},
 		},
 	}
 
-	for _, test := range tests {
-		gotPositions := test.p.GetLeafPositions(test.hashes)
-		if !reflect.DeepEqual(gotPositions, test.expected) {
-			t.Fatalf("expected %v but got %v", test.expected, gotPositions)
+	testFn := func(hashes []Hash, expected []expectedRes, utreexo Utreexo) {
+		// Test Pollard.
+		for i, hash := range hashes {
+			gotPosition, found := utreexo.GetLeafPosition(hash)
+			if !found && expected[i].found {
+				t.Fatalf("hash %v wasn't found", hash.String())
+			}
+			if !reflect.DeepEqual(gotPosition, expected[i].pos) {
+				t.Fatalf("expected %v but got %v", expected[i].pos, gotPosition)
+			}
 		}
+	}
+
+	for _, test := range tests {
+		// Test Pollard.
+		testFn(test.hashes, test.expected, &test.p)
+
+		// Test MapPollard.
+		testFn(test.hashes, test.expected, &test.mp)
 	}
 }

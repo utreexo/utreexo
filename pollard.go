@@ -67,20 +67,15 @@ func (p *Pollard) GetTreeRows() uint8 {
 	return treeRows(p.NumLeaves)
 }
 
-// GetPositions returns the positions of the passed in leaf hashes. Any position that wasn't found
-// will be the default of 0.
-//
-// NOTE: only leaves are able to be fetched. Any non-leaf nodes will return as 0.
-func (p *Pollard) GetLeafPositions(hashes []Hash) []uint64 {
-	positions := make([]uint64, len(hashes))
-	for i := range positions {
-		polNode, found := p.NodeMap[hashes[i].mini()]
-		if found {
-			positions[i] = p.calculatePosition(polNode)
-		}
+// GetLeafPosition returns the position of the leaf for the given hash. Returns false if
+// the hash is not the hash of a leaf or if the hash wasn't found in the accumulator.
+func (p *Pollard) GetLeafPosition(hash Hash) (uint64, bool) {
+	polNode, found := p.NodeMap[hash.mini()]
+	if !found {
+		return 0, false
 	}
 
-	return positions
+	return p.calculatePosition(polNode), true
 }
 
 // Modify takes in the additions and deletions and updates the accumulator accordingly.
