@@ -162,18 +162,24 @@ type MapPollard struct {
 
 	// TotalRows is the number of rows the accumulator has allocated for.
 	TotalRows uint8
+
+	// Full marks all the added leaves to be remembered if set to true.
+	Full bool
 }
 
-// NewMapPollard returns a MapPollard with the nodes map initialized.
+// NewMapPollard returns a MapPollard with the nodes map initialized. Passing the
+// full boolean as true will make the map pollard cache all leaves.
+//
 // NOTE: The default total rows is set to 50. This avoids costly remapping.
 // For printing out the pollard for debugging purposes, set TotalRows 0 for
 // pretty printing.
-func NewMapPollard() MapPollard {
+func NewMapPollard(full bool) MapPollard {
 	return MapPollard{
 		rwLock:       new(sync.RWMutex),
 		CachedLeaves: newCachedLeavesMap(),
 		Nodes:        newNodesMap(),
 		TotalRows:    63,
+		Full:         full,
 	}
 }
 
@@ -308,6 +314,11 @@ func (m *MapPollard) addSingle(add Leaf) error {
 	totalRows, err := m.remap()
 	if err != nil {
 		return err
+	}
+
+	// If the map pollard is configured to be full, override the remember value in the leaf.
+	if m.Full {
+		add.Remember = true
 	}
 
 	position := m.NumLeaves
@@ -1271,8 +1282,8 @@ func (m *MapPollard) GetLeafHashPositions(hashes []Hash) []uint64 {
 
 // NewMapPollardFromRoots returns a new MapPollard initialized with the roots and the
 // numLeaves that was passed in.
-func NewMapPollardFromRoots(rootHashes []Hash, numLeaves uint64) MapPollard {
-	m := NewMapPollard()
+func NewMapPollardFromRoots(rootHashes []Hash, numLeaves uint64, full bool) MapPollard {
+	m := NewMapPollard(full)
 	m.NumLeaves = numLeaves
 
 	rootPositions := RootPositions(m.NumLeaves, m.TotalRows)
