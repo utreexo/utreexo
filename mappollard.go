@@ -1230,6 +1230,15 @@ func (m *MapPollard) GetHash(pos uint64) Hash {
 	return leaf.Hash
 }
 
+// GetLeafPosition returns the position of the leaf for the given hash. Returns false if
+// the hash is not the hash of a leaf or if the hash wasn't found in the accumulator.
+func (m *MapPollard) GetLeafPosition(hash Hash) (uint64, bool) {
+	m.rwLock.RLock()
+	defer m.rwLock.RUnlock()
+
+	return m.CachedLeaves.Get(hash)
+}
+
 func (m *MapPollard) highestPos() uint64 {
 	totalRows := treeRows(m.NumLeaves)
 	pos := rootPosition(m.NumLeaves, totalRows, totalRows)
