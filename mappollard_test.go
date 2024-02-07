@@ -2,6 +2,7 @@ package utreexo
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"math/rand"
@@ -243,7 +244,7 @@ func FuzzMapPollardChain(f *testing.F) {
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
-		m := NewMapPollard()
+		m := NewMapPollard(false)
 		if numAdds&1 == 1 {
 			m.TotalRows = 50
 		}
@@ -379,7 +380,7 @@ func FuzzMapPollardWriteAndRead(f *testing.F) {
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
-		m := NewMapPollard()
+		m := NewMapPollard(false)
 		for b := 0; b <= 20; b++ {
 			adds, durations, delHashes := sc.NextBlock(numAdds)
 			for i, duration := range durations {
@@ -414,7 +415,7 @@ func FuzzMapPollardWriteAndRead(f *testing.F) {
 				wroteBytes, len(buf.Bytes()))
 		}
 
-		m1 := NewMapPollard()
+		m1 := NewMapPollard(false)
 
 		// Restore from the buffer.
 		readBytes, err := m1.Read(&buf)
@@ -455,7 +456,7 @@ func FuzzMapPollardPrune(f *testing.F) {
 
 		// Boilerplate for generating a pollard.
 		leaves, delHashes, _ := getAddsAndDels(0, startLeaves, delCount)
-		acc := NewMapPollard()
+		acc := NewMapPollard(false)
 		err := acc.Modify(leaves, nil, Proof{})
 		if err != nil {
 			t.Fatal(err)
@@ -701,7 +702,7 @@ func TestGetMissingPositions(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		p := NewMapPollard()
+		p := NewMapPollard(false)
 
 		for _, mod := range test.mods {
 			err := applySingleModify(&p, mod.adds, mod.dels)
@@ -794,7 +795,7 @@ func TestVerifyPartialProof(t *testing.T) {
 
 	for _, test := range tests {
 		// Create the starting off pollard.
-		p := NewMapPollard()
+		p := NewMapPollard(false)
 
 		// Generate the 2 pollards.
 		err := genAcc(&p, test.mods)
@@ -850,5 +851,57 @@ func TestVerifyPartialProof(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+	}
+}
+
+func TestFullMapPollard(t *testing.T) {
+	// Create elements to add to the accumulator
+	leaves := make([]Leaf, 31)
+	for i := range leaves {
+		leaves[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)}), Remember: false}
+	}
+
+	acc := NewMapPollard(true)
+	err := acc.Modify(leaves, nil, Proof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	acc1 := NewMapPollard(false)
+	err = acc1.Modify(leaves, nil, Proof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	proveHashes := make([]Hash, 3)
+	for i := range proveHashes {
+		proveHashes[i] = leaves[i].Hash
+	}
+	proof, err := acc.Prove(proveHashes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify that it fails with the mappollard that didn't have the full as true.
+	_, err = acc1.Prove(proveHashes)
+	if err == nil {
+		t.Fatalf("expected to fail for a map pollard without the " +
+			"full flag but the error returned nil")
+	}
+
+	// Sanity check with a stump.
+	addHashes := make([]Hash, len(leaves))
+	for i := range leaves {
+		addHashes[i] = leaves[i].Hash
+	}
+	stump := Stump{}
+	_, err = stump.Update(nil, addHashes, Proof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Verify(stump, proveHashes, proof)
+	if err != nil {
+		t.Fatal(err)
 	}
 }

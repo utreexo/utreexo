@@ -170,7 +170,7 @@ func testUndo(t *testing.T, utreexo UtreexoTest) {
 			v := NewAccumulator(true)
 			utreexo = &v
 		case *MapPollard:
-			v := NewMapPollard()
+			v := NewMapPollard(false)
 			utreexo = &v
 		}
 		adds := make([]Leaf, len(test.startAdds))
@@ -587,7 +587,7 @@ func FuzzModify(f *testing.F) {
 		p := NewAccumulator(true)
 		fuzzModify(t, &p, startLeaves, modifyAdds, delCount)
 
-		p1 := NewMapPollard()
+		p1 := NewMapPollard(false)
 		fuzzModify(t, &p1, startLeaves, modifyAdds, delCount)
 	})
 }
@@ -774,7 +774,7 @@ func fuzzUndo(t *testing.T, p UtreexoTest, startLeaves uint8, modifyAdds uint8, 
 		v := NewAccumulator(true)
 		p = &v
 	case *MapPollard:
-		v := NewMapPollard()
+		v := NewMapPollard(false)
 		p = &v
 	}
 	// Create the starting off pollard.
@@ -963,7 +963,7 @@ func FuzzUndoChain(f *testing.F) {
 			p := NewAccumulator(true)
 			fuzzUndoChain(t, &p, numBlocks, numAdds, duration, seed)
 		} else {
-			p1 := NewMapPollard()
+			p1 := NewMapPollard(false)
 			fuzzUndoChain(t, &p1, numBlocks, numAdds, duration, seed)
 		}
 	})
