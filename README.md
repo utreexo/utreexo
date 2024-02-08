@@ -35,7 +35,7 @@ and be able to prove those specific elements.
 
 ```go
 // Prover supports all 4 operations.
-prover := utreexo.NewAccumulator(true)
+prover := utreexo.NewAccumulator()
 
 // Verifer does not support proving elements.
 verifier := utreexo.Stump{}
@@ -48,22 +48,22 @@ cachedProof := utreexo.Proof{}
 
 Add :
 ```go
-data := []string{"utxo1", "utxo2", "utxo3", "utxo4"} 
+data := []string{"utxo1", "utxo2", "utxo3", "utxo4"}
 
 // Hash the data as the accumulator expects []utreexo.Hash (utreexo.Hash is just [32]byte).
 // These hashes are commitments to the elements we're adding.
 hashes := make([]utreexo.Hash, len(data))
 leaves := make([]utreexo.Leaf, len(data))
 for i, d := range data {
-  hash := sha256.Sum256([]byte(d))
-  hashes[i] = hash
-  leaves[i] = utreexo.Leaf{Hash: hash}
+	hash := sha256.Sum256([]byte(d))
+	hashes[i] = hash
+	leaves[i] = utreexo.Leaf{Hash: hash}
 }
 
 // Add the elements to the prover and the verifier.
-prover.Modify(leaves, nil, nil)
+prover.Modify(leaves, nil, utreexo.Proof{})
 
-updateData, _ := verifier.Update(nil, hashes, Proof{})
+updateData, _ := verifier.Update(nil, hashes, utreexo.Proof{})
 
 // If we want to cache the proof for "utxo4", we give the index of the element to cache.
 rememberIndexes := []uint32{3}
@@ -78,14 +78,14 @@ Delete :
 proof, _ := prover.Prove(hashes[:1])
 
 // Delete "utxo1" from the accumulator.
-prover.Modify(nil, hashes[:1], proof.Targets)
+prover.Modify(nil, hashes[:1], proof)
 
 // For the verifier, we need to first verify the proof before updating the state as
 // the prover may give out false proofs.
 _, err := utreexo.Verify(verifier, hashes[:1], proof)
 if err != nil {
-  fmt.Printf("Verify fail for proof %s. Error: %v\n", proof.String(), err)
-  os.Exit(1)
+	fmt.Printf("Verify fail for proof %s. Error: %v\n", proof.String(), err)
+	os.Exit(1)
 }
 
 // If the proof is correct, we can now modify the state of the verifier and delete "utxo1".
