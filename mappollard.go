@@ -355,7 +355,7 @@ func (m *MapPollard) addSingle(add Leaf) error {
 				return err
 			}
 		} else {
-			pNode = Leaf{Hash: parentHash(node.Hash, pNode.Hash)}
+			pNode = Leaf{Hash: parentHash(node.Hash, pNode.Hash), Remember: m.Full}
 		}
 
 		position = parent(position, totalRows)
@@ -535,7 +535,7 @@ func (m *MapPollard) forgetBelow(position uint64) {
 
 // updateHashes updates the hashes of the upper nodes of the given position.
 func (m *MapPollard) updateHashes(position uint64, hash Hash) {
-	node := Leaf{Hash: hash}
+	node := Leaf{Hash: hash, Remember: m.Full}
 
 	pos := parent(position, m.TotalRows)
 	for row := detectRow(pos, m.TotalRows); row <= m.TotalRows; row++ {
@@ -570,7 +570,7 @@ func (m *MapPollard) removeSingle(del uint64) error {
 
 	// If it's a root, then mark it as empty and skip other operations.
 	if isRootPositionTotalRows(del, m.NumLeaves, m.TotalRows) {
-		m.Nodes.Put(del, Leaf{Hash: empty})
+		m.Nodes.Put(del, Leaf{Hash: empty, Remember: m.Full})
 		return nil
 	}
 
@@ -658,6 +658,8 @@ func (m *MapPollard) undoSingleAdd(emptyRootPositions []uint64) ([]uint64, error
 				}
 				emptyRootPositions = emptyRootPositions[1:]
 
+				// This is a root so the remember is set to true
+				// whether or not the pollard is full.
 				m.Nodes.Put(lChild, Leaf{Hash: empty, Remember: true})
 			}
 		}
@@ -696,7 +698,7 @@ func (m *MapPollard) placeEmptyRoot(prevRootPos uint64) error {
 				m.Nodes.Delete(curPos)
 
 				_, cached := m.CachedLeaves.Get(v.Hash)
-				if cached {
+				if cached || m.Full {
 					v.Remember = true
 					m.CachedLeaves.Put(v.Hash, pos)
 				}
@@ -742,7 +744,7 @@ func (m *MapPollard) undoDeletion(proof Proof, hashes []Hash) error {
 		v, found := m.Nodes.Get(sib)
 		if found {
 			_, cached := m.CachedLeaves.Get(v.Hash)
-			if cached {
+			if cached || m.Full {
 				m.CachedLeaves.Put(v.Hash, prevPos)
 				v.Remember = true
 			}
@@ -760,11 +762,24 @@ func (m *MapPollard) undoDeletion(proof Proof, hashes []Hash) error {
 		proofPos = m.trimProofPos(proofPos, m.NumLeaves)
 		proofPos = translatePositions(proofPos, treeRows(m.NumLeaves), m.TotalRows)
 	}
+
+	if len(proofPos) != len(proof.Proof) {
+		if !m.Full {
+			return fmt.Errorf("Can't undo as the passed in proof is not valid and " +
+				"the pollard is not full")
+		}
+
+		// Since we're full, we can just build the proofs.
+		proof.Proof = make([]Hash, len(proofPos))
+	}
+
 	for i := range proofPos {
 		pos := proofPos[i]
-		_, found := m.Nodes.Get(pos)
+		leaf, found := m.Nodes.Get(pos)
 		if !found {
-			m.Nodes.Put(pos, Leaf{Hash: proof.Proof[i]})
+			m.Nodes.Put(pos, Leaf{Hash: proof.Proof[i], Remember: m.Full})
+		} else {
+			proof.Proof[i] = leaf.Hash
 		}
 	}
 
@@ -782,6 +797,9 @@ func (m *MapPollard) undoDeletion(proof Proof, hashes []Hash) error {
 	for i, pos := range newhnp.positions {
 		// If the position is a target, then set the remember to true.
 		remember := false
+		if m.Full {
+			remember = true
+		}
 		for _, target := range proof.Targets {
 			if treeRows(m.NumLeaves) != m.TotalRows {
 				translated := translatePos(target, treeRows(m.NumLeaves), m.TotalRows)
@@ -886,19 +904,19 @@ func (m *MapPollard) Undo(numAdds uint64, proof Proof, hashes, origPrevRoots []H
 
 	err := m.undoAdd(numAdds, proof.Targets, origPrevRoots)
 	if err != nil {
-		return err
+		return fmt.Errorf("Undo errored while undoing added leaves. %v", err)
 	}
 
 	err = m.undoDeletion(proof, hashes)
 	if err != nil {
-		return err
+		return fmt.Errorf("Undo errored while undoing deleted leaves. %v", err)
 	}
 
 	_, rootPos := m.getRoots()
 	for i := range rootPos {
 		var remember bool
 		_, found := m.CachedLeaves.Get(origPrevRoots[i])
-		if found {
+		if found || m.Full {
 			remember = true
 		}
 		m.Nodes.Put(rootPos[i], Leaf{Hash: origPrevRoots[i], Remember: remember})
@@ -1125,7 +1143,9 @@ func (m *MapPollard) ingest(delHashes []Hash, proof Proof) error {
 	for i, pos := range proofPos {
 		_, found := m.Nodes.Get(pos)
 		if !found {
-			m.Nodes.Put(pos, Leaf{Hash: proof.Proof[i]})
+			// This should never happen for full pollards. But mark the node
+			// to be remembered if we're anyways.
+			m.Nodes.Put(pos, Leaf{Hash: proof.Proof[i], Remember: m.Full})
 		}
 	}
 
@@ -1142,6 +1162,9 @@ func (m *MapPollard) ingest(delHashes []Hash, proof Proof) error {
 	// Ingest the targets and the intermediate positions and their hashes.
 	for i, pos := range intermediate.positions {
 		remember := false
+		if m.Full {
+			remember = true
+		}
 		for i := range hnp.positions {
 			if hnp.positions[i] == pos {
 				remember = true
@@ -1160,6 +1183,10 @@ func (m *MapPollard) ingest(delHashes []Hash, proof Proof) error {
 // Prune prunes the passed in hashes and the proofs for them. Will not prune the proof if it's
 // needed for another cached hash.
 func (m *MapPollard) Prune(hashes []Hash) error {
+	if m.Full {
+		return nil
+	}
+
 	m.rwLock.Lock()
 	defer m.rwLock.Unlock()
 
@@ -1297,7 +1324,7 @@ func NewMapPollardFromRoots(rootHashes []Hash, numLeaves uint64, full bool) MapP
 
 	rootPositions := RootPositions(m.NumLeaves, m.TotalRows)
 	for i, rootPosition := range rootPositions {
-		m.Nodes.Put(rootPosition, Leaf{Hash: rootHashes[i]})
+		m.Nodes.Put(rootPosition, Leaf{Hash: rootHashes[i], Remember: m.Full})
 	}
 
 	return m
