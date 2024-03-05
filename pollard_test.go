@@ -1442,3 +1442,73 @@ func TestGetLeafPosition(t *testing.T) {
 		testFn(test.hashes, test.expected, &test.mp)
 	}
 }
+
+func createPollards(full bool, duration uint32, seed int64) (*Pollard, *MapPollard, error) {
+	// simulate blocks with simchain
+	sc := newSimChainWithSeed(duration, seed)
+
+	p := NewAccumulator()
+	mp := NewMapPollard(full)
+	for b := 0; b <= 100; b++ {
+		adds, _, delHashes := sc.NextBlock(7)
+		proof, err := p.Prove(delHashes)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		err = p.Verify(delHashes, proof, false)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		err = mp.Verify(delHashes, proof, false)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		err = p.Modify(adds, delHashes, proof)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		err = mp.Modify(adds, delHashes, proof)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	return &p, &mp, nil
+}
+
+func FuzzGetLeafPosition(f *testing.F) {
+	var tests = []struct {
+		numAdds  uint32
+		duration uint32
+		seed     int64
+	}{
+		{3, 0x07, 0x07},
+	}
+	for _, test := range tests {
+		f.Add(test.numAdds, test.duration, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		p, mp, err := createPollards(true, duration, seed)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, v := range p.NodeMap {
+			expect := p.calculatePosition(v)
+			got, found := mp.GetLeafPosition(v.data)
+			if !found {
+				t.Fatalf("expected to find hash %v in the "+
+					"accumulator but didn't find it", v.data.String())
+			}
+
+			if expect != got {
+				t.Fatalf("expected %v but got %v", expect, got)
+			}
+		}
+	})
+}
