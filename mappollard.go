@@ -1263,7 +1263,16 @@ func (m *MapPollard) GetLeafPosition(hash Hash) (uint64, bool) {
 	m.rwLock.RLock()
 	defer m.rwLock.RUnlock()
 
-	return m.CachedLeaves.Get(hash)
+	pos, found := m.CachedLeaves.Get(hash)
+	if !found {
+		return 0, false
+	}
+
+	if m.TotalRows != treeRows(m.NumLeaves) {
+		pos = translatePos(pos, m.TotalRows, treeRows(m.NumLeaves))
+	}
+
+	return pos, true
 }
 
 func (m *MapPollard) highestPos() uint64 {
