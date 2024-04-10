@@ -429,8 +429,7 @@ func startPositionAtRow(row, forestRows uint8) uint64 {
 	// 2 << forestRows is 2 more than the max poisition
 	// to get the correct offset for a given row,
 	// subtract (2 << `row complement of forestRows`) from (2 << forestRows)
-	offset := (2 << forestRows) - (2 << (forestRows - row))
-	return uint64(offset)
+	return uint64(2<<forestRows) - (2 << (forestRows - row))
 }
 
 // maxPossiblePosAtRow returns the biggest position an accumulator can have for the
