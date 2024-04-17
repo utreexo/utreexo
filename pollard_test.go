@@ -388,6 +388,108 @@ func (p *Pollard) positionSanity() error {
 	return nil
 }
 
+func testModify(t *testing.T, utreexo UtreexoTest) {
+	tests := []struct {
+		mods []singleModify
+	}{
+		// Creates a tree like below. em stands for empty (aka zombie) root.
+		//
+		// |-----------------------------------------------\
+		// em
+		// |-----------------------\                       |-----------------------\
+		//                                                 58
+		// |-----------\           |-----------\           |-----------\           |-----------\
+		//                                                 52          53          54
+		// |-----\     |----\      |-----\     |-----\     |-----\     |-----\     |-----\     |-----\
+		//                                                             42    43    44    45    46
+		// |--\  |--\  |--\  |--\  |--\  |--\  |--\  |--\  |--\  |--\  |--\  |--\  |--\  |--\  |--\  |--\
+		//                                                                               26 27       em
+		{
+			mods: []singleModify{
+				// 1st modify.
+				{
+					[]Leaf{
+						{Hash{1}, true},
+						{Hash{2}, true},
+						{Hash{3}, true},
+						{Hash{4}, true},
+						{Hash{5}, true},
+						{Hash{6}, true},
+						{Hash{7}, true},
+						{Hash{8}, true},
+						{Hash{9}, true},
+						{Hash{10}, true},
+						{Hash{11}, true},
+						{Hash{12}, true},
+						{Hash{13}, true},
+						{Hash{14}, true},
+						{Hash{15}, true},
+						{Hash{16}, true},
+						{Hash{17}, true},
+						{Hash{18}, true},
+						{Hash{19}, true},
+						{Hash{20}, true},
+						{Hash{21}, true},
+						{Hash{22}, false},
+						{Hash{23}, false},
+						{Hash{24}, false},
+						{Hash{25}, true},
+						{Hash{26}, false},
+						{Hash{27}, false},
+						{Hash{28}, false},
+						{Hash{29}, true},
+						{Hash{30}, false},
+						{Hash{31}, true},
+					},
+					[]Hash{
+						// Positions 0-20.
+						{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}, {9}, {10}, {11},
+						{12}, {13}, {14}, {15}, {16}, {17}, {18}, {19}, {20}, {21},
+
+						// 24, 28 and 30.
+						{25}, {29}, {31},
+					},
+				},
+
+				// 2nd modify.
+				{
+					[]Leaf{
+						{Hash{32}, false},
+					},
+					[]Hash{},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		for _, mod := range test.mods {
+			err := applySingleModify(utreexo, mod.adds, mod.dels)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = utreexo.sanityCheck()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+func TestModify(t *testing.T) {
+	t.Parallel()
+
+	acc := NewAccumulator()
+	testModify(t, &acc)
+
+	mp := NewMapPollard(false)
+	testModify(t, &mp)
+
+	mpFull := NewMapPollard(true)
+	testModify(t, &mpFull)
+}
+
 // simChain is for testing; it spits out "blocks" of adds and deletes
 type simChain struct {
 	ttlSlices    [][]Hash
