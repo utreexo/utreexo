@@ -339,6 +339,9 @@ func (m *MapPollard) addSingle(add Leaf) error {
 
 		// If the root is empty, then we move up the current node and all its children.
 		if node.Hash == empty {
+			// This root is overwritten by the add so remove it.
+			m.Nodes.Delete(rootPos)
+
 			// Move up the current node.
 			m.Nodes.Delete(position)
 			if add.Remember && pNode.Hash == add.Hash {
