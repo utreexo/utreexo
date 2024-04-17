@@ -170,7 +170,7 @@ type MapPollard struct {
 // NewMapPollard returns a MapPollard with the nodes map initialized. Passing the
 // full boolean as true will make the map pollard cache all leaves.
 //
-// NOTE: The default total rows is set to 50. This avoids costly remapping.
+// NOTE: The default total rows is set to 63. This avoids costly remapping.
 // For printing out the pollard for debugging purposes, set TotalRows 0 for
 // pretty printing.
 func NewMapPollard(full bool) MapPollard {
