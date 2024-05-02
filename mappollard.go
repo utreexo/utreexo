@@ -1256,6 +1256,9 @@ func (m *MapPollard) GetHash(pos uint64) Hash {
 	m.rwLock.RLock()
 	defer m.rwLock.RUnlock()
 
+	if m.TotalRows != treeRows(m.NumLeaves) {
+		pos = translatePos(pos, treeRows(m.NumLeaves), m.TotalRows)
+	}
 	leaf, _ := m.Nodes.Get(pos)
 	return leaf.Hash
 }
