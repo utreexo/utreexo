@@ -295,12 +295,12 @@ func FuzzAddProof(f *testing.F) {
 		leafHashesC, proofC := AddProof(proofA, proofB, leafSubsetA.hashes, leafSubsetB.hashes, p.NumLeaves)
 
 		// These are the targets that we want to prove.
-		sortedProofATargets := copySortedFunc(proofA.Targets, uint64Less)
-		sortedProofBTargets := copySortedFunc(proofB.Targets, uint64Less)
+		sortedProofATargets := copySortedFunc(proofA.Targets, uint64Cmp)
+		sortedProofBTargets := copySortedFunc(proofB.Targets, uint64Cmp)
 		expectedTargets := mergeSortedSlicesFunc(sortedProofATargets, sortedProofBTargets, uint64Cmp)
 
 		// This is the targets that we got from AddProof.
-		sortedProofCTargets := copySortedFunc(proofC.Targets, uint64Less)
+		sortedProofCTargets := copySortedFunc(proofC.Targets, uint64Cmp)
 
 		// When we subtract the slice, we should get nothing since sortedProofCTargets and expectedTargets should
 		// be the same.
@@ -849,7 +849,7 @@ func FuzzGetProofSubset(f *testing.F) {
 		}
 
 		// Check that all the proves we want are there.
-		expectedEmpty := copySortedFunc(provePositions, uint64Less)
+		expectedEmpty := copySortedFunc(provePositions, uint64Cmp)
 		expectedEmpty = subtractSortedSlice(expectedEmpty, subsetProof.Targets, uint64Cmp)
 		if len(expectedEmpty) > 0 {
 			t.Fatalf("Positions %v did not get proven. All wanted positions: %v",
