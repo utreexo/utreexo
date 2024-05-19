@@ -782,12 +782,12 @@ func AddProof(proofA, proofB Proof, targetHashesA, targetHashesB []Hash, numLeav
 	totalRows := treeRows(numLeaves)
 
 	// Calculate proof hashes for proof A and add positions to the proof hashes.
-	targetsA := copySortedFunc(proofA.Targets, uint64Less)
+	targetsA := copySortedFunc(proofA.Targets, uint64Cmp)
 	proofPosA, calculateableA := proofPositions(targetsA, numLeaves, totalRows)
 	proofAndPosA := hashAndPos{proofPosA, proofA.Proof}
 
 	// Calculate proof hashes for proof B and add positions to the proof hashes.
-	targetsB := copySortedFunc(proofB.Targets, uint64Less)
+	targetsB := copySortedFunc(proofB.Targets, uint64Cmp)
 	proofPosB, calculateableB := proofPositions(targetsB, numLeaves, totalRows)
 	proofAndPosB := hashAndPos{proofPosB, proofB.Proof}
 
@@ -890,12 +890,12 @@ func (p *Proof) updateProofRemove(blockTargets []uint64, cachedHashes []Hash, up
 	totalRows := treeRows(numLeaves)
 
 	// Delete from the target.
-	sortedBlockTargets := copySortedFunc(blockTargets, uint64Less)
+	sortedBlockTargets := copySortedFunc(blockTargets, uint64Cmp)
 	targetsWithHash := toHashAndPos(p.Targets, cachedHashes)
 	targetsWithHash = subtractSortedHashAndPos(targetsWithHash, sortedBlockTargets, uint64Cmp)
 
 	// Attach positions to the proofs.
-	sortedCachedTargets := copySortedFunc(p.Targets, uint64Less)
+	sortedCachedTargets := copySortedFunc(p.Targets, uint64Cmp)
 	proofPos, _ := proofPositions(sortedCachedTargets, numLeaves, totalRows)
 	oldProofs := toHashAndPos(proofPos, p.Proof)
 	newProofs := hashAndPos{make([]uint64, 0, len(p.Proof)), make([]Hash, 0, len(p.Proof))}
@@ -905,7 +905,7 @@ func (p *Proof) updateProofRemove(blockTargets []uint64, cachedHashes []Hash, up
 
 	// Grab the un-needed positions. These are un-needed as they were proofs
 	// for the now deleted targets.
-	extraPos := copySortedFunc(oldProofs.positions, uint64Less)
+	extraPos := copySortedFunc(oldProofs.positions, uint64Cmp)
 	extraPos = subtractSortedSlice(extraPos, neededPos, uint64Cmp)
 
 	// Loop through oldProofs and only add the needed proof hashes.
@@ -933,7 +933,7 @@ func (p *Proof) updateProofRemove(blockTargets []uint64, cachedHashes []Hash, up
 	// Missing positions are the newly needed positions that aren't present in the proof.
 	// These positions are there because they were calculateable before the deletion in the
 	// previous proof.
-	missingPos := copySortedFunc(neededPos, uint64Less)
+	missingPos := copySortedFunc(neededPos, uint64Cmp)
 	missingPos = subtractSortedSlice(missingPos, oldProofs.positions, uint64Cmp)
 	missingPos = subtractSortedSlice(missingPos, sortedBlockTargets, uint64Cmp)
 
@@ -1263,10 +1263,10 @@ func (p *Proof) undoDel(blockTargets []uint64, blockHashes, cachedHashes []Hash,
 // NOTE The returned hashes and proof targets are in the same permutation as the given wants.
 func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64) ([]Hash, Proof, error) {
 	// Copy to avoid mutating the original.
-	proofTargetsCopy := copySortedFunc(proof.Targets, uint64Less)
+	proofTargetsCopy := copySortedFunc(proof.Targets, uint64Cmp)
 
 	// Check that all the targets in removes are also present in the proof.
-	expectedEmpty := copySortedFunc(wants, uint64Less)
+	expectedEmpty := copySortedFunc(wants, uint64Cmp)
 	expectedEmpty = subtractSortedSlice(expectedEmpty, proofTargetsCopy, uint64Cmp)
 	if len(expectedEmpty) > 0 {
 		err := fmt.Errorf("Missing positions %v from the proof. Deletions %v, proof.Targets %v",
@@ -1294,7 +1294,7 @@ func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64
 	posAndHashes = mergeSortedHashAndPos(posAndHashes, proofPos)
 
 	// Copy to avoid mutating the wants.
-	sortedWants := copySortedFunc(wants, uint64Less)
+	sortedWants := copySortedFunc(wants, uint64Cmp)
 	targetHashesWithPos = getHashAndPosSubset(targetHashesWithPos, sortedWants)
 
 	// Grab the positions that we need to prove the wants.

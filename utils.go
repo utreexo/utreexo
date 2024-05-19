@@ -6,9 +6,8 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"slices"
 	"sort"
-
-	"golang.org/x/exp/slices"
 )
 
 // parentHash returns the hash of the left and right hashes passed in.
@@ -945,7 +944,7 @@ func uint64Less(a, b uint64) bool {
 }
 
 // copySortedFunc returns a copy of the slice passed in that's sorted.
-func copySortedFunc[E any](slice []E, less func(a, b E) bool) []E {
+func copySortedFunc[E any](slice []E, less func(a, b E) int) []E {
 	sliceCopy := make([]E, len(slice))
 	copy(sliceCopy, slice)
 
