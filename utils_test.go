@@ -27,7 +27,7 @@ func TestProofPosition(t *testing.T) {
 
 	for _, test := range tests {
 		got := proofPosition(test.position, test.numLeaves, test.totalRows)
-		expect, _ := proofPositions([]uint64{test.position}, test.numLeaves, test.totalRows)
+		expect, _ := ProofPositions([]uint64{test.position}, test.numLeaves, test.totalRows)
 
 		if !reflect.DeepEqual(got, expect) {
 			t.Fatalf("expected %v, got %v for numleaves %d, totalrows %d",

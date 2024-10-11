@@ -78,7 +78,7 @@ func (m *MapPollard) checkPruned() error {
 	m.CachedLeaves.ForEach(func(_ Hash, v uint64) error {
 		neededPos[v] = struct{}{}
 
-		needs, computables := proofPositions([]uint64{v}, m.NumLeaves, m.TotalRows)
+		needs, computables := ProofPositions([]uint64{v}, m.NumLeaves, m.TotalRows)
 		for _, need := range needs {
 			neededPos[need] = struct{}{}
 		}
@@ -503,8 +503,8 @@ func FuzzMapPollardPrune(f *testing.F) {
 		slices.Sort(prunedPositions)
 
 		// Calculate the nodes that should not exist after the prune.
-		shouldNotExist, _ := proofPositions(prunedPositions, acc.NumLeaves, acc.TotalRows)
-		exist, _ := proofPositions(targets, acc.NumLeaves, acc.TotalRows)
+		shouldNotExist, _ := ProofPositions(prunedPositions, acc.NumLeaves, acc.TotalRows)
+		exist, _ := ProofPositions(targets, acc.NumLeaves, acc.TotalRows)
 		shouldNotExist = subtractSortedSlice(shouldNotExist, exist, uint64Cmp)
 
 		// Prune the randomly chosen hashes from the accumulator.
@@ -674,7 +674,7 @@ func TestGetMissingPositions(t *testing.T) {
 		}
 
 		// Calculate the positions actually needed.
-		needs, _ := proofPositions(proves, p.NumLeaves, treeRows(p.NumLeaves))
+		needs, _ := ProofPositions(proves, p.NumLeaves, treeRows(p.NumLeaves))
 		if treeRows(p.NumLeaves) != p.TotalRows {
 			needs = translatePositions(needs, treeRows(p.NumLeaves), p.TotalRows)
 		}
