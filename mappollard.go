@@ -760,7 +760,7 @@ func (m *MapPollard) undoDeletion(proof Proof, hashes []Hash) error {
 	// Calculate the positions of the proofs and translate them if needed and
 	// then place in the proof hashes into the calculated positions.
 	sortedTargets := copySortedFunc(proof.Targets, uint64Less)
-	proofPos, _ := proofPositions(sortedTargets, m.NumLeaves, treeRows(m.NumLeaves))
+	proofPos, _ := ProofPositions(sortedTargets, m.NumLeaves, treeRows(m.NumLeaves))
 	if treeRows(m.NumLeaves) != m.TotalRows {
 		proofPos = m.trimProofPos(proofPos, m.NumLeaves)
 		proofPos = translatePositions(proofPos, treeRows(m.NumLeaves), m.TotalRows)
@@ -952,7 +952,7 @@ func (m *MapPollard) Prove(proveHashes []Hash) (Proof, error) {
 	targets := copySortedFunc(origTargets, uint64Less)
 
 	// The positions of the hashes we need to prove the passed in targets.
-	proofPos, _ := proofPositions(targets, m.NumLeaves, m.TotalRows)
+	proofPos, _ := ProofPositions(targets, m.NumLeaves, m.TotalRows)
 
 	// Go through all the needed positions and grab the hashes for them.
 	// If the node doesn't exist, check that it's calculateable. If it is,
@@ -997,7 +997,7 @@ func (m *MapPollard) VerifyPartialProof(origTargets []uint64, delHashes, proofHa
 	targets := copySortedFunc(origTargets, uint64Less)
 
 	// Figure out what hashes at which positions are needed.
-	proofPositions, _ := proofPositions(targets, m.NumLeaves, treeRows(m.NumLeaves))
+	proofPositions, _ := ProofPositions(targets, m.NumLeaves, treeRows(m.NumLeaves))
 
 	// Translate the proof positions if needed.
 	if treeRows(m.NumLeaves) != m.TotalRows {
@@ -1043,7 +1043,7 @@ func (m *MapPollard) GetMissingPositions(origTargets []uint64) []uint64 {
 	targets := copySortedFunc(origTargets, uint64Less)
 
 	// Generate the positions needed to prove this.
-	proofPos, _ := proofPositions(targets, m.NumLeaves, treeRows(m.NumLeaves))
+	proofPos, _ := ProofPositions(targets, m.NumLeaves, treeRows(m.NumLeaves))
 	if treeRows(m.NumLeaves) != m.TotalRows {
 		proofPos = translatePositions(proofPos, treeRows(m.NumLeaves), m.TotalRows)
 	}
@@ -1139,7 +1139,7 @@ func (m *MapPollard) ingest(delHashes []Hash, proof Proof) error {
 	}
 
 	// Calculate and ingest the proof.
-	proofPos, _ := proofPositions(hnp.positions, m.NumLeaves, m.TotalRows)
+	proofPos, _ := ProofPositions(hnp.positions, m.NumLeaves, m.TotalRows)
 	if treeRows(m.NumLeaves) != m.TotalRows && len(proofPos) != len(proof.Proof) {
 		proofPos = m.trimProofPos(proofPos, m.NumLeaves)
 	}
