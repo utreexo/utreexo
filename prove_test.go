@@ -68,14 +68,14 @@ func calcDelHashAndProof(p *Pollard, proof Proof, missingPositions, desiredPosit
 	}
 
 	// Attach positions to the proof hashes.
-	proofPos, _ := ProofPositions(proof.Targets, p.NumLeaves, treeRows(p.NumLeaves))
+	proofPos, _ := proofPositions(proof.Targets, p.NumLeaves, treeRows(p.NumLeaves))
 	currentHashes := toHashAndPos(proofPos, proof.Proof)
 	// Append the needed hashes to the proof.
 	currentHashes.AppendMany(neededHashes.positions, neededHashes.hashes)
 
 	// As new targets are added, we're able to calulate positions that we couldn't before. These positions
 	// may already exist as proofs. Remove these as duplicates are not expected during proof verification.
-	_, calculateables := ProofPositions(desiredPositions, p.NumLeaves, treeRows(p.NumLeaves))
+	_, calculateables := proofPositions(desiredPositions, p.NumLeaves, treeRows(p.NumLeaves))
 	for _, cal := range calculateables {
 		idx := slices.IndexFunc(currentHashes.positions, func(elem uint64) bool { return elem == cal })
 		if idx != -1 {
@@ -450,7 +450,7 @@ func FuzzUpdateProofRemove(f *testing.F) {
 				pollardBeforeStr, p.String())
 		}
 
-		cachedProofPos, _ := ProofPositions(cachedProof.Targets, p.NumLeaves, treeRows(p.NumLeaves))
+		cachedProofPos, _ := proofPositions(cachedProof.Targets, p.NumLeaves, treeRows(p.NumLeaves))
 		if len(cachedProofPos) != len(cachedProof.Proof) {
 			t.Fatalf("FuzzUpdateProofRemove Fail. CachedProof has these hashes:\n%v\n"+
 				"for these targets:\n%v\n"+

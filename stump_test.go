@@ -234,7 +234,7 @@ func checkUpdateData(updateData UpdateData, adds, delHashes, prevRoots []Hash, p
 	 */
 	// Attach the hashes to their positions.
 	targetsWithHash := toHashAndPos(proof.Targets, delHashes)
-	proofPos, _ := ProofPositions(targetsWithHash.positions, updateData.PrevNumLeaves, treeRows(updateData.PrevNumLeaves))
+	proofPos, _ := proofPositions(targetsWithHash.positions, updateData.PrevNumLeaves, treeRows(updateData.PrevNumLeaves))
 	proofWithPositions := toHashAndPos(proofPos, proof.Proof)
 
 	// Update accordingly.
