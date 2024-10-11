@@ -1439,7 +1439,7 @@ func compareNodeMap(mapA, mapB map[miniHash]*polNode) error {
 			keyStr, printPolNodes(mapBNodes), printPolNodes(mapANodes))
 	}
 
-	return fmt.Errorf(str)
+	return fmt.Errorf("%v", str)
 }
 
 func TestGetLeafPosition(t *testing.T) {

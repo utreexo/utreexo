@@ -712,7 +712,7 @@ func AllSubTreesToString(ts ToString) string {
 	for h := uint8(0); h < totalRows; h++ {
 		rootPos := rootPosition(ts.GetNumLeaves(), h, totalRows)
 		if isRootPosition(rootPos, ts.GetNumLeaves()) {
-			str += fmt.Sprintf(SubTreeToString(ts, rootPos, false))
+			str += SubTreeToString(ts, rootPos, false)
 			str += "\n"
 		}
 	}

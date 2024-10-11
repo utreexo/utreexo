@@ -6,7 +6,7 @@ env GORACE="halt_on_error=1" go test -race
 env GORACE="halt_on_error=1" go test -covermode atomic -coverprofile=profile.cov ./...
 
 # Automatic checks
-golangci-lint run --disable-all --deadline=10m \
+golangci-lint run --disable-all \
 --enable=gofmt \
 --enable=gosimple \
 --enable=unconvert \
