@@ -555,48 +555,51 @@ func proofPosition(target uint64, numLeaves uint64, totalRows uint8) []uint64 {
 
 // proofPositions returns all the positions that are needed to prove targets passed in.
 // NOTE: the passed in targets MUST be sorted.
-func proofPositions(targets []uint64, numLeaves uint64, totalRows uint8) ([]uint64, []uint64) {
-	nextTargets := make([]uint64, 0, (len(targets) * int(totalRows+1)))
-	proofPositions := make([]uint64, 0, (len(targets) * int(totalRows+1)))
+func proofPositions(origTargets []uint64, numLeaves uint64, totalRows uint8) ([]uint64, []uint64) {
+	targets := make([]uint64, len(origTargets))
+	copy(targets, origTargets)
 
-	targetsIdx, nextTargetsIdx := 0, 0
-	for row := uint8(0); row <= totalRows; {
-		target, idx, sibIdx := getNextPos(targets, nextTargets, targetsIdx, nextTargetsIdx)
-		if idx == -1 {
-			// Break if we don't have anymore elements left.
-			break
-		}
-		if idx == 0 {
-			targetsIdx++
-		} else {
-			nextTargetsIdx++
-		}
+	nextTargets := make([]uint64, 0, (len(origTargets) * int(totalRows+1)))
+	proofPositions := make([]uint64, 0, (len(origTargets) * int(totalRows+1)))
 
-		// Keep incrementing the row if the current position is greater
-		// than the max position on this row.
-		for target > maxPossiblePosAtRow(row, totalRows) && row <= totalRows {
-			row++
-		}
-		if row > totalRows {
-			break
-		}
+	for row := uint8(0); row <= totalRows; row++ {
+		for i := 0; i < len(targets); i++ {
+			target := targets[i]
 
-		if isRootPositionOnRowTotalRows(target, numLeaves, row, totalRows) {
-			continue
-		}
-
-		sibPresent := sibIdx != -1
-		if sibPresent {
-			if sibIdx == 0 {
-				targetsIdx++
-			} else if sibIdx == 1 {
-				nextTargetsIdx++
+			// The target may be bigger than the possible positions on this row
+			// as we allow for specifying a totalRows that's greater than the
+			// smallest possible needed to allocate for numLeaves.
+			if target > maxPossiblePosAtRow(row, totalRows) {
+				continue
 			}
-		} else {
+
+			// The target may not be on this row.
+			if row != detectRow(target, totalRows) {
+				continue
+			}
+
+			// Skip if the target is a root as roots neither have a sibling nor a
+			// parent.
+			if isRootPositionOnRowTotalRows(target, numLeaves, row, totalRows) {
+				continue
+			}
+
+			// Check if the next target in line is my sibling. If it is, we don't
+			// need it as a proof position.
+			if i+1 < len(targets) && rightSib(target) == targets[i+1] {
+				targets[i] = parent(target, totalRows)
+				nextTargets = append(nextTargets, targets[i])
+				i++
+				continue
+			}
+
+			// Mark the sibling as a needed proof position.
 			proofPositions = append(proofPositions, sibling(target))
+			targets[i] = parent(target, totalRows)
+			nextTargets = append(nextTargets, targets[i])
 		}
 
-		nextTargets = append(nextTargets, parent(target, totalRows))
+		slices.Sort(targets)
 	}
 
 	return proofPositions, nextTargets
