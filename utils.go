@@ -552,9 +552,10 @@ func proofPosition(target uint64, numLeaves uint64, totalRows uint8) []uint64 {
 	return proofs
 }
 
-// proofPositions returns all the positions that are needed to prove targets passed in.
+// ProofPositions returns all the positions that are needed to prove targets passed in along with
+// all the positions that are able to be computed.
 // NOTE: the passed in targets MUST be sorted.
-func proofPositions(origTargets []uint64, numLeaves uint64, totalRows uint8) ([]uint64, []uint64) {
+func ProofPositions(origTargets []uint64, numLeaves uint64, totalRows uint8) ([]uint64, []uint64) {
 	targets := make([]uint64, len(origTargets))
 	copy(targets, origTargets)
 
