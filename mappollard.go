@@ -625,7 +625,7 @@ func (m *MapPollard) remove(proof Proof, delHashes []Hash) error {
 	// Remove dels from the cached leaves.
 	m.uncacheLeaves(delHashes)
 
-	detwinedDels := copySortedFunc(proof.Targets, uint64Less)
+	detwinedDels := copySortedFunc(proof.Targets, uint64Cmp)
 	if m.TotalRows != treeRows(m.NumLeaves) {
 		detwinedDels = translatePositions(detwinedDels, treeRows(m.NumLeaves), m.TotalRows)
 	}
@@ -759,7 +759,7 @@ func (m *MapPollard) undoDeletion(proof Proof, hashes []Hash) error {
 
 	// Calculate the positions of the proofs and translate them if needed and
 	// then place in the proof hashes into the calculated positions.
-	sortedTargets := copySortedFunc(proof.Targets, uint64Less)
+	sortedTargets := copySortedFunc(proof.Targets, uint64Cmp)
 	proofPos, _ := proofPositions(sortedTargets, m.NumLeaves, treeRows(m.NumLeaves))
 	if treeRows(m.NumLeaves) != m.TotalRows {
 		proofPos = m.trimProofPos(proofPos, m.NumLeaves)
@@ -832,7 +832,7 @@ func (m *MapPollard) getRootsAfterDel(numAdds uint64, targets, prevRootPos []uin
 	prevRoots := make([]Hash, len(origPrevRoots))
 	copy(prevRoots, origPrevRoots)
 
-	detwined := deTwin(translatePositions(copySortedFunc(targets, uint64Less),
+	detwined := deTwin(translatePositions(copySortedFunc(targets, uint64Cmp),
 		treeRows(m.NumLeaves-numAdds), m.TotalRows), m.TotalRows)
 
 	for i := range detwined {
@@ -949,7 +949,7 @@ func (m *MapPollard) Prove(proveHashes []Hash) (Proof, error) {
 	}
 
 	// Sort targets first. Copy to avoid mutating the original.
-	targets := copySortedFunc(origTargets, uint64Less)
+	targets := copySortedFunc(origTargets, uint64Cmp)
 
 	// The positions of the hashes we need to prove the passed in targets.
 	proofPos, _ := proofPositions(targets, m.NumLeaves, m.TotalRows)
@@ -994,7 +994,7 @@ func (m *MapPollard) VerifyPartialProof(origTargets []uint64, delHashes, proofHa
 	defer m.rwLock.Unlock()
 
 	// Sort targets first. Copy to avoid mutating the original.
-	targets := copySortedFunc(origTargets, uint64Less)
+	targets := copySortedFunc(origTargets, uint64Cmp)
 
 	// Figure out what hashes at which positions are needed.
 	proofPositions, _ := proofPositions(targets, m.NumLeaves, treeRows(m.NumLeaves))
@@ -1040,7 +1040,7 @@ func (m *MapPollard) GetMissingPositions(origTargets []uint64) []uint64 {
 	defer m.rwLock.RUnlock()
 
 	// Sort targets first. Copy to avoid mutating the original.
-	targets := copySortedFunc(origTargets, uint64Less)
+	targets := copySortedFunc(origTargets, uint64Cmp)
 
 	// Generate the positions needed to prove this.
 	proofPos, _ := proofPositions(targets, m.NumLeaves, treeRows(m.NumLeaves))
