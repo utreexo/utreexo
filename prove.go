@@ -81,6 +81,10 @@ func (p *Pollard) Prove(hashes []Hash) (Proof, error) {
 
 	// Get the positions of all the hashes that are needed to prove the targets
 	proofPositions, _ := ProofPositions(sortedTargets, p.NumLeaves, treeRows(p.NumLeaves))
+	if len(proofPositions) == 0 {
+		// Return early.
+		return proof, nil
+	}
 
 	// Fetch all the proofs from the accumulator.
 	proof.Proof = make([]Hash, len(proofPositions))
