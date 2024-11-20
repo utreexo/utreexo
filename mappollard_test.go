@@ -905,3 +905,44 @@ func TestFullMapPollard(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestGetLeafHashPositions(t *testing.T) {
+	// Create elements to add to the accumulator
+	leaves := make([]Leaf, 31)
+	for i := range leaves {
+		leaves[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)}), Remember: false}
+	}
+
+	acc := NewMapPollard(true)
+	err := acc.Modify(leaves, nil, Proof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	delLeaves := []Leaf{leaves[1]}
+	delHashes := make([]Hash, len(delLeaves))
+	for i := range delHashes {
+		delHashes[i] = delLeaves[i].Hash
+	}
+	proof, err := acc.Prove(delHashes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = acc.Modify(nil, delHashes, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Actual test is here.
+	expected := parent(0, treeRows(uint64(len(leaves))))
+	got, found := acc.getLeafHashPosition(leaves[0].Hash)
+	if !found {
+		t.Fatalf("expected to find position for hash %v but didn't", leaves[0].Hash)
+	}
+
+	if expected != got {
+		t.Fatalf("for hash %v, expected %v but got %v",
+			leaves[0].Hash, expected, got)
+	}
+}
