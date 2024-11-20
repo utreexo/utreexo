@@ -1263,12 +1263,11 @@ func (m *MapPollard) GetHash(pos uint64) Hash {
 	return leaf.Hash
 }
 
-// GetLeafPosition returns the position of the leaf for the given hash. Returns false if
-// the hash is not the hash of a leaf or if the hash wasn't found in the accumulator.
-func (m *MapPollard) GetLeafPosition(hash Hash) (uint64, bool) {
-	m.rwLock.RLock()
-	defer m.rwLock.RUnlock()
-
+// getLeafPosition returns the position of the leaf for the given hash and returns false
+// if the leaf hash doesn't exist.
+//
+// MUST be called with the lock held.
+func (m *MapPollard) getLeafHashPosition(hash Hash) (uint64, bool) {
 	pos, found := m.CachedLeaves.Get(hash)
 	if !found {
 		return 0, false
@@ -1279,6 +1278,15 @@ func (m *MapPollard) GetLeafPosition(hash Hash) (uint64, bool) {
 	}
 
 	return pos, true
+}
+
+// GetLeafPosition returns the position of the leaf for the given hash. Returns false if
+// the hash is not the hash of a leaf or if the hash wasn't found in the accumulator.
+func (m *MapPollard) GetLeafPosition(hash Hash) (uint64, bool) {
+	m.rwLock.RLock()
+	defer m.rwLock.RUnlock()
+
+	return m.getLeafHashPosition(hash)
 }
 
 func (m *MapPollard) highestPos() uint64 {
@@ -1322,9 +1330,9 @@ func (m *MapPollard) GetLeafHashPositions(hashes []Hash) []uint64 {
 
 	positions := make([]uint64, len(hashes))
 	for i := range positions {
-		position, found := m.CachedLeaves.Get(hashes[i])
+		pos, found := m.getLeafHashPosition(hashes[i])
 		if found {
-			positions[i] = position
+			positions[i] = pos
 		}
 	}
 
