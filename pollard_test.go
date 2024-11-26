@@ -2,12 +2,15 @@ package utreexo
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math/rand"
 	"reflect"
 	"testing"
+
+	"golang.org/x/exp/slices"
 )
 
 // Assert that Pollard implements the UtreexoTest interface.
@@ -1613,4 +1616,193 @@ func FuzzGetLeafPosition(f *testing.F) {
 			}
 		}
 	})
+}
+
+func TestCachedNodesAfterDelete(t *testing.T) {
+	// Define the test cases as a table.
+	tests := []struct {
+		name            string
+		numAdds         int
+		delIndices      []int
+		rememberIndices []int
+	}{
+		{
+			name:            "delete one node",
+			numAdds:         10,
+			delIndices:      []int{4},
+			rememberIndices: []int{1, 3, 4, 5, 6},
+		},
+		{
+			name:            "delete two nodes",
+			numAdds:         10,
+			delIndices:      []int{3, 7},
+			rememberIndices: []int{1, 3, 5, 7, 9},
+		},
+		{
+			name:            "delete three nodes",
+			numAdds:         10,
+			delIndices:      []int{0, 1, 7},
+			rememberIndices: []int{0, 1, 2, 3, 4, 7, 8, 9},
+		},
+		{
+			name:            "delete four nodes",
+			numAdds:         10,
+			delIndices:      []int{0, 1, 2, 3},
+			rememberIndices: []int{0, 1, 2, 3, 4, 5, 8, 9},
+		},
+		{
+			name:            "delete five nodes",
+			numAdds:         10,
+			delIndices:      []int{0, 2, 4, 6, 8},
+			rememberIndices: []int{0, 1, 2, 4, 5, 6, 8, 9},
+		},
+		{
+			name:            "delete six nodes",
+			numAdds:         10,
+			delIndices:      []int{0, 1, 3, 5, 7, 9},
+			rememberIndices: []int{0, 1, 2, 3, 4, 5, 6, 7, 9},
+		},
+		{
+			name:            "delete seven nodes",
+			numAdds:         10,
+			delIndices:      []int{0, 1, 2, 4, 6, 8, 9},
+			rememberIndices: []int{0, 1, 2, 4, 5, 6, 8, 9},
+		},
+		{
+			name:            "delete eight nodes",
+			numAdds:         10,
+			delIndices:      []int{0, 1, 2, 3, 5, 6, 8, 9},
+			rememberIndices: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+		},
+		{
+			name:            "delete nine nodes",
+			numAdds:         10,
+			delIndices:      []int{0, 1, 2, 3, 4, 6, 7, 8, 9},
+			rememberIndices: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+		},
+		{
+			name:            "delete ten nodes",
+			numAdds:         10,
+			delIndices:      []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+			rememberIndices: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+		},
+	}
+
+	for _, test := range tests {
+		// Create a new accumulator with 10 leaves.
+		adds := make([]Leaf, test.numAdds)
+
+		// Create the accumulator and add the leaves.
+		p := NewAccumulator(false)
+
+		for i := range adds {
+			if slices.Contains(test.rememberIndices, i) {
+				adds[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)}), Remember: true}
+			} else {
+				adds[i] = Leaf{Hash: sha256.Sum256([]byte{uint8(i)})}
+			}
+		}
+
+		err := p.Modify(adds, nil, Proof{})
+		if err != nil {
+			t.Fatal("Failed to add nodes", err)
+		}
+
+		// Verify that nodes to prove are cached accurately
+
+		// Range through the target nodes (rememberIndices) and for the nodes
+		// fetch their proof nodes and ensure that they exist
+		for _, i := range test.rememberIndices {
+			n, _, _, _ := p.getNode(uint64(i))
+			var i = uint64(i)
+			if n != nil {
+				proofNodes, _ := proofPositions([]uint64{i}, p.NumLeaves, treeRows(p.NumLeaves))
+				// range through proofNodes and fetch them
+				for _, pos := range proofNodes {
+					n, _, _, err := p.getNode(pos)
+					if n == nil {
+						t.Fatalf("Failed to get node: %v", err)
+					}
+				}
+			}
+		}
+
+		// Call the verify function
+		var rememberHashes []Hash
+		for _, idx := range test.rememberIndices {
+			rememberHashes = append(rememberHashes, adds[idx].Hash)
+		}
+		proof, err := p.Prove(rememberHashes)
+		if err != nil {
+			t.Fatalf("Failed to generate proof: %v", err)
+		}
+		err = p.Verify(rememberHashes, proof, false)
+		if err != nil {
+			t.Fatalf("Failed to verify proof: %v", err)
+		}
+
+		// Verify that proof nodes are uncached after deletion of the target nodes
+
+		// Delete the specified nodes.
+		dels := make([]Hash, len(test.delIndices))
+		for i, idx := range test.delIndices {
+			dels[i] = adds[idx].Hash
+		}
+		proof, err = p.Prove(dels)
+		if err != nil {
+			t.Fatalf("Failed to generate proof: %v", err)
+		}
+		err = p.Modify(nil, dels, proof)
+		if err != nil {
+			t.Fatalf("Failed to delete nodes: %v", err)
+		}
+
+		// Range through the target nodes (rememberIndices) (some of these nodes could have moved up)
+		// and for the nodes which are not yet deleted, fetch their proof nodes and ensure that they exist
+		for _, i := range test.rememberIndices {
+			n, _, _, _ := p.getNode(uint64(i))
+			if n != nil {
+				var i = uint64(i)
+				proofNodes, _ := proofPositions([]uint64{i}, p.NumLeaves, treeRows(p.NumLeaves))
+
+				// range through proofNodes and fetch them
+				for _, pos := range proofNodes {
+					n, _, _, err := p.getNode(pos)
+					if n == nil {
+						t.Fatalf("Failed to get node: %v", err)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			} else {
+				// if the node is deleted and it was not in the deleteIndices, fetch its parent and ensure that
+				// the proof of the parent exists
+				if !slices.Contains(test.delIndices, i) {
+					// get the parent of the deleted node since it is the sibling of the deleted node now
+					var i = uint64(i)
+					parentPos := parent(i, treeRows(p.NumLeaves))
+					n, _, _, err := p.getNode(parentPos)
+					if n == nil {
+						// t.Error("Error in deleting nodes. Sibling node did not move up to parent (as expected) when target node is deleted")
+						continue
+					}
+					if err != nil {
+						t.Fatal("Error fetching node", err)
+					}
+					proofNodes, _ := proofPositions([]uint64{(parentPos)}, p.NumLeaves, treeRows(p.NumLeaves))
+					// range through proofNodes and fetch them
+					for _, pos := range proofNodes {
+						n, _, _, err := p.getNode(pos)
+						if n == nil {
+							t.Fatalf("Failed to get node: %v", err)
+						}
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			}
+		}
+	}
 }
