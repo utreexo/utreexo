@@ -80,7 +80,7 @@ func (p *Pollard) Prove(hashes []Hash) (Proof, error) {
 	sort.Slice(sortedTargets, func(a, b int) bool { return sortedTargets[a] < sortedTargets[b] })
 
 	// Get the positions of all the hashes that are needed to prove the targets
-	proofPositions, _ := ProofPositions(sortedTargets, p.NumLeaves, treeRows(p.NumLeaves))
+	proofPositions, _ := ProofPositions(sortedTargets, p.NumLeaves, TreeRows(p.NumLeaves))
 	if len(proofPositions) == 0 {
 		// Return early.
 		return proof, nil
@@ -540,7 +540,7 @@ func getNextPos(slice1, slice2 []uint64, slice1Idx, slice2Idx int) (uint64, int,
 // hashes of the roots and the nodes used to calculate the roots after the
 // deletion of the targets.
 func calculateHashes(numLeaves uint64, delHashes []Hash, proof Proof) (hashAndPos, []Hash, error) {
-	totalRows := treeRows(numLeaves)
+	totalRows := TreeRows(numLeaves)
 
 	// Where all the parent hashes we've calculated in a given row will go to.
 	nextProves := hashAndPos{make([]uint64, 0, len(proof.Targets)), make([]Hash, 0, len(proof.Targets))}
@@ -744,7 +744,7 @@ func subtractSortedSlice[E, F any](a []E, b []F, cmp func(E, F) int) []E {
 // no checks to make sure the desiredTargets exist in the accumulator so the caller must
 // check that they indeed do exist.
 func GetMissingPositions(numLeaves uint64, proofTargets, desiredTargets []uint64) []uint64 {
-	forestRows := treeRows(numLeaves)
+	forestRows := TreeRows(numLeaves)
 
 	// Copy the targets to avoid mutating the original. Then detwin it
 	// to prep for deletion.
@@ -783,7 +783,7 @@ func GetMissingPositions(numLeaves uint64, proofTargets, desiredTargets []uint64
 // AddProof adds the newProof onto the existing proof and return the new cachedDelHashes and proof. Newly calculateable
 // positions and duplicates are excluded in the returned proof.
 func AddProof(proofA, proofB Proof, targetHashesA, targetHashesB []Hash, numLeaves uint64) ([]Hash, Proof) {
-	totalRows := treeRows(numLeaves)
+	totalRows := TreeRows(numLeaves)
 
 	// Calculate proof hashes for proof A and add positions to the proof hashes.
 	targetsA := copySortedFunc(proofA.Targets, uint64Cmp)
@@ -839,7 +839,7 @@ func AddProof(proofA, proofB Proof, targetHashesA, targetHashesB []Hash, numLeav
 
 // getNewPositions updates all the positions in the slice after the blockTargets have been deleted.
 func getNewPositions(blockTargets []uint64, slice hashAndPos, numLeaves uint64, appendRoots bool) hashAndPos {
-	totalRows := treeRows(numLeaves)
+	totalRows := TreeRows(numLeaves)
 	newSlice := hashAndPos{make([]uint64, 0, slice.Len()), make([]Hash, 0, slice.Len())}
 
 	row := uint8(0)
@@ -891,7 +891,7 @@ func getNewPositions(blockTargets []uint64, slice hashAndPos, numLeaves uint64, 
 // updateProofRemove modifies the cached proof with the deletions that happen in the block proof.
 // It updates the necessary proof hashes and un-caches the targets that are being deleted.
 func (p *Proof) updateProofRemove(blockTargets []uint64, cachedHashes []Hash, updated hashAndPos, numLeaves uint64) []Hash {
-	totalRows := treeRows(numLeaves)
+	totalRows := TreeRows(numLeaves)
 
 	// Delete from the target.
 	sortedBlockTargets := copySortedFunc(blockTargets, uint64Cmp)
@@ -1030,11 +1030,11 @@ func pruneEdges(hnp hashAndPos, numAdds, numLeaves uint64, forestRows, prevFores
 // proof hashes that could not have existed before the add.
 func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestroy []uint64) ([]Hash, error) {
 	targetsWithHash := toHashAndPos(p.Targets, cachedHashes)
-	proofPos, _ := ProofPositions(targetsWithHash.positions, numLeaves, treeRows(numLeaves))
+	proofPos, _ := ProofPositions(targetsWithHash.positions, numLeaves, TreeRows(numLeaves))
 	proofWithPos := toHashAndPos(proofPos, p.Proof)
 
-	forestRows := treeRows(numLeaves)
-	prevForestRows := treeRows(numLeaves - numAdds)
+	forestRows := TreeRows(numLeaves)
+	prevForestRows := TreeRows(numLeaves - numAdds)
 
 	// Move positions to their previous positions before the empty roots were destroyed.
 	for _, destroyed := range toDestroy {
@@ -1109,7 +1109,7 @@ func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestro
 	// Remap all positions to their previous positions before the remap.
 	if prevForestRows < forestRows {
 		for i, pos := range targetsWithHash.positions {
-			row := detectRow(pos, treeRows(numLeaves))
+			row := detectRow(pos, TreeRows(numLeaves))
 
 			currentStartPos := startPositionAtRow(row, forestRows)
 			prevStartPos := startPositionAtRow(row, prevForestRows)
@@ -1120,7 +1120,7 @@ func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestro
 		}
 
 		for i, pos := range proofWithPos.positions {
-			row := detectRow(pos, treeRows(numLeaves))
+			row := detectRow(pos, TreeRows(numLeaves))
 
 			currentStartPos := startPositionAtRow(row, forestRows)
 			prevStartPos := startPositionAtRow(row, prevForestRows)
@@ -1147,7 +1147,7 @@ func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestro
 //
 // NOTE undoDel does not re-cache the deleted targets that were previously cached.
 func (p *Proof) undoDel(blockTargets []uint64, blockHashes, cachedHashes []Hash, blockProof Proof, numLeaves uint64) ([]Hash, error) {
-	totalRows := treeRows(numLeaves)
+	totalRows := TreeRows(numLeaves)
 
 	if len(blockTargets) == 0 {
 		return cachedHashes, nil
@@ -1290,7 +1290,7 @@ func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64
 	sort.Sort(posAndHashes)
 
 	// Put positions onto the proof hashes.
-	positions, _ := ProofPositions(proofTargetsCopy, numLeaves, treeRows(numLeaves))
+	positions, _ := ProofPositions(proofTargetsCopy, numLeaves, TreeRows(numLeaves))
 	proofPos := toHashAndPos(positions, proof.Proof)
 
 	// Merge the proof positions and its hashes along with the calculated intermediate nodes
@@ -1302,7 +1302,7 @@ func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64
 	targetHashesWithPos = getHashAndPosSubset(targetHashesWithPos, sortedWants)
 
 	// Grab the positions that we need to prove the wants.
-	wantProofPos, _ := ProofPositions(targetHashesWithPos.positions, numLeaves, treeRows(numLeaves))
+	wantProofPos, _ := ProofPositions(targetHashesWithPos.positions, numLeaves, TreeRows(numLeaves))
 
 	// Extract the proof positions we want and then sanity check to see that we have everything.
 	posAndHashes = getHashAndPosSubset(posAndHashes, wantProofPos)
@@ -1322,15 +1322,15 @@ func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64
 	return retHashes, Proof{wants, posAndHashes.hashes}, nil
 }
 
-// maybeRemap remaps the passed in hash and pos if the treeRows increase after
+// maybeRemap remaps the passed in hash and pos if the TreeRows increase after
 // adding the new nodes.
 func maybeRemap(numLeaves, numAdds uint64, hnp hashAndPos) hashAndPos {
 	// Update target positions if the forest has remapped to a higher row.
-	newForestRows := treeRows(numLeaves + numAdds)
-	oldForestRows := treeRows(numLeaves)
+	newForestRows := TreeRows(numLeaves + numAdds)
+	oldForestRows := TreeRows(numLeaves)
 	if newForestRows > oldForestRows {
 		for i, pos := range hnp.positions {
-			row := detectRow(pos, treeRows(numLeaves))
+			row := detectRow(pos, TreeRows(numLeaves))
 
 			oldStartPos := startPositionAtRow(row, oldForestRows)
 			newStartPos := startPositionAtRow(row, newForestRows)
@@ -1354,7 +1354,7 @@ func (p *Proof) updateProofAdd(adds, cachedDelHashes []Hash, remembers []uint32,
 	origTargetsWithHash := toHashAndPos(p.Targets, cachedDelHashes)
 
 	// Attach positions to the proof.
-	proofPos, _ := ProofPositions(origTargetsWithHash.positions, beforeNumLeaves, treeRows(beforeNumLeaves))
+	proofPos, _ := ProofPositions(origTargetsWithHash.positions, beforeNumLeaves, TreeRows(beforeNumLeaves))
 	proofWithPos := toHashAndPos(proofPos, p.Proof)
 
 	// Remap the positions if we moved up a after the addition row.
@@ -1395,7 +1395,7 @@ func (p *Proof) updateProofAdd(adds, cachedDelHashes []Hash, remembers []uint32,
 	origTargetsWithHash = mergeSortedHashAndPos(remembersWithHash, origTargetsWithHash)
 
 	// Grab all the new nodes after this add.
-	neededProofPositions, _ := ProofPositions(origTargetsWithHash.positions, beforeNumLeaves+uint64(len(adds)), treeRows(beforeNumLeaves+uint64(len(adds))))
+	neededProofPositions, _ := ProofPositions(origTargetsWithHash.positions, beforeNumLeaves+uint64(len(adds)), TreeRows(beforeNumLeaves+uint64(len(adds))))
 
 	// Add all the new proof hashes to the proof.
 	newProofWithPos := hashAndPos{}

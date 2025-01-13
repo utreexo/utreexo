@@ -135,7 +135,7 @@ func (s *Stump) del(delHashes []Hash, proof Proof) ([]Hash, []uint64, error) {
 // positions used to calculate the newly created roots.
 func (s *Stump) add(adds []Hash) ([]Hash, []uint64, []uint64) {
 	// afterRows is the total amount of rows after the addition has happened.
-	afterRows := treeRows(s.NumLeaves + uint64(len(adds)))
+	afterRows := TreeRows(s.NumLeaves + uint64(len(adds)))
 
 	// allDeleted is all the empty roots that get deleted by the additions.
 	allDeleted := rootsToDestory(uint64(len(adds)), s.NumLeaves, s.Roots)
@@ -232,13 +232,13 @@ func rootsToDestory(numAdds, numLeaves uint64, origRoots []Hash) []uint64 {
 	roots := make([]Hash, len(origRoots))
 	copy(roots, origRoots)
 
-	deleted := make([]uint64, 0, treeRows(numLeaves+numAdds))
+	deleted := make([]uint64, 0, TreeRows(numLeaves+numAdds))
 	for i := uint64(0); i < numAdds; i++ {
 		for h := uint8(0); (numLeaves>>h)&1 == 1; h++ {
 			root := roots[len(roots)-1]
 			roots = roots[:len(roots)-1]
 			if root == empty {
-				rootPos := rootPosition(numLeaves, h, treeRows(numLeaves+(numAdds-i)))
+				rootPos := rootPosition(numLeaves, h, TreeRows(numLeaves+(numAdds-i)))
 				deleted = append(deleted, rootPos)
 			}
 		}
