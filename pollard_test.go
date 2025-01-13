@@ -356,7 +356,7 @@ func (p *Pollard) checkHashes() error {
 // calculates its position. Returns an error if the position calculated does
 // not match the position used to fetch the node.
 func (p *Pollard) positionSanity() error {
-	totalRows := treeRows(p.NumLeaves)
+	totalRows := TreeRows(p.NumLeaves)
 
 	for row := uint8(0); row < totalRows; row++ {
 		pos := startPositionAtRow(row, totalRows)
@@ -1108,8 +1108,8 @@ func fuzzUndoChain(t *testing.T, p UtreexoTest, blockCount, numAdds, duration ui
 
 		for i := range bp.Targets {
 			var gotHash Hash
-			if treeRows(p.GetNumLeaves()) != p.GetTreeRows() {
-				gotHash = p.GetHash(translatePos(bp.Targets[i], treeRows(p.GetNumLeaves()), p.GetTreeRows()))
+			if TreeRows(p.GetNumLeaves()) != p.GetTreeRows() {
+				gotHash = p.GetHash(translatePos(bp.Targets[i], TreeRows(p.GetNumLeaves()), p.GetTreeRows()))
 			} else {
 				gotHash = p.GetHash(bp.Targets[i])
 			}

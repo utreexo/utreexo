@@ -455,7 +455,7 @@ func (m *MapPollard) moveUpChild(position, delPos, numLeaves uint64,
 // remap moves up the positions of nodes that aren't at row 0 whenever the accumulator grows.
 // Returns the total number of rows needed to house numleaves+1 amount of leaves.
 func (m *MapPollard) remap() (uint8, error) {
-	nextRows := treeRows(m.NumLeaves + 1)
+	nextRows := TreeRows(m.NumLeaves + 1)
 	if nextRows <= m.TotalRows {
 		return m.TotalRows, nil
 	}
@@ -626,8 +626,8 @@ func (m *MapPollard) remove(proof Proof, delHashes []Hash) error {
 	m.uncacheLeaves(delHashes)
 
 	detwinedDels := copySortedFunc(proof.Targets, uint64Cmp)
-	if m.TotalRows != treeRows(m.NumLeaves) {
-		detwinedDels = translatePositions(detwinedDels, treeRows(m.NumLeaves), m.TotalRows)
+	if m.TotalRows != TreeRows(m.NumLeaves) {
+		detwinedDels = translatePositions(detwinedDels, TreeRows(m.NumLeaves), m.TotalRows)
 	}
 
 	detwinedDels = deTwin(detwinedDels, m.TotalRows)
@@ -718,8 +718,8 @@ func (m *MapPollard) placeEmptyRoot(prevRootPos uint64) error {
 func (m *MapPollard) undoDeletion(proof Proof, hashes []Hash) error {
 	// Sort and translate the positions if needed.
 	hnp := toHashAndPos(proof.Targets, hashes)
-	if treeRows(m.NumLeaves) != m.TotalRows {
-		hnp.positions = translatePositions(hnp.positions, treeRows(m.NumLeaves), m.TotalRows)
+	if TreeRows(m.NumLeaves) != m.TotalRows {
+		hnp.positions = translatePositions(hnp.positions, TreeRows(m.NumLeaves), m.TotalRows)
 		sort.Sort(hnp)
 	}
 
@@ -760,10 +760,10 @@ func (m *MapPollard) undoDeletion(proof Proof, hashes []Hash) error {
 	// Calculate the positions of the proofs and translate them if needed and
 	// then place in the proof hashes into the calculated positions.
 	sortedTargets := copySortedFunc(proof.Targets, uint64Cmp)
-	proofPos, _ := ProofPositions(sortedTargets, m.NumLeaves, treeRows(m.NumLeaves))
-	if treeRows(m.NumLeaves) != m.TotalRows {
+	proofPos, _ := ProofPositions(sortedTargets, m.NumLeaves, TreeRows(m.NumLeaves))
+	if TreeRows(m.NumLeaves) != m.TotalRows {
 		proofPos = m.trimProofPos(proofPos, m.NumLeaves)
-		proofPos = translatePositions(proofPos, treeRows(m.NumLeaves), m.TotalRows)
+		proofPos = translatePositions(proofPos, TreeRows(m.NumLeaves), m.TotalRows)
 	}
 
 	if len(proofPos) != len(proof.Proof) {
@@ -791,8 +791,8 @@ func (m *MapPollard) undoDeletion(proof Proof, hashes []Hash) error {
 	if err != nil {
 		return err
 	}
-	if treeRows(m.NumLeaves) != m.TotalRows {
-		newhnp.positions = translatePositions(newhnp.positions, treeRows(m.NumLeaves), m.TotalRows)
+	if TreeRows(m.NumLeaves) != m.TotalRows {
+		newhnp.positions = translatePositions(newhnp.positions, TreeRows(m.NumLeaves), m.TotalRows)
 		sort.Sort(newhnp)
 	}
 
@@ -804,8 +804,8 @@ func (m *MapPollard) undoDeletion(proof Proof, hashes []Hash) error {
 			remember = true
 		}
 		for _, target := range proof.Targets {
-			if treeRows(m.NumLeaves) != m.TotalRows {
-				translated := translatePos(target, treeRows(m.NumLeaves), m.TotalRows)
+			if TreeRows(m.NumLeaves) != m.TotalRows {
+				translated := translatePos(target, TreeRows(m.NumLeaves), m.TotalRows)
 				if pos == translated {
 					remember = true
 				}
@@ -833,7 +833,7 @@ func (m *MapPollard) getRootsAfterDel(numAdds uint64, targets, prevRootPos []uin
 	copy(prevRoots, origPrevRoots)
 
 	detwined := deTwin(translatePositions(copySortedFunc(targets, uint64Cmp),
-		treeRows(m.NumLeaves-numAdds), m.TotalRows), m.TotalRows)
+		TreeRows(m.NumLeaves-numAdds), m.TotalRows), m.TotalRows)
 
 	for i := range detwined {
 		for j := range prevRootPos {
@@ -858,8 +858,8 @@ func (m *MapPollard) getWrittenOverEmptyRoots(numAdds uint64, origTargets []uint
 	destroyedPositions := rootsToDestory(numAdds, m.NumLeaves-numAdds, prevRoots)
 
 	// Translate the positions if needed.
-	if treeRows(m.NumLeaves) != m.TotalRows {
-		destroyedPositions = translatePositions(destroyedPositions, treeRows(m.NumLeaves), m.TotalRows)
+	if TreeRows(m.NumLeaves) != m.TotalRows {
+		destroyedPositions = translatePositions(destroyedPositions, TreeRows(m.NumLeaves), m.TotalRows)
 	}
 
 	// Loop through all the previous roots and only add their position to the previous
@@ -975,9 +975,9 @@ func (m *MapPollard) Prove(proveHashes []Hash) (Proof, error) {
 
 	// If the map pollard is set with higher rows than what's actually needed,
 	// translate the positions.
-	if m.TotalRows != treeRows(m.NumLeaves) {
+	if m.TotalRows != TreeRows(m.NumLeaves) {
 		for i := range origTargets {
-			origTargets[i] = translatePos(origTargets[i], m.TotalRows, treeRows(m.NumLeaves))
+			origTargets[i] = translatePos(origTargets[i], m.TotalRows, TreeRows(m.NumLeaves))
 		}
 	}
 
@@ -997,11 +997,11 @@ func (m *MapPollard) VerifyPartialProof(origTargets []uint64, delHashes, proofHa
 	targets := copySortedFunc(origTargets, uint64Cmp)
 
 	// Figure out what hashes at which positions are needed.
-	proofPositions, _ := ProofPositions(targets, m.NumLeaves, treeRows(m.NumLeaves))
+	proofPositions, _ := ProofPositions(targets, m.NumLeaves, TreeRows(m.NumLeaves))
 
 	// Translate the proof positions if needed.
-	if treeRows(m.NumLeaves) != m.TotalRows {
-		proofPositions = translatePositions(proofPositions, treeRows(m.NumLeaves), m.TotalRows)
+	if TreeRows(m.NumLeaves) != m.TotalRows {
+		proofPositions = translatePositions(proofPositions, TreeRows(m.NumLeaves), m.TotalRows)
 	}
 
 	// Where we'll merge the hashes that we already have with the proofHashes provided.
@@ -1043,9 +1043,9 @@ func (m *MapPollard) GetMissingPositions(origTargets []uint64) []uint64 {
 	targets := copySortedFunc(origTargets, uint64Cmp)
 
 	// Generate the positions needed to prove this.
-	proofPos, _ := ProofPositions(targets, m.NumLeaves, treeRows(m.NumLeaves))
-	if treeRows(m.NumLeaves) != m.TotalRows {
-		proofPos = translatePositions(proofPos, treeRows(m.NumLeaves), m.TotalRows)
+	proofPos, _ := ProofPositions(targets, m.NumLeaves, TreeRows(m.NumLeaves))
+	if TreeRows(m.NumLeaves) != m.TotalRows {
+		proofPos = translatePositions(proofPos, TreeRows(m.NumLeaves), m.TotalRows)
 	}
 
 	// Go through all the proof positions and mark the ones that are missing.
@@ -1058,8 +1058,8 @@ func (m *MapPollard) GetMissingPositions(origTargets []uint64) []uint64 {
 		}
 	}
 
-	if treeRows(m.NumLeaves) != m.TotalRows {
-		missingPositions = translatePositions(missingPositions, m.TotalRows, treeRows(m.NumLeaves))
+	if TreeRows(m.NumLeaves) != m.TotalRows {
+		missingPositions = translatePositions(missingPositions, m.TotalRows, TreeRows(m.NumLeaves))
 		missingPositions = m.trimProofPos(missingPositions, m.NumLeaves)
 	}
 
@@ -1080,8 +1080,8 @@ func (m *MapPollard) Verify(delHashes []Hash, proof Proof, remember bool) error 
 //
 // This function is different from Verify() in that it's not safe for concurrent access.
 func (m *MapPollard) verify(delHashes []Hash, proof Proof, remember bool) error {
-	if treeRows(m.NumLeaves) != m.TotalRows {
-		proof.Targets = translatePositions(proof.Targets, m.TotalRows, treeRows(m.NumLeaves))
+	if TreeRows(m.NumLeaves) != m.TotalRows {
+		proof.Targets = translatePositions(proof.Targets, m.TotalRows, TreeRows(m.NumLeaves))
 	}
 
 	s := m.getStump()
@@ -1102,7 +1102,7 @@ func (m *MapPollard) verify(delHashes []Hash, proof Proof, remember bool) error 
 //
 // The given proof positions must be sorted.
 func (m *MapPollard) trimProofPos(proofPos []uint64, numLeaves uint64) []uint64 {
-	rows := treeRows(numLeaves)
+	rows := TreeRows(numLeaves)
 
 	i := 0
 	for ; i < len(proofPos); i++ {
@@ -1133,14 +1133,14 @@ func (m *MapPollard) Ingest(delHashes []Hash, proof Proof) error {
 // This function is different from Ingest() in that it's not safe for concurrent access.
 func (m *MapPollard) ingest(delHashes []Hash, proof Proof) error {
 	hnp := toHashAndPos(proof.Targets, delHashes)
-	if m.TotalRows != treeRows(m.NumLeaves) {
-		hnp.positions = translatePositions(hnp.positions, treeRows(m.NumLeaves), m.TotalRows)
+	if m.TotalRows != TreeRows(m.NumLeaves) {
+		hnp.positions = translatePositions(hnp.positions, TreeRows(m.NumLeaves), m.TotalRows)
 		sort.Sort(hnp)
 	}
 
 	// Calculate and ingest the proof.
 	proofPos, _ := ProofPositions(hnp.positions, m.NumLeaves, m.TotalRows)
-	if treeRows(m.NumLeaves) != m.TotalRows && len(proofPos) != len(proof.Proof) {
+	if TreeRows(m.NumLeaves) != m.TotalRows && len(proofPos) != len(proof.Proof) {
 		proofPos = m.trimProofPos(proofPos, m.NumLeaves)
 	}
 	for i, pos := range proofPos {
@@ -1157,8 +1157,8 @@ func (m *MapPollard) ingest(delHashes []Hash, proof Proof) error {
 	if err != nil {
 		return err
 	}
-	if m.TotalRows != treeRows(m.NumLeaves) {
-		intermediate.positions = translatePositions(intermediate.positions, treeRows(m.NumLeaves), m.TotalRows)
+	if m.TotalRows != TreeRows(m.NumLeaves) {
+		intermediate.positions = translatePositions(intermediate.positions, TreeRows(m.NumLeaves), m.TotalRows)
 		sort.Sort(intermediate)
 	}
 
@@ -1212,7 +1212,7 @@ func (m *MapPollard) Prune(hashes []Hash) error {
 		m.Nodes.Put(pos, leaf)
 
 		// Call prune positions until the root.
-		for row := detectRow(pos, m.TotalRows); row <= treeRows(m.NumLeaves); row++ {
+		for row := detectRow(pos, m.TotalRows); row <= TreeRows(m.NumLeaves); row++ {
 			// Break if we're on a root.
 			if isRootPositionTotalRows(pos, m.NumLeaves, m.TotalRows) {
 				break
@@ -1256,8 +1256,8 @@ func (m *MapPollard) GetHash(pos uint64) Hash {
 	m.rwLock.RLock()
 	defer m.rwLock.RUnlock()
 
-	if m.TotalRows != treeRows(m.NumLeaves) {
-		pos = translatePos(pos, treeRows(m.NumLeaves), m.TotalRows)
+	if m.TotalRows != TreeRows(m.NumLeaves) {
+		pos = translatePos(pos, TreeRows(m.NumLeaves), m.TotalRows)
 	}
 	leaf, _ := m.Nodes.Get(pos)
 	return leaf.Hash
@@ -1273,8 +1273,8 @@ func (m *MapPollard) getLeafHashPosition(hash Hash) (uint64, bool) {
 		return 0, false
 	}
 
-	if m.TotalRows != treeRows(m.NumLeaves) {
-		pos = translatePos(pos, m.TotalRows, treeRows(m.NumLeaves))
+	if m.TotalRows != TreeRows(m.NumLeaves) {
+		pos = translatePos(pos, m.TotalRows, TreeRows(m.NumLeaves))
 	}
 
 	return pos, true
@@ -1290,7 +1290,7 @@ func (m *MapPollard) GetLeafPosition(hash Hash) (uint64, bool) {
 }
 
 func (m *MapPollard) highestPos() uint64 {
-	totalRows := treeRows(m.NumLeaves)
+	totalRows := TreeRows(m.NumLeaves)
 	pos := rootPosition(m.NumLeaves, totalRows, totalRows)
 	return translatePos(pos, totalRows, m.TotalRows)
 }

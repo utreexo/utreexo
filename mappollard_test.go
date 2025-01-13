@@ -151,9 +151,9 @@ func (m *MapPollard) checkHashes() error {
 		return err
 	}
 
-	if m.TotalRows != treeRows(m.NumLeaves) {
+	if m.TotalRows != TreeRows(m.NumLeaves) {
 		for i := range proof.Targets {
-			proof.Targets[i] = translatePos(proof.Targets[i], m.TotalRows, treeRows(m.NumLeaves))
+			proof.Targets[i] = translatePos(proof.Targets[i], m.TotalRows, TreeRows(m.NumLeaves))
 		}
 	}
 
@@ -284,8 +284,8 @@ func FuzzMapPollardChain(f *testing.F) {
 
 			for _, target := range proof.Targets {
 				fetch := target
-				if m.TotalRows != treeRows(m.NumLeaves) {
-					fetch = translatePos(fetch, treeRows(m.NumLeaves), m.TotalRows)
+				if m.TotalRows != TreeRows(m.NumLeaves) {
+					fetch = translatePos(fetch, TreeRows(m.NumLeaves), m.TotalRows)
 				}
 				hash := m.GetHash(fetch)
 				if hash == empty {
@@ -330,10 +330,10 @@ func FuzzMapPollardChain(f *testing.F) {
 				t.Fatal(err)
 			}
 
-			if m.TotalRows != treeRows(m.NumLeaves) {
+			if m.TotalRows != TreeRows(m.NumLeaves) {
 				for i := range cachedProof.Targets {
 					cachedProof.Targets[i] = translatePos(
-						cachedProof.Targets[i], m.TotalRows, treeRows(m.NumLeaves))
+						cachedProof.Targets[i], m.TotalRows, TreeRows(m.NumLeaves))
 				}
 			}
 
@@ -650,15 +650,15 @@ func TestGetMissingPositions(t *testing.T) {
 	sanityCheck := func(t *testing.T, p *MapPollard, proves, missing []uint64) {
 		// Check that all the positions can actually exist.
 		for i := range missing {
-			if !inForest(missing[i], p.NumLeaves, treeRows(p.NumLeaves)) {
+			if !inForest(missing[i], p.NumLeaves, TreeRows(p.NumLeaves)) {
 				t.Fatalf("pos %d cannot exist in an accumulator with %d leaves",
 					missing[i], p.NumLeaves)
 			}
 		}
 
 		// Translate if needed.
-		if treeRows(p.NumLeaves) != p.TotalRows {
-			missing = translatePositions(missing, treeRows(p.NumLeaves), p.TotalRows)
+		if TreeRows(p.NumLeaves) != p.TotalRows {
+			missing = translatePositions(missing, TreeRows(p.NumLeaves), p.TotalRows)
 		}
 
 		// Check for duplicates and turn the slice into a map for easy lookup.
@@ -674,9 +674,9 @@ func TestGetMissingPositions(t *testing.T) {
 		}
 
 		// Calculate the positions actually needed.
-		needs, _ := ProofPositions(proves, p.NumLeaves, treeRows(p.NumLeaves))
-		if treeRows(p.NumLeaves) != p.TotalRows {
-			needs = translatePositions(needs, treeRows(p.NumLeaves), p.TotalRows)
+		needs, _ := ProofPositions(proves, p.NumLeaves, TreeRows(p.NumLeaves))
+		if TreeRows(p.NumLeaves) != p.TotalRows {
+			needs = translatePositions(needs, TreeRows(p.NumLeaves), p.TotalRows)
 		}
 
 		// Check that the missing positions are indeed missing.
@@ -935,7 +935,7 @@ func TestGetLeafHashPositions(t *testing.T) {
 	}
 
 	// Actual test is here.
-	expected := parent(0, treeRows(uint64(len(leaves))))
+	expected := parent(0, TreeRows(uint64(len(leaves))))
 	got, found := acc.getLeafHashPosition(leaves[0].Hash)
 	if !found {
 		t.Fatalf("expected to find position for hash %v but didn't", leaves[0].Hash)

@@ -126,7 +126,7 @@ func (p *Pollard) getNode(pos uint64) (n, sibling, parent *polNode, err error) {
 	// Tree is the root the position is located under.
 	// branchLen denotes how far down the root the position is.
 	// bits tell us if we should go down to the left child or the right child.
-	if pos >= maxPosition(treeRows(p.NumLeaves)) {
+	if pos >= maxPosition(TreeRows(p.NumLeaves)) {
 		return nil, nil, nil,
 			fmt.Errorf("Position %d does not exist in tree of %d leaves", pos, p.NumLeaves)
 	}
@@ -211,7 +211,7 @@ func (p *Pollard) calculatePosition(node *polNode) uint64 {
 		}
 		rowsToTop++
 	}
-	forestRows := treeRows(p.NumLeaves)
+	forestRows := TreeRows(p.NumLeaves)
 
 	// Calculate which row the root is on.
 	rootRow := -1

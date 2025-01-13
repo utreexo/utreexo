@@ -64,7 +64,7 @@ func (p *Pollard) GetNumLeaves() uint64 {
 
 // GetTreeRows returns the total number of rows the accumulator has allocated for.
 func (p *Pollard) GetTreeRows() uint8 {
-	return treeRows(p.NumLeaves)
+	return TreeRows(p.NumLeaves)
 }
 
 // GetLeafPosition returns the position of the leaf for the given hash. Returns false if
@@ -192,7 +192,7 @@ func (p *Pollard) calculateNewRoot(node *polNode) *polNode {
 func (p *Pollard) remove(dels []uint64) error {
 	sort.Slice(dels, func(a, b int) bool { return dels[a] < dels[b] })
 
-	totalRows := treeRows(p.NumLeaves)
+	totalRows := TreeRows(p.NumLeaves)
 	dels = deTwin(dels, totalRows)
 
 	for _, del := range dels {
@@ -293,7 +293,7 @@ func (p *Pollard) deleteSingle(del uint64) error {
 
 	// If to position is a root, there's no parent hash to be calculated so
 	// return early.
-	totalRows := treeRows(p.NumLeaves)
+	totalRows := TreeRows(p.NumLeaves)
 	to := parent(del, totalRows)
 	if isRootPosition(to, p.NumLeaves) {
 		toNode.aunt = nil
@@ -365,7 +365,7 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []
 
 	// Sort before detwining.
 	sort.Slice(dels, func(a, b int) bool { return dels[a] < dels[b] })
-	dels = deTwin(dels, treeRows(p.NumLeaves))
+	dels = deTwin(dels, TreeRows(p.NumLeaves))
 
 	// Copy to avoid mutating the original.
 	copyRoots := make([]Hash, len(prevRoots))
@@ -402,7 +402,7 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []
 
 // undoSingleAdd undoes one leaf that was added to the accumulator.
 func (p *Pollard) undoSingleAdd() {
-	lowestRootRow := getLowestRoot(p.NumLeaves, treeRows(p.NumLeaves))
+	lowestRootRow := getLowestRoot(p.NumLeaves, TreeRows(p.NumLeaves))
 	for row := int(lowestRootRow); row >= 0; row-- {
 		lowestRoot := p.Roots[len(p.Roots)-1]
 		p.Roots = p.Roots[:len(p.Roots)-1]
@@ -438,7 +438,7 @@ func (p *Pollard) undoDels(dels []uint64, delHashes []Hash) error {
 	}
 	sort.Slice(pnps, func(a, b int) bool { return pnps[a].pos < pnps[b].pos })
 
-	totalRows := treeRows(p.NumLeaves)
+	totalRows := TreeRows(p.NumLeaves)
 	pnps = deTwinPolNode(pnps, totalRows)
 
 	// Go through all the de-twined nodes and all from the highest position first.
@@ -466,7 +466,7 @@ func (p *Pollard) undoDels(dels []uint64, delHashes []Hash) error {
 }
 
 func (p *Pollard) undoSingleDel(node *polNode, pos uint64) error {
-	totalRows := treeRows(p.NumLeaves)
+	totalRows := TreeRows(p.NumLeaves)
 
 	siblingPos := parent(pos, totalRows)
 	sibling, aunt, _, err := p.getNode(siblingPos)

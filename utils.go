@@ -124,8 +124,8 @@ func RootPositions(numLeaves uint64, totalRows uint8) []uint64 {
 // isRootPositionTotalRows is a wrapper around isRootPosition that will translate the given
 // position if needed.
 func isRootPositionTotalRows(position, numLeaves uint64, totalRows uint8) bool {
-	if totalRows != treeRows(numLeaves) {
-		translated := translatePos(position, totalRows, treeRows(numLeaves))
+	if totalRows != TreeRows(numLeaves) {
+		translated := translatePos(position, totalRows, TreeRows(numLeaves))
 		return isRootPosition(translated, numLeaves)
 	}
 
@@ -135,7 +135,7 @@ func isRootPositionTotalRows(position, numLeaves uint64, totalRows uint8) bool {
 // isRootPosition checks if the current position is a root given the number of
 // leaves.
 func isRootPosition(position, numLeaves uint64) bool {
-	row := detectRow(position, treeRows(numLeaves))
+	row := detectRow(position, TreeRows(numLeaves))
 	return isRootPositionOnRow(position, numLeaves, row)
 }
 
@@ -143,7 +143,7 @@ func isRootPosition(position, numLeaves uint64) bool {
 // leaves, current row, and the entire rows of the forest.
 func isRootPositionOnRow(position, numLeaves uint64, row uint8) bool {
 	rootPresent := numLeaves&(1<<row) != 0
-	rootPos := rootPosition(numLeaves, row, treeRows(numLeaves))
+	rootPos := rootPosition(numLeaves, row, TreeRows(numLeaves))
 
 	return rootPresent && rootPos == position
 }
@@ -151,8 +151,8 @@ func isRootPositionOnRow(position, numLeaves uint64, row uint8) bool {
 // isRootPositionOnRowTotalRows is a wrapper around isRootPositionOnRow that will translate the given
 // position if needed.
 func isRootPositionOnRowTotalRows(position, numLeaves uint64, row, forestRows uint8) bool {
-	if treeRows(numLeaves) != forestRows {
-		translated := translatePos(position, forestRows, treeRows(numLeaves))
+	if TreeRows(numLeaves) != forestRows {
+		translated := translatePos(position, forestRows, TreeRows(numLeaves))
 		return isRootPositionOnRow(translated, numLeaves, row)
 	}
 
@@ -334,7 +334,7 @@ func getLowestRoot(numLeaves uint64, totalRows uint8) uint8 {
 // 2. The height from node to its tree top (which is the bitfield length).
 // 3. The L/R bitfield to descend to the node.
 func detectOffset(position uint64, numLeaves uint64) (uint8, uint8, uint64, error) {
-	tRows := int(treeRows(numLeaves))
+	tRows := int(TreeRows(numLeaves))
 	// nr = target node row
 	nr := detectRow(position, uint8(tRows))
 
@@ -388,7 +388,7 @@ func detectOffset(position uint64, numLeaves uint64) (uint8, uint8, uint64, erro
 	return biggerTrees, uint8(tRows) - nr, ^position, nil
 }
 
-// treeRows returns the number of rows given n leaves.
+// TreeRows returns the number of rows given n leaves.
 // Example: The below tree will return 2 as the forest will allocate enough for
 // 4 leaves.
 //
@@ -397,7 +397,7 @@ func detectOffset(position uint64, numLeaves uint64) (uint8, uint8, uint64, erro
 // row 1: 04
 // .      |---\   |---\
 // row 0: 00  01  02
-func treeRows(n uint64) uint8 {
+func TreeRows(n uint64) uint8 {
 	if n == 0 {
 		return 0
 	}
@@ -712,7 +712,7 @@ func getRootPosition(position uint64, numLeaves uint64, forestRows uint8) (uint6
 // AllSubTreesToString returns a string of all the individual subtrees in the accumulator.
 func AllSubTreesToString(ts ToString) string {
 	str := ""
-	totalRows := treeRows(ts.GetNumLeaves())
+	totalRows := TreeRows(ts.GetNumLeaves())
 	for h := uint8(0); h < totalRows; h++ {
 		rootPos := rootPosition(ts.GetNumLeaves(), h, totalRows)
 		if isRootPosition(rootPos, ts.GetNumLeaves()) {
@@ -726,11 +726,11 @@ func AllSubTreesToString(ts ToString) string {
 
 // SubTreeToString returns a string of the subtree that the position is in.
 func SubTreeToString(ts ToString, position uint64, inHex bool) string {
-	rootPosition, err := getRootPosition(position, ts.GetNumLeaves(), treeRows(ts.GetNumLeaves()))
+	rootPosition, err := getRootPosition(position, ts.GetNumLeaves(), TreeRows(ts.GetNumLeaves()))
 	if err != nil {
 		return fmt.Sprintf("SubTreeToString error: %v", err.Error())
 	}
-	subTreeRow := detectRow(rootPosition, treeRows(ts.GetNumLeaves()))
+	subTreeRow := detectRow(rootPosition, TreeRows(ts.GetNumLeaves()))
 
 	if subTreeRow > 7 {
 		s := fmt.Sprintf("Can't print subtree with rows %d. roots:\n", subTreeRow)
@@ -785,7 +785,7 @@ func SubTreeToString(ts ToString, position uint64, inHex bool) string {
 				}
 			}
 
-			leftChild := leftChild(position, treeRows(ts.GetNumLeaves()))
+			leftChild := leftChild(position, TreeRows(ts.GetNumLeaves()))
 			rightChild := rightSib(leftChild)
 			nextPositions = append(nextPositions, leftChild)
 			nextPositions = append(nextPositions, rightChild)

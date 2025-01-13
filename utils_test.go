@@ -93,9 +93,9 @@ func TestRootPositions(t *testing.T) {
 		{numLeaves: 2, totalRows: 1},
 		{numLeaves: 15, totalRows: 50},
 		{numLeaves: 4454546, totalRows: 50},
-		{numLeaves: 4454546, totalRows: treeRows(4454546)},
+		{numLeaves: 4454546, totalRows: TreeRows(4454546)},
 		{numLeaves: 111875, totalRows: 50},
-		{numLeaves: 111875, totalRows: treeRows(111875)},
+		{numLeaves: 111875, totalRows: TreeRows(111875)},
 	}
 
 	for _, test := range tests {
