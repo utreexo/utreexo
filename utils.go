@@ -18,21 +18,21 @@ func parentHash(l, r Hash) Hash {
 	return *((*Hash)(h.Sum(nil)))
 }
 
-// leftChild gives you the position of the left child. The least significant
+// LeftChild gives you the position of the left child. The least significant
 // bit will be 0.
-func leftChild(position uint64, forestRows uint8) uint64 {
+func LeftChild(position uint64, forestRows uint8) uint64 {
 	mask := uint64(2<<forestRows) - 1
 	return (position << 1) & mask
 }
 
-// rightChild gives you the position of the right child. The least significant
+// RightChild gives you the position of the right child. The least significant
 // bit will be 1.
-func rightChild(position uint64, forestRows uint8) uint64 {
+func RightChild(position uint64, forestRows uint8) uint64 {
 	mask := uint64(2<<forestRows) - 1
 	return ((position << 1) & mask) | 1
 }
 
-// childMany returns the child that's multiple rows lower. The returned child is always of the left child.
+// ChildMany returns the child that's multiple rows lower. The returned child is always of the left child.
 // In the tree below, position=14, drop=3, forestRows=3 will return 00.
 // Arg of: position=14, drop=2, forestRows=3 will return 08.
 //
@@ -43,7 +43,7 @@ func rightChild(position uint64, forestRows uint8) uint64 {
 // 08      09      10      11
 // |---\   |---\   |---\   |---\
 // 00  01  02  03  04  05  06  07
-func childMany(position uint64, drop, forestRows uint8) (uint64, error) {
+func ChildMany(position uint64, drop, forestRows uint8) (uint64, error) {
 	if drop == 0 {
 		return position, nil
 	}
@@ -785,7 +785,7 @@ func SubTreeToString(ts ToString, position uint64, inHex bool) string {
 				}
 			}
 
-			leftChild := leftChild(position, TreeRows(ts.GetNumLeaves()))
+			leftChild := LeftChild(position, TreeRows(ts.GetNumLeaves()))
 			rightChild := rightSib(leftChild)
 			nextPositions = append(nextPositions, leftChild)
 			nextPositions = append(nextPositions, rightChild)

@@ -233,8 +233,8 @@ func (m *MapPollard) niecesPresent(pos uint64) bool {
 		return false
 	}
 
-	lNiecePos := leftChild(sibling(pos), m.TotalRows)
-	rNiecePos := rightChild(sibling(pos), m.TotalRows)
+	lNiecePos := LeftChild(sibling(pos), m.TotalRows)
+	rNiecePos := RightChild(sibling(pos), m.TotalRows)
 	_, lNieceFound := m.Nodes.Get(lNiecePos)
 	_, rNieceFound := m.Nodes.Get(rNiecePos)
 
@@ -270,7 +270,7 @@ func (m *MapPollard) pruneNieces(pos uint64) {
 	if DetectRow(pos, m.TotalRows) == 0 {
 		return
 	}
-	lChild := leftChild(pos, m.TotalRows)
+	lChild := LeftChild(pos, m.TotalRows)
 
 	m.prunePosition(lChild)
 }
@@ -412,11 +412,11 @@ func (m *MapPollard) moveUpNieces(position, delPos, numLeaves uint64) ([]uint64,
 		return nil, nil
 	}
 
-	l, err := m.moveUpChild(sibling(position), delPos, numLeaves, leftChild)
+	l, err := m.moveUpChild(sibling(position), delPos, numLeaves, LeftChild)
 	if err != nil {
 		return nil, err
 	}
-	r, err := m.moveUpChild(sibling(position), delPos, numLeaves, rightChild)
+	r, err := m.moveUpChild(sibling(position), delPos, numLeaves, RightChild)
 	if err != nil {
 		return nil, err
 	}
@@ -526,7 +526,7 @@ func (m *MapPollard) forgetBelow(position uint64) {
 		return
 	}
 
-	l := leftChild(position, m.TotalRows)
+	l := LeftChild(position, m.TotalRows)
 	r := sibling(l)
 
 	m.Nodes.Delete(l)
@@ -642,7 +642,7 @@ func (m *MapPollard) remove(proof Proof, delHashes []Hash) error {
 func (m *MapPollard) undoSingleAdd(emptyRootPositions []uint64) ([]uint64, error) {
 	row := getLowestRoot(m.NumLeaves, m.TotalRows)
 	pos := rootPosition(m.NumLeaves-1, row, m.TotalRows)
-	lChild := leftChild(pos, m.TotalRows)
+	lChild := LeftChild(pos, m.TotalRows)
 
 	for h := int(row); h >= 0; h-- {
 		leaf, found := m.Nodes.Get(pos)
@@ -667,8 +667,8 @@ func (m *MapPollard) undoSingleAdd(emptyRootPositions []uint64) ([]uint64, error
 			}
 		}
 
-		pos = rightChild(pos, m.TotalRows)
-		lChild = leftChild(pos, m.TotalRows)
+		pos = RightChild(pos, m.TotalRows)
+		lChild = LeftChild(pos, m.TotalRows)
 	}
 
 	m.NumLeaves--
@@ -683,7 +683,7 @@ func (m *MapPollard) placeEmptyRoot(prevRootPos uint64) error {
 	row := DetectRow(sib, m.TotalRows)
 
 	for h := int(row); h > 0; h-- {
-		child, err := childMany(sib, uint8(h), m.TotalRows)
+		child, err := ChildMany(sib, uint8(h), m.TotalRows)
 		if err != nil {
 			return err
 		}

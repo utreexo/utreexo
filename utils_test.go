@@ -317,7 +317,7 @@ func TestChildMany(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		got, err := childMany(test.position, test.drop, test.totalRows)
+		got, err := ChildMany(test.position, test.drop, test.totalRows)
 		if err != nil {
 			if test.err == nil {
 				t.Errorf("expected error of %v but got %v", test.err, err)

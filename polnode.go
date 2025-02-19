@@ -244,11 +244,11 @@ func (p *Pollard) calculatePosition(node *polNode) uint64 {
 		if leftRightIndicator&isRight == isRight {
 			// Grab the sibling since the pollard nodes point to their
 			// niece. My sibling's nieces are my children.
-			retPos = sibling(rightChild(retPos, forestRows))
+			retPos = sibling(RightChild(retPos, forestRows))
 		} else {
 			// Grab the sibling since the pollard nodes point to their
 			// niece. My sibling's nieces are my children.
-			retPos = sibling(leftChild(retPos, forestRows))
+			retPos = sibling(LeftChild(retPos, forestRows))
 		}
 	}
 
@@ -430,11 +430,11 @@ func updateAunt(n *polNode) {
 func hashToRoot(node *polNode) error {
 	for node != nil {
 		// Grab children of this parent.
-		leftChild, rightChild, err := node.getChildren()
+		LeftChild, RightChild, err := node.getChildren()
 		if err != nil {
 			return err
 		}
-		node.data = parentHash(leftChild.data, rightChild.data)
+		node.data = parentHash(LeftChild.data, RightChild.data)
 
 		// Grab the next parent that needs the hash updated.
 		node, err = node.getParent()
