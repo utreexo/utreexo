@@ -135,7 +135,7 @@ func isRootPositionTotalRows(position, numLeaves uint64, totalRows uint8) bool {
 // isRootPosition checks if the current position is a root given the number of
 // leaves.
 func isRootPosition(position, numLeaves uint64) bool {
-	row := detectRow(position, TreeRows(numLeaves))
+	row := DetectRow(position, TreeRows(numLeaves))
 	return isRootPositionOnRow(position, numLeaves, row)
 }
 
@@ -179,8 +179,8 @@ func isAncestor(higherPos, lowerPos uint64, forestRows uint8) bool {
 	if higherPos == lowerPos {
 		return false
 	}
-	lowerRow := detectRow(lowerPos, forestRows)
-	higherRow := detectRow(higherPos, forestRows)
+	lowerRow := DetectRow(lowerPos, forestRows)
+	higherRow := DetectRow(higherPos, forestRows)
 
 	// Prevent underflows by checking that the higherRow is not less
 	// than the lowerRow.
@@ -249,8 +249,8 @@ func addBit(val, place uint64, bit bool) uint64 {
 // TODO? we could have a function that supports moving up multiple rows. Not sure
 // if it's needed.
 func calcNextPosition(position, delPos uint64, forestRows uint8) (uint64, error) {
-	delRow := detectRow(delPos, forestRows)
-	posRow := detectRow(position, forestRows)
+	delRow := DetectRow(delPos, forestRows)
+	posRow := DetectRow(position, forestRows)
 
 	if delRow < posRow {
 		return 0, fmt.Errorf("calcNextPosition fail. delPos of %d is lower than %d",
@@ -281,8 +281,8 @@ func calcNextPosition(position, delPos uint64, forestRows uint8) (uint64, error)
 // -       |----\    |----\
 // row 0 - 000  001  010  011
 func calcPrevPosition(position, delPos uint64, forestRows uint8) uint64 {
-	delRow := detectRow(delPos, forestRows)
-	posRow := detectRow(position, forestRows)
+	delRow := DetectRow(delPos, forestRows)
+	posRow := DetectRow(position, forestRows)
 
 	mask := ^(uint64(1<<posRow) << uint64(forestRows-posRow))
 	lowerBits := position
@@ -302,9 +302,9 @@ func calcPrevPosition(position, delPos uint64, forestRows uint8) uint64 {
 	return lowerBits
 }
 
-// detectRow finds the current row of your node given the position
+// DetectRow finds the current row of your node given the position
 // and the total forest rows.
-func detectRow(position uint64, forestRows uint8) uint8 {
+func DetectRow(position uint64, forestRows uint8) uint8 {
 	marker := uint64(1 << forestRows)
 	var h uint8
 	for h = 0; position&marker != 0; h++ {
@@ -336,7 +336,7 @@ func getLowestRoot(numLeaves uint64, totalRows uint8) uint8 {
 func detectOffset(position uint64, numLeaves uint64) (uint8, uint8, uint64, error) {
 	tRows := int(TreeRows(numLeaves))
 	// nr = target node row
-	nr := detectRow(position, uint8(tRows))
+	nr := DetectRow(position, uint8(tRows))
 
 	origPos := position
 	// add trees until you would exceed position of node
@@ -455,7 +455,7 @@ func maxPositionAtRow(row, forestRows uint8, numLeaves uint64) (uint64, error) {
 
 // translatePos returns what the given position would be in the to total rows.
 func translatePos(pos uint64, fromTotalRow, toTotalRow uint8) uint64 {
-	row := detectRow(pos, fromTotalRow)
+	row := DetectRow(pos, fromTotalRow)
 	if row == 0 {
 		return pos
 	}
@@ -541,7 +541,7 @@ func proofPosition(target uint64, numLeaves uint64, totalRows uint8) []uint64 {
 	proofs := make([]uint64, 0, totalRows+1)
 
 	pos := target
-	for h := detectRow(target, totalRows); h <= totalRows; h++ {
+	for h := DetectRow(target, totalRows); h <= totalRows; h++ {
 		if isRootPositionTotalRows(pos, numLeaves, totalRows) {
 			break
 		}
@@ -574,7 +574,7 @@ func ProofPositions(origTargets []uint64, numLeaves uint64, totalRows uint8) ([]
 			}
 
 			// The target may not be on this row.
-			if row != detectRow(target, totalRows) {
+			if row != DetectRow(target, totalRows) {
 				continue
 			}
 
@@ -688,7 +688,7 @@ func getRootPosition(position uint64, numLeaves uint64, forestRows uint8) (uint6
 
 	// Since we'll be comparing against the parent of the given position,
 	// start one row above.
-	h := detectRow(position, forestRows)
+	h := DetectRow(position, forestRows)
 
 	for ; h <= forestRows; h++ {
 		rootPos := rootPosition(numLeaves, h, forestRows)
@@ -730,7 +730,7 @@ func SubTreeToString(ts ToString, position uint64, inHex bool) string {
 	if err != nil {
 		return fmt.Sprintf("SubTreeToString error: %v", err.Error())
 	}
-	subTreeRow := detectRow(rootPosition, TreeRows(ts.GetNumLeaves()))
+	subTreeRow := DetectRow(rootPosition, TreeRows(ts.GetNumLeaves()))
 
 	if subTreeRow > 7 {
 		s := fmt.Sprintf("Can't print subtree with rows %d. roots:\n", subTreeRow)

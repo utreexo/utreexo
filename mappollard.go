@@ -229,7 +229,7 @@ func (m *MapPollard) add(adds []Leaf) error {
 
 // niecesPresent returns if either of the nieces exist for the given position.
 func (m *MapPollard) niecesPresent(pos uint64) bool {
-	if detectRow(pos, m.TotalRows) == 0 {
+	if DetectRow(pos, m.TotalRows) == 0 {
 		return false
 	}
 
@@ -267,7 +267,7 @@ func (m *MapPollard) prunePosition(pos uint64) {
 
 // pruneNieces prunes the nieces of the given position if they are not needed.
 func (m *MapPollard) pruneNieces(pos uint64) {
-	if detectRow(pos, m.TotalRows) == 0 {
+	if DetectRow(pos, m.TotalRows) == 0 {
 		return
 	}
 	lChild := leftChild(pos, m.TotalRows)
@@ -293,7 +293,7 @@ func (m *MapPollard) forgetUnneededDel(del uint64) error {
 	// The cases in which my sibling needs to be remembered are:
 	// 1: Myself needs to be remembered.
 	// 2: My sibling as nieces.
-	for row := detectRow(del, m.TotalRows); row <= m.TotalRows; row++ {
+	for row := DetectRow(del, m.TotalRows); row <= m.TotalRows; row++ {
 		parentPos = parent(parentPos, m.TotalRows)
 
 		// Break if we're on a root.
@@ -373,7 +373,7 @@ func (m *MapPollard) addSingle(add Leaf) error {
 // and re-inserts them into the map of nodes with their new positions. The function
 // recursively moves up children this until the bottom-most row.
 func (m *MapPollard) moveUpDescendants(position, delPos, numLeaves uint64) error {
-	row := int(detectRow(position, m.TotalRows))
+	row := int(DetectRow(position, m.TotalRows))
 	if row == 0 {
 		return nil
 	}
@@ -407,7 +407,7 @@ func (m *MapPollard) moveUpDescendants(position, delPos, numLeaves uint64) error
 
 // moveUpNieces moves up the nieces of the given position.
 func (m *MapPollard) moveUpNieces(position, delPos, numLeaves uint64) ([]uint64, error) {
-	row := detectRow(position, m.TotalRows)
+	row := DetectRow(position, m.TotalRows)
 	if row == 0 {
 		return nil, nil
 	}
@@ -521,7 +521,7 @@ func (m *MapPollard) cached(hashes []Hash) bool {
 
 // forgetBelow removes all the positions that are descendants of the given position.
 func (m *MapPollard) forgetBelow(position uint64) {
-	row := detectRow(position, m.TotalRows)
+	row := DetectRow(position, m.TotalRows)
 	if row == 0 {
 		return
 	}
@@ -541,7 +541,7 @@ func (m *MapPollard) updateHashes(position uint64, hash Hash) {
 	node := Leaf{Hash: hash, Remember: m.Full}
 
 	pos := parent(position, m.TotalRows)
-	for row := detectRow(pos, m.TotalRows); row <= m.TotalRows; row++ {
+	for row := DetectRow(pos, m.TotalRows); row <= m.TotalRows; row++ {
 		sibPos := sibling(pos)
 		sibNode, _ := m.Nodes.Get(sibPos)
 
@@ -680,7 +680,7 @@ func (m *MapPollard) undoSingleAdd(emptyRootPositions []uint64) ([]uint64, error
 // move down the nodes that are at the current empty root position.
 func (m *MapPollard) placeEmptyRoot(prevRootPos uint64) error {
 	sib := sibling(prevRootPos)
-	row := detectRow(sib, m.TotalRows)
+	row := DetectRow(sib, m.TotalRows)
 
 	for h := int(row); h > 0; h-- {
 		child, err := childMany(sib, uint8(h), m.TotalRows)
@@ -1212,7 +1212,7 @@ func (m *MapPollard) Prune(hashes []Hash) error {
 		m.Nodes.Put(pos, leaf)
 
 		// Call prune positions until the root.
-		for row := detectRow(pos, m.TotalRows); row <= TreeRows(m.NumLeaves); row++ {
+		for row := DetectRow(pos, m.TotalRows); row <= TreeRows(m.NumLeaves); row++ {
 			// Break if we're on a root.
 			if isRootPositionTotalRows(pos, m.NumLeaves, m.TotalRows) {
 				break

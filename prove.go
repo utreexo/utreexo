@@ -1003,7 +1003,7 @@ func pruneEdges(hnp hashAndPos, numAdds, numLeaves uint64, forestRows, prevFores
 	prevTargetsWithHash := hashAndPos{make([]uint64, 0, hnp.Len()), make([]Hash, 0, hnp.Len())}
 	for i, target := range hnp.positions {
 		// Save the current row.
-		row := detectRow(target, forestRows)
+		row := DetectRow(target, forestRows)
 
 		// If the row is greater than the prevForestRows, this can't exist.
 		if row > prevForestRows {
@@ -1109,7 +1109,7 @@ func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestro
 	// Remap all positions to their previous positions before the remap.
 	if prevForestRows < forestRows {
 		for i, pos := range targetsWithHash.positions {
-			row := detectRow(pos, TreeRows(numLeaves))
+			row := DetectRow(pos, TreeRows(numLeaves))
 
 			currentStartPos := startPositionAtRow(row, forestRows)
 			prevStartPos := startPositionAtRow(row, prevForestRows)
@@ -1120,7 +1120,7 @@ func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestro
 		}
 
 		for i, pos := range proofWithPos.positions {
-			row := detectRow(pos, TreeRows(numLeaves))
+			row := DetectRow(pos, TreeRows(numLeaves))
 
 			currentStartPos := startPositionAtRow(row, forestRows)
 			prevStartPos := startPositionAtRow(row, prevForestRows)
@@ -1330,7 +1330,7 @@ func maybeRemap(numLeaves, numAdds uint64, hnp hashAndPos) hashAndPos {
 	oldForestRows := TreeRows(numLeaves)
 	if newForestRows > oldForestRows {
 		for i, pos := range hnp.positions {
-			row := detectRow(pos, TreeRows(numLeaves))
+			row := DetectRow(pos, TreeRows(numLeaves))
 
 			oldStartPos := startPositionAtRow(row, oldForestRows)
 			newStartPos := startPositionAtRow(row, newForestRows)

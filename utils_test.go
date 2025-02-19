@@ -66,7 +66,7 @@ func TestInForest(t *testing.T) {
 		}
 
 		// Sanity check.
-		row := detectRow(test.position, test.totalRows)
+		row := DetectRow(test.position, test.totalRows)
 		max, err := maxPositionAtRow(row, test.totalRows, test.numLeaves)
 		if err != nil {
 			t.Fatal(err)
