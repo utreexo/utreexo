@@ -71,14 +71,14 @@ func rightSib(pos uint64) uint64 {
 	return pos | 1
 }
 
-// parent returns the position of the parent of this position.
-func parent(position uint64, forestRows uint8) uint64 {
+// Parent returns the position of the parent of this position.
+func Parent(position uint64, forestRows uint8) uint64 {
 	return (position >> 1) | (1 << forestRows)
 }
 
-// parentMany returns the position of the ancestor that's rise rows above the given position.
+// ParentMany returns the position of the ancestor that's rise rows above the given position.
 // rise=0 returns position, rise=1 returns the parent, rise=2 returns the grandparent.
-func parentMany(position uint64, rise, forestRows uint8) (uint64, error) {
+func ParentMany(position uint64, rise, forestRows uint8) (uint64, error) {
 	if rise == 0 {
 		return position, nil
 	}
@@ -190,7 +190,7 @@ func isAncestor(higherPos, lowerPos uint64, forestRows uint8) bool {
 
 	// Return false if we error out or the calculated ancestor doesn't
 	// match the higherPos.
-	ancestor, err := parentMany(lowerPos, higherRow-lowerRow, forestRows)
+	ancestor, err := ParentMany(lowerPos, higherRow-lowerRow, forestRows)
 	if err != nil || higherPos != ancestor {
 		return false
 	}
@@ -441,7 +441,7 @@ func maxPossiblePosAtRow(row, totalRows uint8) uint64 {
 // maxPositionAtRow returns the biggest position an accumulator can have for the
 // requested row for the given numLeaves.
 func maxPositionAtRow(row, forestRows uint8, numLeaves uint64) (uint64, error) {
-	max, err := parentMany(numLeaves, row, forestRows)
+	max, err := ParentMany(numLeaves, row, forestRows)
 	if err != nil {
 		return 0, err
 	}
@@ -497,7 +497,7 @@ func deTwin(dels []uint64, forestRows uint8) []uint64 {
 			dels = append(dels[:i], dels[i+2:]...)
 
 			// Calculate and insert the parent in order.
-			dels = insertInOrder(dels, parent(pos, forestRows))
+			dels = insertInOrder(dels, Parent(pos, forestRows))
 
 			// Decrement one since the next element we should
 			// look at is at the same index because the slice decreased
@@ -546,7 +546,7 @@ func proofPosition(target uint64, numLeaves uint64, totalRows uint8) []uint64 {
 			break
 		}
 		proofs = append(proofs, sibling(pos))
-		pos = parent(pos, totalRows)
+		pos = Parent(pos, totalRows)
 	}
 
 	return proofs
@@ -587,7 +587,7 @@ func ProofPositions(origTargets []uint64, numLeaves uint64, totalRows uint8) ([]
 			// Check if the next target in line is my sibling. If it is, we don't
 			// need it as a proof position.
 			if i+1 < len(targets) && rightSib(target) == targets[i+1] {
-				targets[i] = parent(target, totalRows)
+				targets[i] = Parent(target, totalRows)
 				nextTargets = append(nextTargets, targets[i])
 				i++
 				continue
@@ -595,7 +595,7 @@ func ProofPositions(origTargets []uint64, numLeaves uint64, totalRows uint8) ([]
 
 			// Mark the sibling as a needed proof position.
 			proofPositions = append(proofPositions, sibling(target))
-			targets[i] = parent(target, totalRows)
+			targets[i] = Parent(target, totalRows)
 			nextTargets = append(nextTargets, targets[i])
 		}
 
@@ -697,7 +697,7 @@ func getRootPosition(position uint64, numLeaves uint64, forestRows uint8) (uint6
 		}
 
 		// Grab the parent.
-		returnPos = parent(returnPos, forestRows)
+		returnPos = Parent(returnPos, forestRows)
 	}
 
 	if position != 0 && forestRows != 0 {

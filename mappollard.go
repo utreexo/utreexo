@@ -294,7 +294,7 @@ func (m *MapPollard) forgetUnneededDel(del uint64) error {
 	// 1: Myself needs to be remembered.
 	// 2: My sibling as nieces.
 	for row := DetectRow(del, m.TotalRows); row <= m.TotalRows; row++ {
-		parentPos = parent(parentPos, m.TotalRows)
+		parentPos = Parent(parentPos, m.TotalRows)
 
 		// Break if we're on a root.
 		if isRootPositionTotalRows(parentPos, m.NumLeaves, m.TotalRows) {
@@ -347,7 +347,7 @@ func (m *MapPollard) addSingle(add Leaf) error {
 			if add.Remember && pNode.Hash == add.Hash {
 				_, exists := m.CachedLeaves.Get(add.Hash)
 				if exists {
-					m.CachedLeaves.Put(add.Hash, parent(position, totalRows))
+					m.CachedLeaves.Put(add.Hash, Parent(position, totalRows))
 				}
 			}
 
@@ -361,7 +361,7 @@ func (m *MapPollard) addSingle(add Leaf) error {
 			pNode = Leaf{Hash: parentHash(node.Hash, pNode.Hash), Remember: m.Full}
 		}
 
-		position = parent(position, totalRows)
+		position = Parent(position, totalRows)
 		m.Nodes.Put(position, pNode)
 		m.pruneNieces(position)
 	}
@@ -540,7 +540,7 @@ func (m *MapPollard) forgetBelow(position uint64) {
 func (m *MapPollard) updateHashes(position uint64, hash Hash) {
 	node := Leaf{Hash: hash, Remember: m.Full}
 
-	pos := parent(position, m.TotalRows)
+	pos := Parent(position, m.TotalRows)
 	for row := DetectRow(pos, m.TotalRows); row <= m.TotalRows; row++ {
 		sibPos := sibling(pos)
 		sibNode, _ := m.Nodes.Get(sibPos)
@@ -551,7 +551,7 @@ func (m *MapPollard) updateHashes(position uint64, hash Hash) {
 			node.Hash = parentHash(sibNode.Hash, node.Hash)
 		}
 
-		pos = parent(pos, m.TotalRows)
+		pos = Parent(pos, m.TotalRows)
 
 		// Update the parent hash if we have it cached.
 		_, found := m.Nodes.Get(pos)
@@ -584,7 +584,7 @@ func (m *MapPollard) removeSingle(del uint64) error {
 	node, found := m.Nodes.Get(sibling(del))
 	if found {
 		m.Nodes.Delete(sibling(del))
-		m.Nodes.Put(parent(del, m.TotalRows), node)
+		m.Nodes.Put(Parent(del, m.TotalRows), node)
 
 		// Update the cache position if it exists in there.
 		_, cacheFound := m.CachedLeaves.Get(node.Hash)
@@ -742,7 +742,7 @@ func (m *MapPollard) undoDeletion(proof Proof, hashes []Hash) error {
 
 		// Grab the former sibling in the parent position and move it down to its
 		// previous position.
-		sib := parent(deTwinedTargets[i], m.TotalRows)
+		sib := Parent(deTwinedTargets[i], m.TotalRows)
 		prevPos := calcPrevPosition(sib, deTwinedTargets[i], m.TotalRows)
 		v, found := m.Nodes.Get(sib)
 		if found {
@@ -1218,7 +1218,7 @@ func (m *MapPollard) Prune(hashes []Hash) error {
 				break
 			}
 			m.prunePosition(pos)
-			pos = parent(pos, m.TotalRows)
+			pos = Parent(pos, m.TotalRows)
 		}
 	}
 

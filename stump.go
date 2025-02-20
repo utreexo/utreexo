@@ -148,7 +148,7 @@ func (s *Stump) add(adds []Hash) ([]Hash, []uint64, []uint64) {
 		// the current root to move up.
 		deleted := rootsToDestory(uint64(len(adds)-i), s.NumLeaves, s.Roots)
 		for _, del := range deleted {
-			if isAncestor(parent(del, afterRows), pos, afterRows) {
+			if isAncestor(Parent(del, afterRows), pos, afterRows) {
 				pos, _ = calcNextPosition(pos, del, afterRows)
 			}
 		}
@@ -194,7 +194,7 @@ func (s *Stump) add(adds []Hash) ([]Hash, []uint64, []uint64) {
 
 				// Calculate the hash of the new root and append it.
 				newRoot = parentHash(root, newRoot)
-				pos = parent(pos, afterRows)
+				pos = Parent(pos, afterRows)
 			}
 		}
 

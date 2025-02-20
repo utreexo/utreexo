@@ -294,7 +294,7 @@ func (p *Pollard) deleteSingle(del uint64) error {
 	// If to position is a root, there's no parent hash to be calculated so
 	// return early.
 	totalRows := TreeRows(p.NumLeaves)
-	to := parent(del, totalRows)
+	to := Parent(del, totalRows)
 	if isRootPosition(to, p.NumLeaves) {
 		toNode.aunt = nil
 		return nil
@@ -468,7 +468,7 @@ func (p *Pollard) undoDels(dels []uint64, delHashes []Hash) error {
 func (p *Pollard) undoSingleDel(node *polNode, pos uint64) error {
 	totalRows := TreeRows(p.NumLeaves)
 
-	siblingPos := parent(pos, totalRows)
+	siblingPos := Parent(pos, totalRows)
 	sibling, aunt, _, err := p.getNode(siblingPos)
 	if err != nil {
 		return fmt.Errorf("Couldn't undo %s at position %d, err: %v",
