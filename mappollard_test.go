@@ -935,7 +935,7 @@ func TestGetLeafHashPositions(t *testing.T) {
 	}
 
 	// Actual test is here.
-	expected := parent(0, TreeRows(uint64(len(leaves))))
+	expected := Parent(0, TreeRows(uint64(len(leaves))))
 	got, found := acc.getLeafHashPosition(leaves[0].Hash)
 	if !found {
 		t.Fatalf("expected to find position for hash %v but didn't", leaves[0].Hash)

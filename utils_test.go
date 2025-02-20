@@ -50,12 +50,12 @@ func TestInForest(t *testing.T) {
 		{position: 5, numLeaves: 2, totalRows: 50, expect: false},
 		{position: 35, numLeaves: 40, totalRows: 50, expect: true},
 		{position: 43, numLeaves: 40, totalRows: 50, expect: false},
-		{position: parent(59, 50), numLeaves: 40, totalRows: 50, expect: false},
+		{position: Parent(59, 50), numLeaves: 40, totalRows: 50, expect: false},
 
 		{position: 150_004, numLeaves: 152_121, totalRows: 50, expect: true},
 		{position: 156_004, numLeaves: 152_121, totalRows: 50, expect: false},
-		{position: parent(156_004, 50), numLeaves: 152_121, totalRows: 50, expect: false},
-		{position: parent(parent(156_004, 50), 50), numLeaves: 152_121, totalRows: 50, expect: false},
+		{position: Parent(156_004, 50), numLeaves: 152_121, totalRows: 50, expect: false},
+		{position: Parent(Parent(156_004, 50), 50), numLeaves: 152_121, totalRows: 50, expect: false},
 	}
 
 	for _, test := range tests {
@@ -125,7 +125,7 @@ func TestIsRootPositionTotalRows(t *testing.T) {
 		// 00  01
 		{position: 0, numLeaves: 2, totalRows: 50, expect: false},
 		{position: 1, numLeaves: 2, totalRows: 50, expect: false},
-		{position: parent(0, 50), numLeaves: 2, totalRows: 50, expect: true},
+		{position: Parent(0, 50), numLeaves: 2, totalRows: 50, expect: true},
 
 		// |-------\
 		// 04
@@ -135,7 +135,7 @@ func TestIsRootPositionTotalRows(t *testing.T) {
 		{position: 1, numLeaves: 3, totalRows: 50, expect: false},
 		{position: 2, numLeaves: 3, totalRows: 50, expect: true},
 		{position: 3, numLeaves: 3, totalRows: 50, expect: false},
-		{position: parent(0, 50), numLeaves: 3, totalRows: 50, expect: true},
+		{position: Parent(0, 50), numLeaves: 3, totalRows: 50, expect: true},
 	}
 
 	for _, test := range tests {

@@ -381,7 +381,7 @@ func deTwinHashAndPos(hnp hashAndPos, forestRows uint8) hashAndPos {
 			hnp.Delete(i)
 
 			// Calculate and insert the parent in order.
-			position := parent(nodePos, forestRows)
+			position := Parent(nodePos, forestRows)
 			hnp = mergeSortedHashAndPos(
 				hnp,
 				hashAndPos{[]uint64{position}, []Hash{parentHash(nodeHash, sibHash)}},
@@ -614,7 +614,7 @@ func calculateHashes(numLeaves uint64, delHashes []Hash, proof Proof) (hashAndPo
 
 		// Calculate the next hash.
 		nextHash := getNextHash(provePos, proveHash, sibHash)
-		nextProves.Append(parent(provePos, totalRows), nextHash)
+		nextProves.Append(Parent(provePos, totalRows), nextHash)
 	}
 
 	// Add in the targets as well since we need them as well to calculate up
@@ -869,7 +869,7 @@ func getNewPositions(blockTargets []uint64, slice hashAndPos, numLeaves uint64, 
 				continue
 			}
 
-			if isAncestor(parent(target, totalRows), nextPos, totalRows) {
+			if isAncestor(Parent(target, totalRows), nextPos, totalRows) {
 				nextPos, _ = calcNextPosition(nextPos, target, totalRows)
 			}
 		}
@@ -1049,7 +1049,7 @@ func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestro
 			if subtree != subtree1 {
 				continue
 			}
-			if isAncestor(parent(destroyed, forestRows), target, forestRows) {
+			if isAncestor(Parent(destroyed, forestRows), target, forestRows) {
 				targetsWithHash.positions[i] = calcPrevPosition(target, destroyed, forestRows)
 			}
 		}
@@ -1064,7 +1064,7 @@ func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestro
 			if subtree != subtree1 {
 				continue
 			}
-			if isAncestor(parent(destroyed, forestRows), target, forestRows) {
+			if isAncestor(Parent(destroyed, forestRows), target, forestRows) {
 				proofWithPos.positions[i] = calcPrevPosition(target, destroyed, forestRows)
 			}
 		}
@@ -1176,7 +1176,7 @@ func (p *Proof) undoDel(blockTargets []uint64, blockHashes, cachedHashes []Hash,
 		// When a target is deleted, its sibling moves up to the parent
 		// position. Therefore the current sibling will be in the parent
 		// position of the deleted target if it exists.
-		sibPos := parent(blockTarget, totalRows)
+		sibPos := Parent(blockTarget, totalRows)
 
 		// Look for the sibling in the cached targets.
 		for i, target := range targetsWithHashes.positions {

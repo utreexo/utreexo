@@ -491,7 +491,7 @@ func deTwinPolNode(polNodes []nodeAndPos, forestRows uint8) []nodeAndPos {
 			parentNode.rNiece = sibNode
 			updateAunt(parentNode)
 
-			position := parent(pn.pos, forestRows)
+			position := Parent(pn.pos, forestRows)
 			polNodes = insertSortNodeAndPos(polNodes, nodeAndPos{parentNode, position})
 
 			// Decrement one since the next element we should
