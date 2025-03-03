@@ -69,6 +69,85 @@ func (s *Stump) Update(delHashes, addHashes []Hash, proof Proof) (UpdateData, er
 	return UpdateData{toDestroy, prevNumLeaves, delHash, delPos, addHash, addPos}, nil
 }
 
+// Undo recovers the previous roots and the numleaves.
+func (s *Stump) Undo(numAdds int, delHashes []Hash, proof Proof) error {
+	s.undoAdd(numAdds)
+	return s.undoDel(delHashes, proof)
+}
+
+func (s *Stump) undoAdd(numAdds int) {
+	prevNumLeaves := s.NumLeaves - uint64(numAdds)
+	rootsToDel := int(numRoots(s.NumLeaves)) - int(numRoots(prevNumLeaves))
+	s.Roots = s.Roots[:len(s.Roots)-rootsToDel]
+	s.NumLeaves = prevNumLeaves
+}
+
+// whichRoot returns the position of the root given the numLeaves and all the roots.
+func whichRoot(numLeaves uint64, root Hash, roots []Hash) uint64 {
+	forestRows := treeRows(numLeaves)
+
+	// Calculate which row the root is on.
+	rootRow := -1
+	// Start from the lowest root.
+	rootIdx := len(roots) - 1
+	for h := 0; h <= int(forestRows); h++ {
+		// Because every root represents a perfect tree of every leaf
+		// we ever added, each root position will be a power of 2.
+		//
+		// Go through the bits of numLeaves. Every bit that is on
+		// represents a root.
+		if (numLeaves>>h)&1 == 1 {
+			// If we found the root, save the row to rootRow
+			// and return.
+			if roots[rootIdx] == root {
+				rootRow = h
+				break
+			}
+
+			// Check the next higher root.
+			rootIdx--
+		}
+	}
+
+	// Start from the root and work our way down the position that we want.
+	return rootPosition(numLeaves, uint8(rootRow), forestRows)
+}
+
+func (s *Stump) undoDel(delHashes []Hash, proof Proof) error {
+	// Calculate all the current root positions.
+	rootPositions := []uint64{}
+	for _, root := range s.Roots {
+		pos := whichRoot(s.NumLeaves, root, s.Roots)
+		rootPositions = append(rootPositions, pos)
+	}
+
+	// Calculate the roots that will be calculated from the proof.
+	calcRootPositions := []uint64{}
+	for _, del := range proof.Targets {
+		root, err := getRootPosition(del, s.NumLeaves, treeRows(s.NumLeaves))
+		if err != nil {
+			return err
+		}
+		calcRootPositions = mergeSortedSlicesFunc(calcRootPositions, []uint64{root}, uint64Cmp)
+	}
+
+	_, roots := calculateHashes(s.NumLeaves, delHashes, proof)
+
+	// Look for the positions that match up and replace the hash with the newly
+	// calculated hash.
+	idx := 0
+	for i := len(rootPositions) - 1; i >= 0; i-- {
+		rootPosition := rootPositions[i]
+
+		if idx < len(roots) && rootPosition == calcRootPositions[idx] {
+			s.Roots[i] = roots[idx]
+			idx++
+		}
+	}
+
+	return nil
+}
+
 // Verify verifies the proof passed in against the passed in stump. The returned ints
 // are the indexes of the roots that were matched with the roots calculated from
 // the proof.
