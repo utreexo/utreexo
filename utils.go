@@ -327,13 +327,13 @@ func getLowestRoot(numLeaves uint64, totalRows uint8) uint8 {
 	return row
 }
 
-// detectOffset takes a node position and number of leaves in forest, and
+// DetectOffset takes a node position and number of leaves in forest, and
 // returns the following:
 //
 // 1. Which subtree a node is in.
 // 2. The height from node to its tree top (which is the bitfield length).
 // 3. The L/R bitfield to descend to the node.
-func detectOffset(position uint64, numLeaves uint64) (uint8, uint8, uint64, error) {
+func DetectOffset(position uint64, numLeaves uint64) (uint8, uint8, uint64, error) {
 	tRows := int(TreeRows(numLeaves))
 	// nr = target node row
 	nr := DetectRow(position, uint8(tRows))
@@ -369,7 +369,7 @@ func detectOffset(position uint64, numLeaves uint64) (uint8, uint8, uint64, erro
 		maxLeafCount(uint8(tRows))&numLeaves; tRows-- {
 
 		if tRows < 0 {
-			return 0, 0, 0, fmt.Errorf("detectOffest error: "+
+			return 0, 0, 0, fmt.Errorf("DetectOffest error: "+
 				"position %d doesn't exist in a forest with %d leaves",
 				origPos, numLeaves)
 		}
