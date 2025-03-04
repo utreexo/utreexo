@@ -217,7 +217,7 @@ func (p *Pollard) remove(dels []uint64) error {
 // delete root removes all the pointers to and from this root and places an
 // empty hash at this root.
 func (p *Pollard) deleteRoot(del uint64) error {
-	tree, _, _, err := detectOffset(del, p.NumLeaves)
+	tree, _, _, err := DetectOffset(del, p.NumLeaves)
 	if err != nil {
 		return err
 	}
@@ -374,7 +374,7 @@ func (p *Pollard) undoEmptyRoots(numAdds uint64, origDels []uint64, prevRoots []
 	// Add in the empty roots that was removed by the deletions to the prevRoots.
 	for _, del := range dels {
 		if isRootPosition(del, p.NumLeaves) {
-			tree, _, _, err := detectOffset(del, p.NumLeaves)
+			tree, _, _, err := DetectOffset(del, p.NumLeaves)
 			if err != nil {
 				return err
 			}
@@ -446,7 +446,7 @@ func (p *Pollard) undoDels(dels []uint64, delHashes []Hash) error {
 		pnp := pnps[i]
 
 		if isRootPosition(pnp.pos, p.NumLeaves) {
-			tree, _, _, err := detectOffset(pnp.pos, p.NumLeaves)
+			tree, _, _, err := DetectOffset(pnp.pos, p.NumLeaves)
 			if err != nil {
 				return err
 			}
