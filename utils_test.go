@@ -410,3 +410,55 @@ func TestDeTwinRand(t *testing.T) {
 		}
 	}
 }
+
+func TestSubtreeRow(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		numLeaves uint64
+		subTree   uint8
+		expected  uint8
+	}{
+		{numLeaves: 1, subTree: 0, expected: 0},
+		{numLeaves: 2, subTree: 0, expected: 1},
+		{numLeaves: 3, subTree: 0, expected: 1},
+		{numLeaves: 3, subTree: 1, expected: 0},
+		{numLeaves: 4, subTree: 0, expected: 2},
+		{numLeaves: 5, subTree: 0, expected: 2},
+		{numLeaves: 5, subTree: 1, expected: 0},
+		{numLeaves: 6, subTree: 0, expected: 2},
+		{numLeaves: 6, subTree: 1, expected: 1},
+		{numLeaves: 7, subTree: 0, expected: 2},
+		{numLeaves: 7, subTree: 1, expected: 1},
+		{numLeaves: 7, subTree: 2, expected: 0},
+		{numLeaves: 8, subTree: 0, expected: 3},
+		{numLeaves: 9, subTree: 0, expected: 3},
+		{numLeaves: 9, subTree: 1, expected: 0},
+		{numLeaves: 9, subTree: 1, expected: 0},
+		{numLeaves: 10, subTree: 0, expected: 3},
+		{numLeaves: 10, subTree: 1, expected: 1},
+	}
+
+	for _, tt := range tests {
+		// Naming test cases descriptively
+		result := subtreeRow(tt.numLeaves, tt.subTree)
+		if result != tt.expected {
+			t.Errorf("Expected %d, got %d", tt.expected, result)
+		}
+
+	}
+
+	for numLeaves := uint64(1); numLeaves < 1<<21; numLeaves++ {
+		count := 0
+		totalRows := int(TreeRows(numLeaves))
+		for h := totalRows; h >= 0; h-- {
+			if rootExistsOnRow(numLeaves, uint8(h)) {
+				result := subtreeRow(numLeaves, uint8(count))
+				if result != uint8(h) {
+					t.Fatalf("Expected %d, got %d", h, result)
+				}
+				count++
+			}
+		}
+	}
+}

@@ -121,6 +121,24 @@ func RootPositions(numLeaves uint64, totalRows uint8) []uint64 {
 	return rootPositions
 }
 
+// subtreeRow returns the total amount of rows the given subtree takes up.
+// NOTE: returned value is undefined if the subtree doesn't exist in the given
+// numleaves.
+func subtreeRow(numLeaves uint64, subTree uint8) uint8 {
+	sawTrees := 0
+	h := int(TreeRows(numLeaves))
+	for ; h >= 0; h-- {
+		if rootExistsOnRow(numLeaves, uint8(h)) {
+			if subTree == uint8(sawTrees) {
+				break
+			}
+			sawTrees++
+		}
+	}
+
+	return uint8(h)
+}
+
 // isRootPositionTotalRows is a wrapper around isRootPosition that will translate the given
 // position if needed.
 func isRootPositionTotalRows(position, numLeaves uint64, totalRows uint8) bool {
