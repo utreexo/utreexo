@@ -1415,3 +1415,196 @@ func (p *Proof) updateProofAdd(adds, cachedDelHashes []Hash, remembers []uint32,
 	p.Targets = origTargetsWithHash.positions
 	return origTargetsWithHash.hashes
 }
+
+// rootInfoToDestroy returns the positions of the root informations that get destroyed by
+// the additions.
+func rootInfoToDestroy(totalRows uint8, numAdds, numLeaves uint64, origRoots []rootInfo) []uint64 {
+	// Check if there are any empty roots. If there are not, return early.
+	exists := false
+	for _, root := range origRoots {
+		if root.isZombie {
+			exists = true
+			break
+		}
+	}
+	if !exists {
+		return []uint64{}
+	}
+
+	roots := make([]rootInfo, len(origRoots))
+	copy(roots, origRoots)
+
+	deleted := make([]uint64, 0, TreeRows(numLeaves+numAdds))
+	for i := uint64(0); i < numAdds; i++ {
+		for h := uint8(0); (numLeaves>>h)&1 == 1; h++ {
+			root := roots[len(roots)-1]
+			roots = roots[:len(roots)-1]
+			if root.isZombie {
+				rootPos := rootPosition(numLeaves, h, totalRows)
+				deleted = append(deleted, rootPos)
+			}
+		}
+		// Just adding a non-zero value to the slice.
+		roots = append(roots, rootInfo{isZombie: false})
+		numLeaves++
+	}
+
+	return deleted
+}
+
+// addRootInfo modifies the root infos as if additions have been performed.
+func addRootInfo(totalRows uint8, origRoots []rootInfo, numAdds uint16, numLeaves uint64) ([]rootInfo, uint64) {
+	roots := make([]rootInfo, len(origRoots))
+	copy(roots, origRoots)
+
+	for i := 0; i < int(numAdds); i++ {
+		pos := numLeaves
+
+		for h := uint8(0); (numLeaves>>h)&1 == 1; h++ {
+			roots = roots[:len(roots)-1]
+			pos = Parent(pos, totalRows)
+		}
+
+		roots = append(roots, rootInfo{pos: pos, isZombie: false})
+		numLeaves++
+	}
+
+	return roots, numLeaves
+}
+
+// delRootInfo modifies the root infos as if deletions on the passed in targets have happened.
+func delRootInfo(totalRows uint8, origRoots []rootInfo, targets []uint64) []rootInfo {
+	if len(targets) == 0 {
+		return origRoots
+	}
+
+	deTwinedPositions := copySortedFunc(targets, uint64Cmp)
+	deTwinedPositions = deTwin(deTwinedPositions, totalRows)
+
+	for _, pos := range deTwinedPositions {
+		for i, root := range origRoots {
+			if root.pos == pos {
+				origRoots[i].isZombie = true
+			}
+		}
+	}
+
+	return origRoots
+}
+
+// rootInfo is just a position with a boolean to indicate if the root is a zombie.
+type rootInfo struct {
+	pos      uint64
+	isZombie bool
+}
+
+// CSTTotalRows is the total rows that will be used for the CachingScheduleTracker.
+const CSTTotalRows = 63
+
+// CachingScheduleTracker keeps track of all the information needed to generate a clairvoyant caching
+// schedule for downloading utreexo proofs.
+type CachingScheduleTracker struct {
+	deletions [][]uint64
+	numAdds   []uint16
+	numLeaves []uint64
+	toDestroy [][]uint64
+	roots     [][]rootInfo
+}
+
+// getRoots returns the translated root positions that the desired height.
+func (cs *CachingScheduleTracker) getRoots(height int32) []rootInfo {
+	if height <= 0 {
+		return []rootInfo{}
+	}
+	idx := height - 1
+	roots := make([]rootInfo, len(cs.roots[idx]))
+	for i, root := range cs.roots[idx] {
+		roots[i] = rootInfo{
+			pos:      translatePos(root.pos, CSTTotalRows, TreeRows(cs.numLeaves[idx])),
+			isZombie: root.isZombie,
+		}
+	}
+
+	return roots
+}
+
+// getToDestroy returns the translated todestroy roots at the desired height.
+func (cs *CachingScheduleTracker) getToDestroy(height int32) []uint64 {
+	if height <= 0 {
+		return []uint64{}
+	}
+	idx := height - 1
+
+	toDestroy := make([]uint64, len(cs.toDestroy[idx]))
+	for i, pos := range cs.toDestroy[idx] {
+		toDestroy[i] = translatePos(pos, CSTTotalRows, TreeRows(cs.numLeaves[idx]))
+	}
+
+	return toDestroy
+}
+
+// getDels returns the translated deletions at the desired height.
+func (cs *CachingScheduleTracker) getDels(height int32) []uint64 {
+	if height <= 0 {
+		return []uint64{}
+	}
+	idx := height - 1
+
+	dels := make([]uint64, len(cs.deletions[idx]))
+	for i, del := range cs.deletions[idx] {
+		dels[i] = translatePos(del, CSTTotalRows, TreeRows(cs.numLeaves[idx]))
+	}
+
+	return dels
+}
+
+// AddBlockSummary takes in the deletions and the additions that are passed in and keeps track
+// of them as well as keeping track of the modified root infos.
+func (cs *CachingScheduleTracker) AddBlockSummary(deletions []uint64, numAdds uint16) {
+	// For the first block.
+	if len(cs.roots) == 0 {
+		// Keep track of the block summary information.
+		cs.deletions = append(cs.deletions, deletions)
+		cs.numAdds = append(cs.numAdds, numAdds)
+
+		newRoots, newNumLeaves := addRootInfo(CSTTotalRows, []rootInfo{}, numAdds, 0)
+		cs.toDestroy = append(cs.toDestroy, []uint64{})
+		cs.roots = append(cs.roots, newRoots)
+		cs.numLeaves = append(cs.numLeaves, newNumLeaves)
+
+		return
+	}
+
+	// Grab the current state.
+	numLeaves := cs.numLeaves[len(cs.numLeaves)-1]
+	roots := make([]rootInfo, len(cs.roots[len(cs.roots)-1]))
+	copy(roots, cs.roots[len(cs.roots)-1])
+
+	// Keep track of the block summary information.
+	rows := TreeRows(numLeaves)
+	translatedDels := translatePositions(deletions, rows, CSTTotalRows)
+	cs.deletions = append(cs.deletions, translatedDels)
+	cs.numAdds = append(cs.numAdds, numAdds)
+
+	// Perform root info modification.
+	roots = delRootInfo(CSTTotalRows, roots, translatedDels)
+	toDestroy := rootInfoToDestroy(CSTTotalRows, uint64(numAdds), numLeaves, roots)
+	newRoots, newNumLeaves := addRootInfo(CSTTotalRows, roots, numAdds, numLeaves)
+
+	// Keep track of the root info state.
+	cs.toDestroy = append(cs.toDestroy, toDestroy)
+	cs.roots = append(cs.roots, newRoots)
+	cs.numLeaves = append(cs.numLeaves, newNumLeaves)
+}
+
+// NewCachingScheduleTracker returns an initialized caching schedule tracker.
+// Passed in blockCount is used to pre-allocate the underlying slices.
+func NewCachingScheduleTracker(blockCount int) CachingScheduleTracker {
+	return CachingScheduleTracker{
+		deletions: make([][]uint64, 0, blockCount),
+		numAdds:   make([]uint16, 0, blockCount),
+		numLeaves: make([]uint64, 0, blockCount),
+		roots:     make([][]rootInfo, 0, blockCount),
+		toDestroy: make([][]uint64, 0, blockCount),
+	}
+}
