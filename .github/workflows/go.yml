@@ -29,3 +29,11 @@ jobs:
         uses: shogo82148/actions-goveralls@v1
         with:
           path-to-profile: profile.cov
+
+  fuzz-test:
+    name: Fuzz test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: jidicula/go-fuzz-action@v1.1.0
+        with:
+          fuzz-time: 30s
