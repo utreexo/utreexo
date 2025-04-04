@@ -955,6 +955,17 @@ func uint64Cmp(a, b uint64) int {
 	return 0
 }
 
+// uint64Descending compares two uint64 values and returns 1 is a is smaller than b.
+// This results in the slice being sorted in descending order.
+func uint64Descending(a, b uint64) int {
+	if a > b {
+		return -1
+	} else if a < b {
+		return 1
+	}
+	return 0
+}
+
 // intLess is a helper function that is useful for using sorting.
 func intLess(a, b int) bool {
 	return a < b
