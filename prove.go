@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 
 	"golang.org/x/exp/slices"
 )
@@ -1812,4 +1813,289 @@ func getPrevPos(totalRows uint8, cached, deleted, toDestroy []uint64, numAdds ui
 
 	cached, err = undoDel(totalRows, cached, deleted, numLeaves)
 	return cached, created, err
+}
+
+// trackerCache keeps track of the overflowed deletions and keeps track of them
+// separately so that the caching schedule generated never exceeds the max memory
+// limit.
+//
+// The need for this arises due to how we generate the cache schedule. Say we have
+// blocks like so:
+//
+// block 1: creates(0, 1, 2, 3) | dels ()
+// block 2: creates()           | dels ()
+// block 3: creates()           | dels (0, 1, 2, 3)
+//
+// If we have a max cache of 2, then we can cache 2 from the deletion of [0, 1, 2, 3].
+// Since we go backwards, when we're at block 3, we need to keep more than the
+// max cache of 2 since any two from the deletions of [0, 1, 2, 3] can be cached.
+// Here we cache [0, 1] because they're the oldest. But we could be caching [2, 3]
+// instead if the blocks were like so:
+//
+// block 1: creates(0, 1) | dels ()
+// block 2: creates(2, 3) | dels ()
+// block 3: creates()     | dels (0, 1, 2, 3)
+//
+// So the need for caching more than the maxmem exists. But then, why do we also need the
+// overFlow slice and the overFlowDrop count? Let's look at an example like so:
+//
+// block 1: creates(0, 1, 2, 3, 4, 5) | dels ()
+// block 2: creates()                 | dels ()
+// block 3: creates(6)                | dels ()
+// block 4: creates(7)                | dels (6)
+// block 5: creates()                 | dels (0, 5, 7)
+//
+// Maxmem is still 2. We cache [0, 5, 7] at block 5. We can cache two things from the
+// slice of [0, 5, 7]. At block 4, 7 is created so we mark 7 in the cache schedule.
+// Now, we're only able to cache either 0 or 5 since we picked one element to be in the
+// cache schedule. 6 is deleted at this block so we add 6 to the cache. Our cache slice
+// now consists of [0, 5, 6].
+//
+// We can pick two elements from the slice of [0, 5, 6] to be included in the cache schedule.
+// However, we can still only cache either 0 or 5. So the elements we can put in the cache
+// schedule is either [0, 6] or [5, 6].
+//
+// This is where the overFlow slice and the overFlowDrop count comes in handy. The overFlowDrop
+// counts how many elements from the overFlow slice has been added to the cache schedule. The
+// overFlow slice keeps track of [0, 5] separate from [6].
+//
+// In the example above, the trackerCache slice will look like so:
+//
+// Block 6: trackerCache{cache: []uint64{ }, overFlow: []uint64{0, 5, 7}, overFlowDrop: 0, maxMem: 2}
+// Block 5: trackerCache{cache: []uint64{6}, overFlow: []uint64{0, 5   }, overFlowDrop: 1, maxMem: 2}
+// Block 4: trackerCache{cache: []uint64{ }, overFlow: []uint64{0, 5   }, overFlowDrop: 1, maxMem: 2}
+// Block 3: trackerCache{cache: []uint64{ }, overFlow: []uint64{0, 5   }, overFlowDrop: 1, maxMem: 2}
+// Block 2: trackerCache{cache: []uint64{ }, overFlow: []uint64{0, 5   }, overFlowDrop: 1, maxMem: 2}
+// Block 1: trackerCache{cache: []uint64{ }, overFlow: []uint64{       }, overFlowDrop: 0, maxMem: 2}
+//
+// At block 1, we mark 0 to be cached and reset the overFlow slice and the overFlowDrop count.
+type trackerCache struct {
+	cache        []uint64
+	overFlow     []uint64
+	overFlowDrop int
+	maxMem       int
+}
+
+// string prints the tracker cache to a readable string with the positions translated as well.
+func (tc *trackerCache) string(numLeaves uint64) string {
+	str := fmt.Sprintf("cache %v, [%v]\n", tc.cache, translatePositions(tc.cache, 63, TreeRows(numLeaves)))
+	str += fmt.Sprintf("overflow %v, [%v]\n", tc.overFlow, translatePositions(tc.overFlow, 63, TreeRows(numLeaves)))
+	return str
+}
+
+// totalLen returns the length of both the cache and the overflow.
+func (tc *trackerCache) totalLen() int {
+	return len(tc.cache) + len(tc.overFlow)
+}
+
+// pop removes a single element from either the overflow or the cache.
+// If it can pop from the overflow, it'll pop there.
+func (tc *trackerCache) pop(count int) {
+	// Shortcut.
+	if count >= tc.totalLen() {
+		tc.overFlow = tc.overFlow[:0]
+		tc.cache = tc.cache[:0]
+		return
+	}
+
+	for i := 0; i < count; i++ {
+		if tc.totalLen() == 0 {
+			break
+		}
+
+		if len(tc.overFlow) > 0 {
+			tc.overFlow = tc.overFlow[1:]
+			continue
+		}
+
+		tc.cache = tc.cache[1:]
+	}
+}
+
+// addSingle adds the given position to the cache. It always removes an element
+// before inserting the given position.
+func (tc *trackerCache) addSingle(pos uint64) {
+	// We always prefer to pop from the overFlow if possible.
+	if len(tc.overFlow) > 0 {
+		// If the overFlow is greater than the maxMem, we add to the overFlow.
+		if len(tc.overFlow) > tc.maxMem {
+			tc.pop(1)
+			tc.overFlow = append(tc.overFlow, pos)
+			return
+		}
+
+		// If the overFlow is not over the maxMem, then we add to the cache.
+		tc.pop(1)
+		tc.cache = append(tc.cache, pos)
+		return
+	}
+
+	if len(tc.cache)+1 > tc.maxMem {
+		tc.pop(1)
+	}
+	tc.cache = append(tc.cache, pos)
+}
+
+// add adds all the positions to the cache.
+func (tc *trackerCache) add(positions []uint64) {
+	if len(positions) == 0 {
+		return
+	}
+
+	// The below addSingle will always evict a position in either the
+	// overFlow or the cache when inserting a new position. This is
+	// because for a clairvoyant caching, we always prefer to cache
+	// the position that's gonna be spent sooner.
+	//
+	// However, if we have deletions more than the max memory, we still
+	// want to hold onto all of them because we'll be able to cache some
+	// of them. We just don't know which one.
+	//
+	// Since the below code will only allow us to cache up to the current
+	// tc.totalLen(), we need to handle that case here.
+	if len(positions) > tc.maxMem && len(positions) > tc.totalLen() {
+		tc.pop(len(positions)) // Remove everything.
+		tc.overFlow = append(tc.overFlow, positions...)
+		return
+	}
+
+	for _, pos := range positions {
+		tc.addSingle(pos)
+	}
+}
+
+// getPrevPos returns the cached positions to the previous block (minus all the positions that didn't exist then),
+// and all the positions that was created in this block that should be cached.
+func (tc *trackerCache) getPrevPos(deleted, toDestroy []uint64, numAdds uint16, numLeaves uint64) (
+	[]uint64, error) {
+
+	var created []uint64
+
+	if len(tc.overFlow) > 0 {
+		overFlow, overFlowCreated, err := getPrevPos(CSTTotalRows, tc.overFlow, deleted, toDestroy, numAdds, numLeaves)
+		if err != nil {
+			return created, err
+		}
+
+		// If we have elements to add to the cache schedule, check if we should
+		// reset the overFlow slice.
+		if len(overFlowCreated) > 0 {
+			allVal := len(overFlowCreated) + tc.overFlowDrop
+			if allVal > tc.maxMem {
+				overFlowCreated = overFlowCreated[allVal-tc.maxMem:]
+			}
+
+			allVal = len(overFlowCreated) + tc.overFlowDrop
+			if allVal == tc.maxMem {
+				overFlow = overFlow[:0]
+				tc.overFlowDrop = 0
+			} else {
+				tc.overFlowDrop += len(overFlowCreated)
+			}
+
+			created = append(created, overFlowCreated...)
+		}
+		tc.overFlow = overFlow
+	}
+
+	var err error
+	var cacheCreated []uint64
+	tc.cache, cacheCreated, err = getPrevPos(CSTTotalRows, tc.cache, deleted, toDestroy, numAdds, numLeaves)
+	if err != nil {
+		return created, err
+	}
+
+	created = append(created, cacheCreated...)
+
+	for len(created) > tc.maxMem {
+		created = created[1:]
+	}
+	slices.Sort(created)
+
+	return created, nil
+}
+
+// newTrackerCache returns an initialized trackerCache.
+func newTrackerCache(maxMemory int) trackerCache {
+	return trackerCache{
+		cache:    make([]uint64, 0, maxMemory),
+		overFlow: make([]uint64, 0, maxMemory),
+		maxMem:   maxMemory,
+	}
+}
+
+// GenerateCachingSchedule returns the positions that the client should cache to have an optimal
+// caching for the passed in maxMemory.
+//
+// NOTE: maxMemory represents how many targets that the user would like to cache.
+func (cs *CachingScheduleTracker) GenerateCachingSchedule(maxMemory int) ([][]uint64, error) {
+	cacheSchedules := make([][]uint64, len(cs.deletions))
+
+	potentialCache := newTrackerCache(maxMemory)
+	for i := len(cs.deletions) - 1; i >= 0; i-- {
+		deletions := cs.deletions[i]
+		numAdds := cs.numAdds[i]
+		numLeaves := cs.numLeaves[i]
+		toDestroy := cs.toDestroy[i]
+
+		toCache, err := potentialCache.getPrevPos(deletions, toDestroy, numAdds, numLeaves)
+		if err != nil {
+			return nil, err
+		}
+
+		if toCache == nil {
+			toCache = []uint64{}
+		}
+		cacheSchedules[i] = toCache
+
+		delsToCache := copySortedFunc(deletions, uint64Descending)
+
+		potentialCache.add(delsToCache)
+	}
+
+	return cacheSchedules, nil
+}
+
+// String returns the CachingScheduleTracker as a formatting string.
+func (c *CachingScheduleTracker) String() string {
+	var sb strings.Builder
+
+	sb.WriteString("CachingScheduleTracker:\n")
+
+	// Write deletions
+	sb.WriteString("  deletions:\n")
+	for i, del := range c.deletions {
+		sb.WriteString(fmt.Sprintf("    [%d]: %v (translated %v)\n",
+			i, del, translatePositions(del, CSTTotalRows, TreeRows(c.numLeaves[i]))))
+	}
+
+	// Write numAdds
+	sb.WriteString(fmt.Sprintf("  numAdds: %v\n", c.numAdds))
+
+	// Write numLeaves
+	sb.WriteString(fmt.Sprintf("  numLeaves: %v\n", c.numLeaves))
+
+	// Write toDestroy
+	sb.WriteString("  toDestroy:\n")
+	for i, td := range c.toDestroy {
+		sb.WriteString(fmt.Sprintf("    [%d]: %v (translated %v)\n",
+			i, td, translatePositions(td, CSTTotalRows, TreeRows(c.numLeaves[i]))))
+	}
+
+	// Write roots
+	sb.WriteString("  roots:\n")
+	for i, rootList := range c.roots {
+		sb.WriteString(fmt.Sprintf("    [%d]: [", i))
+		for j, root := range rootList {
+			if j > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(fmt.Sprintf("{pos: %d (translated %d), isZombie: %t}",
+				root.pos, translatePos(root.pos, CSTTotalRows, TreeRows(c.numLeaves[i])),
+				root.isZombie))
+		}
+		sb.WriteString("]\n")
+	}
+
+	return sb.String()
 }
