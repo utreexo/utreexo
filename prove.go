@@ -1608,3 +1608,208 @@ func NewCachingScheduleTracker(blockCount int) CachingScheduleTracker {
 		toDestroy: make([][]uint64, 0, blockCount),
 	}
 }
+
+// undoDel returns the previous positions of the passed in origPositions.
+//
+// NOTE: the returned origPositions keeps the original ordering.
+func undoDel(totalRows uint8, origPositions, deleted []uint64, numLeaves uint64) ([]uint64, error) {
+	// Nothing to do if there's no deletions.
+	if len(deleted) == 0 || len(origPositions) == 0 {
+		return origPositions, nil
+	}
+
+	// Copy and sort.
+	positions := copySortedFunc(origPositions, uint64Cmp)
+
+	m := make(map[uint64]uint64, len(positions))
+	for _, pos := range positions {
+		m[pos] = pos
+	}
+
+	// Copy, sort, and detwin.
+	deTwinedPositions := copySortedFunc(deleted, uint64Cmp)
+	deTwinedPositions = deTwin(deTwinedPositions, totalRows)
+
+	// Loop through all the targets and look for the previous sibling.
+	// If that sibling is included in the proof, include the target into
+	// the proof and remap the positions accordingly.
+	for i := len(deTwinedPositions) - 1; i >= 0; i-- {
+		deTwinedPos := deTwinedPositions[i]
+
+		// When a target is deleted, its sibling moves up to the parent
+		// position. Therefore the current sibling will be in the parent
+		// position of the deleted target if it exists.
+		sibPos := Parent(deTwinedPos, totalRows)
+
+		for j, pos := range positions {
+			// If these positions are in different subtrees, continue.
+			subtree, _, _, _ := DetectOffset(translatePos(deTwinedPos, totalRows, TreeRows(numLeaves)), numLeaves)
+			subtree1, _, _, _ := DetectOffset(translatePos(pos, totalRows, TreeRows(numLeaves)), numLeaves)
+			if subtree != subtree1 {
+				continue
+			}
+
+			if isAncestor(sibPos, pos, totalRows) || sibPos == pos {
+				positions[j] = calcPrevPosition(pos, deTwinedPos, totalRows)
+				v := m[pos]
+				m[positions[j]] = v
+				delete(m, pos)
+				slices.Sort(positions)
+			}
+		}
+	}
+
+	for newPos, orig := range m {
+		idx := slices.Index(origPositions, orig)
+		if idx == -1 {
+			return origPositions, fmt.Errorf("didn't find orig pos of %v", orig)
+		}
+		origPositions[idx] = newPos
+	}
+
+	return origPositions, nil
+}
+
+// moveDownPositions moves the positions in the cached slice to where they were
+// before the delPos was removed.
+//
+// NOTE: the returned positions keeps the original ordering.
+func moveDownPositions(totalRows uint8, position, delPos uint64, cached []uint64, m map[uint64]uint64) []uint64 {
+	for i, pos := range cached {
+		if pos == position || isAncestor(position, pos, totalRows) {
+			cached[i] = calcPrevPosition(pos, delPos, totalRows)
+
+			if m != nil {
+				v := m[pos]
+				m[cached[i]] = v
+				delete(m, pos)
+			}
+		}
+	}
+
+	return cached
+}
+
+// undoSingleAdd removes latest leaf and all the nodes that were created from that leaf.
+// The returned values are the origPositions reverted back before the leaf was added,
+// all the positions that were created because of the added leaf, and the new numLeaves.
+//
+// NOTE: the returned origPositions keeps the original ordering.
+func undoSingleAdd(totalRows uint8, origPositions, toDestroy []uint64, numLeaves uint64) (
+	[]uint64, []uint64, []uint64, []int, uint64) {
+	positions := copySortedFunc(origPositions, uint64Cmp)
+	created := make([]uint64, 0, len(positions))
+	createdIdxes := make([]int, 0, len(positions))
+
+	pos := numLeaves - 1
+
+	m := make(map[uint64]uint64, len(positions))
+	for _, pos := range positions {
+		m[pos] = pos
+	}
+
+	// We work our way down from the root that's being removed.
+	subtree, _, _, _ := DetectOffset(pos, numLeaves)
+	subtreeRows := subtreeRow(numLeaves, subtree)
+	pos = rootPosition(numLeaves, subtreeRows, totalRows)
+
+	for row := int(subtreeRows); row >= 0; row-- {
+		index := slices.Index(positions, pos)
+		if index != -1 {
+			created = append(created, positions[index])
+			positions = slices.Delete(positions, index, index+1)
+
+			v := m[pos]
+			delete(m, pos)
+			idx := slices.Index(origPositions, v)
+			if idx != -1 {
+				createdIdxes = append(createdIdxes, idx)
+				origPositions = slices.Delete(origPositions, idx, idx+1)
+			}
+		}
+
+		possibleRoot := LeftChild(pos, totalRows)
+		index = slices.Index(toDestroy, possibleRoot)
+		if index != -1 {
+			toDestroy = slices.Delete(toDestroy, index, index+1)
+			positions = moveDownPositions(totalRows, pos, possibleRoot, positions, m)
+			created = moveDownPositions(totalRows, pos, possibleRoot, created, nil)
+		}
+
+		pos = RightChild(pos, totalRows)
+	}
+
+	for newPos, orig := range m {
+		idx := slices.Index(origPositions, orig)
+		if idx != -1 {
+			origPositions[idx] = newPos
+		}
+	}
+
+	return origPositions, created, toDestroy, createdIdxes, numLeaves - 1
+}
+
+// undoAdd removes all the added leaves in the past block and all the nodes that were created
+// from that leaf. The returned values are the origPositions reverted back before the leaves
+// were added, all the positions that were created because of the added leaf, and the new numLeaves.
+//
+// NOTE: the returned origPositions keeps the original ordering.
+func undoAdd(totalRows uint8, origPositions, origToDestroy []uint64, numAdds, numLeaves uint64) ([]uint64, []uint64, uint64, error) {
+	positions := make([]uint64, len(origPositions))
+	copy(positions, origPositions)
+
+	toDestroy := make([]uint64, len(origToDestroy))
+	copy(toDestroy, origToDestroy)
+
+	ages := make([]int, len(origPositions))
+	for i := range ages {
+		ages[i] = i
+	}
+
+	created := make([]uint64, 0, len(origPositions))
+	createdAges := make([]int, 0, len(origPositions))
+	for i := 0; i < int(numAdds); i++ {
+		var c []uint64
+		var cIdxs []int
+		positions, c, toDestroy, cIdxs, numLeaves = undoSingleAdd(totalRows, positions, toDestroy, numLeaves)
+
+		if len(c) != 0 {
+			curAge := ages[cIdxs[0]]
+
+			indexToInsert := -1
+			for i, age := range createdAges {
+				if curAge < age {
+					indexToInsert = i
+					break
+				}
+			}
+			if indexToInsert == -1 {
+				created = append(created, c[0])
+				createdAges = append(createdAges, curAge)
+			} else {
+				created = slices.Insert(created, indexToInsert, c[0])
+				createdAges = slices.Insert(createdAges, indexToInsert, curAge)
+			}
+
+			for _, idx := range cIdxs {
+				ages = slices.Delete(ages, idx, idx+1)
+			}
+		}
+	}
+
+	return positions, created, numLeaves, nil
+}
+
+// getPrevPos returns the cached positions to the previous block (minus all the positions that didn't exist then),
+// and all the positions that were created in the block.
+func getPrevPos(totalRows uint8, cached, deleted, toDestroy []uint64, numAdds uint16, numLeaves uint64) ([]uint64, []uint64, error) {
+	var err error
+	var created []uint64
+	cached, created, numLeaves, err = undoAdd(totalRows, cached, toDestroy, uint64(numAdds), numLeaves)
+	if err != nil {
+		return cached, created, err
+	}
+
+	cached, err = undoDel(totalRows, cached, deleted, numLeaves)
+	return cached, created, err
+}

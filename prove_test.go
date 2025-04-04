@@ -1398,3 +1398,147 @@ func FuzzAddBlockSummary(f *testing.F) {
 		}
 	})
 }
+
+func TestGetPrevPos(t *testing.T) {
+	testCases := []struct {
+		numLeaves       uint64
+		deletions       []uint64
+		toDestroy       []uint64
+		numAdds         uint16
+		cached          []uint64
+		expectedCached  []uint64
+		expectedCreated []uint64
+	}{
+		// 06:760d
+		// |---------------\
+		// 04:177a         05:0300
+		// |-------\       |-------\
+		// 00:0000 01:0100
+		//
+		// |---------------\
+		// 04:177a
+		// |-------\       |-------\
+		// 00:0000 01:0100 02:XX
+		{
+			numLeaves:       4,
+			deletions:       []uint64{},
+			toDestroy:       []uint64{2},
+			numAdds:         1,
+			cached:          []uint64{translatePos(5, TreeRows(4), CSTTotalRows)},
+			expectedCached:  []uint64{},
+			expectedCreated: []uint64{3},
+		},
+
+		// 06:a3c3
+		// |---------------\
+		// 04:0200         05:0300
+		// |-------\       |-------\
+		//
+		//
+		// |---------------\
+		// 04:XX
+		// |-------\       |-------\
+		//                 02:0200
+		{
+			numLeaves:       4,
+			deletions:       []uint64{},
+			toDestroy:       []uint64{translatePos(4, TreeRows(4), CSTTotalRows)},
+			numAdds:         1,
+			cached:          []uint64{translatePos(4, TreeRows(4), CSTTotalRows)},
+			expectedCached:  []uint64{2},
+			expectedCreated: []uint64{},
+		},
+	}
+
+	for _, test := range testCases {
+		gotCached, gotCreated, err := getPrevPos(CSTTotalRows, test.cached, test.deletions, test.toDestroy, test.numAdds, test.numLeaves)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		require.Equal(t, test.expectedCached, gotCached)
+		require.Equal(t, test.expectedCreated, gotCreated)
+	}
+}
+
+func FuzzGetPrevPos(f *testing.F) {
+	var tests = []struct {
+		numAdds  uint32
+		duration uint32
+		seed     int64
+	}{
+		{3, 3, 0xf1},
+	}
+	for _, test := range tests {
+		f.Add(test.numAdds, test.duration, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		// simulate blocks with simchain
+		sc := newSimChainWithSeed(duration, seed)
+
+		cs := NewCachingScheduleTracker(10)
+
+		addedPositions := make([][]uint64, 0, 6)
+
+		p := NewAccumulator()
+		stump := Stump{}
+		for b := 0; b <= 9; b++ {
+			adds, _, delHashes := sc.NextBlock(numAdds)
+
+			// The blockProof is the proof for the utxos being
+			// spent/deleted.
+			blockProof, err := p.Prove(delHashes)
+			if err != nil {
+				t.Fatalf("FuzzGetPrevPos fail at block %d. Error: %v", b, err)
+			}
+
+			added := make([]uint64, 0, len(adds))
+			for i := range adds {
+				pos := p.GetNumLeaves() + uint64(i)
+				added = append(added, pos)
+			}
+			addedPositions = append(addedPositions, added)
+
+			err = p.Modify(adds, delHashes, blockProof)
+			if err != nil {
+				t.Fatalf("FuzzGetPrevPos fail at block %d. Error: %v", b, err)
+			}
+			addHashes := make([]Hash, 0, len(adds))
+			for _, add := range adds {
+				addHashes = append(addHashes, add.Hash)
+			}
+			_, err = stump.Update(delHashes, addHashes, blockProof)
+			if err != nil {
+				t.Fatalf("FuzzGetPrevPos fail at block %d. Error: %v", b, err)
+			}
+
+			cs.AddBlockSummary(blockProof.Targets, uint16(len(adds)))
+
+			cached := make([]uint64, len(blockProof.Targets))
+			copy(cached, translatePositions(blockProof.Targets, TreeRows(p.NumLeaves), CSTTotalRows))
+			for i := b - 1; i >= 0; i-- {
+				c, created, err := getPrevPos(CSTTotalRows, cached, cs.deletions[i],
+					cs.toDestroy[i], cs.numAdds[i], cs.numLeaves[i])
+				if err != nil {
+					t.Fatalf("FuzzGetPrevPos fail at block %d. %v", b, err)
+				}
+				cached = c
+
+				if i > 0 {
+					cached = append(cached, cs.deletions[i]...)
+				}
+				created = translatePositions(created, CSTTotalRows, TreeRows(cs.numLeaves[i]))
+				for _, pos := range created {
+					idx := slices.Index(addedPositions[i], pos)
+					if idx == -1 {
+						t.Fatalf("FuzzGetPrevPos fail at block %d. "+
+							"calculated created position %v at block %v"+
+							" wasn't found",
+							b, pos, i)
+					}
+				}
+			}
+		}
+	})
+}
