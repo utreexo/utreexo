@@ -7,6 +7,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"golang.org/x/exp/slices"
 )
 
@@ -1235,6 +1236,165 @@ func FuzzUndoProof(f *testing.F) {
 		_, err = Verify(prevStump, cachedHashes, cachedProof)
 		if err != nil {
 			t.Fatal(err)
+		}
+	})
+}
+
+func TestAddBlockSummary(t *testing.T) {
+	tests := []struct {
+		deletions [][]uint64
+		numAdds   []uint16
+	}{
+		{
+			deletions: [][]uint64{
+				{},
+				{},
+			},
+			numAdds: []uint16{
+				3, 5,
+			},
+		},
+		{
+			deletions: [][]uint64{
+				{},
+				{1},
+			},
+			numAdds: []uint16{
+				3, 5,
+			},
+		},
+		{
+			deletions: [][]uint64{
+				{},
+				{},
+				{},
+				{},
+			},
+			numAdds: []uint16{
+				3, 5, 1, 0,
+			},
+		},
+		{
+			deletions: [][]uint64{
+				{},
+				{},
+				{},
+				{},
+			},
+			numAdds: []uint16{
+				3, 5, 8, 0,
+			},
+		},
+		{
+			deletions: [][]uint64{
+				{},
+				{},
+				{},
+				{8},
+			},
+			numAdds: []uint16{
+				3, 5, 1, 0,
+			},
+		},
+	}
+
+	for testIdx, test := range tests {
+		cs := NewCachingScheduleTracker(0)
+
+		for i, deletion := range test.deletions {
+			add := test.numAdds[i]
+			cs.AddBlockSummary(deletion, add)
+
+			numLeaves := cs.numLeaves[len(cs.numLeaves)-1]
+			expectedPos := RootPositions(numLeaves, TreeRows(numLeaves))
+
+			height := int32(len(cs.numLeaves))
+			gotPos := cs.getRoots(height)
+			for j, expected := range expectedPos {
+				if gotPos[j].pos != expected {
+					t.Fatalf("%v, expected %v, got %v", testIdx, expectedPos, gotPos[j].pos)
+				}
+			}
+
+			gotDeletions := cs.getDels(height)
+			require.Equal(t, gotDeletions, deletion)
+		}
+
+		require.Equal(t, test.numAdds, cs.numAdds)
+	}
+}
+
+func FuzzAddBlockSummary(f *testing.F) {
+	var tests = []struct {
+		numAdds  uint32
+		duration uint32
+		seed     int64
+	}{
+		{3, 0x07, 0x07},
+	}
+
+	for _, test := range tests {
+		f.Add(test.numAdds, test.duration, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
+		// simulate blocks with simchain
+		sc := newSimChainWithSeed(duration, seed)
+
+		p := NewAccumulator()
+		stump := Stump{}
+		cs := NewCachingScheduleTracker(50)
+
+		for b := int32(1); b <= 50; b++ {
+			adds, _, delHashes := sc.NextBlock(numAdds)
+
+			// The blockProof is the proof for the utxos being
+			// spent/deleted.
+			blockProof, err := p.Prove(delHashes)
+			if err != nil {
+				t.Fatalf("FuzzAddBlockSummary fail at block %d. Error: %v", b, err)
+			}
+
+			err = p.Modify(adds, delHashes, blockProof)
+			if err != nil {
+				t.Fatalf("FuzzAddBlockSummary fail at block %d. Error: %v", b, err)
+			}
+
+			addHashes := make([]Hash, 0, len(adds))
+			for _, add := range adds {
+				addHashes = append(addHashes, add.Hash)
+			}
+			updateData, err := stump.Update(delHashes, addHashes, blockProof)
+			if err != nil {
+				t.Fatalf("FuzzAddBlockSummary fail at block %d. Error: %v", b, err)
+			}
+			cs.AddBlockSummary(blockProof.Targets, uint16(len(adds)))
+
+			gotToDestroy := cs.getToDestroy(b)
+			require.Equal(t, updateData.ToDestroy, gotToDestroy)
+
+			rootPositions := RootPositions(p.NumLeaves, TreeRows(p.NumLeaves))
+
+			latestRoots := cs.getRoots(b)
+			haveRoots := make([]uint64, 0, len(latestRoots))
+			for _, rootPos := range latestRoots {
+				haveRoots = append(haveRoots, rootPos.pos)
+			}
+			require.Equal(t, rootPositions, haveRoots)
+
+			if len(latestRoots) != len(p.Roots) {
+				t.Fatalf("expected %v roots but got %v",
+					len(p.Roots), len(cs.roots))
+			}
+			for i, root := range latestRoots {
+				isZombie := p.Roots[i].data == empty
+				if isZombie != root.isZombie {
+					t.Fatalf("expected %v for pos %v but got %v",
+						isZombie, root.pos, root.isZombie)
+				}
+			}
 		}
 	})
 }
