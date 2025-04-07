@@ -1870,92 +1870,45 @@ func getPrevPos(totalRows uint8, cached, deleted, toDestroy []uint64, numAdds ui
 //
 // At block 1, we mark 0 to be cached and reset the overFlow slice and the overFlowDrop count.
 type trackerCache struct {
-	cache        []uint64
-	overFlow     []uint64
-	overFlowDrop int
-	maxMem       int
+	caches     [][]uint64
+	pickedCnts []int
+	maxMem     int
 }
 
 // string prints the tracker cache to a readable string with the positions translated as well.
 func (tc *trackerCache) string(numLeaves uint64) string {
-	str := fmt.Sprintf("cache %v, [%v]\n", tc.cache, translatePositions(tc.cache, 63, TreeRows(numLeaves)))
-	str += fmt.Sprintf("overflow %v, [%v]\n", tc.overFlow, translatePositions(tc.overFlow, 63, TreeRows(numLeaves)))
+	var str string
+	str += fmt.Sprintf("total of %v caches:\n", len(tc.caches))
+	for i, cache := range tc.caches {
+		str += fmt.Sprintf("    %v: picked %v, %v, [%v]\n",
+			i, tc.pickedCnts[i], cache, translatePositions(cache, 63, TreeRows(numLeaves)))
+	}
+
 	return str
 }
 
-// totalLen returns the length of both the cache and the overflow.
-func (tc *trackerCache) totalLen() int {
-	return len(tc.cache) + len(tc.overFlow)
-}
-
-// pop removes a single element from either the overflow or the cache.
-// If it can pop from the overflow, it'll pop there.
-func (tc *trackerCache) pop(count int) {
-	// Shortcut.
-	if count >= tc.totalLen() {
-		tc.overFlow = tc.overFlow[:0]
-		tc.cache = tc.cache[:0]
-		return
-	}
-
-	for i := 0; i < count; i++ {
-		if tc.totalLen() == 0 {
-			break
-		}
-
-		if len(tc.overFlow) > 0 {
-			tc.overFlow = tc.overFlow[1:]
-			continue
-		}
-
-		tc.cache = tc.cache[1:]
-	}
-}
-
-// addSingle adds the given position to the cache. It always removes an element
-// before inserting the given position.
+// addSingle adds the given position to the caches.
 func (tc *trackerCache) addSingle(pos uint64) {
-	// We always prefer to pop from the overFlow if possible.
-	if len(tc.overFlow) > 0 {
-		// If the overFlow is greater than the maxMem, we add to the overFlow.
-		if len(tc.overFlow) > tc.maxMem {
-			tc.pop(1)
-			tc.overFlow = append(tc.overFlow, pos)
-			return
-		}
-
-		// If the overFlow is not over the maxMem, then we add to the cache.
-		tc.pop(1)
-		tc.cache = append(tc.cache, pos)
+	if len(tc.pickedCnts) == 0 {
+		tc.pickedCnts = append(tc.pickedCnts, 0)
+		tc.caches = append(tc.caches, []uint64{pos})
 		return
 	}
 
-	if len(tc.cache)+1 > tc.maxMem {
-		tc.pop(1)
+	count := tc.pickedCnts[len(tc.pickedCnts)-1]
+	if count == 0 {
+		tc.caches[len(tc.pickedCnts)-1] = append(tc.caches[len(tc.pickedCnts)-1], pos)
+		return
 	}
-	tc.cache = append(tc.cache, pos)
+
+	tc.pickedCnts = append(tc.pickedCnts, 0)
+	tc.caches = append(tc.caches, []uint64{pos})
+	return
 }
 
 // add adds all the positions to the cache.
 func (tc *trackerCache) add(positions []uint64) {
 	if len(positions) == 0 {
-		return
-	}
-
-	// The below addSingle will always evict a position in either the
-	// overFlow or the cache when inserting a new position. This is
-	// because for a clairvoyant caching, we always prefer to cache
-	// the position that's gonna be spent sooner.
-	//
-	// However, if we have deletions more than the max memory, we still
-	// want to hold onto all of them because we'll be able to cache some
-	// of them. We just don't know which one.
-	//
-	// Since the below code will only allow us to cache up to the current
-	// tc.totalLen(), we need to handle that case here.
-	if len(positions) > tc.maxMem && len(positions) > tc.totalLen() {
-		tc.pop(len(positions)) // Remove everything.
-		tc.overFlow = append(tc.overFlow, positions...)
 		return
 	}
 
@@ -1970,46 +1923,27 @@ func (tc *trackerCache) getPrevPos(deleted, toDestroy []uint64, numAdds uint16, 
 	[]uint64, error) {
 
 	var created []uint64
-
-	if len(tc.overFlow) > 0 {
-		overFlow, overFlowCreated, err := getPrevPos(CSTTotalRows, tc.overFlow, deleted, toDestroy, numAdds, numLeaves)
+	for i := 0; i < len(tc.caches); i++ {
+		cache, c, err := getPrevPos(CSTTotalRows, tc.caches[i], deleted, toDestroy, numAdds, numLeaves)
 		if err != nil {
 			return created, err
 		}
+		tc.caches[i] = cache
 
-		// If we have elements to add to the cache schedule, check if we should
-		// reset the overFlow slice.
-		if len(overFlowCreated) > 0 {
-			allVal := len(overFlowCreated) + tc.overFlowDrop
-			if allVal > tc.maxMem {
-				overFlowCreated = overFlowCreated[allVal-tc.maxMem:]
-			}
-
-			allVal = len(overFlowCreated) + tc.overFlowDrop
-			if allVal == tc.maxMem {
-				overFlow = overFlow[:0]
-				tc.overFlowDrop = 0
+		if len(c) > 0 {
+			allPicked := len(c) + tc.pickedCnts[i]
+			if allPicked >= tc.maxMem {
+				tc.caches = slices.Delete(tc.caches, i, i+1)
+				tc.pickedCnts = slices.Delete(tc.pickedCnts, i, i+1)
+				i--
+				c = c[allPicked-tc.maxMem:]
 			} else {
-				tc.overFlowDrop += len(overFlowCreated)
+				tc.pickedCnts[i] += len(c)
 			}
-
-			created = append(created, overFlowCreated...)
+			created = append(created, c...)
 		}
-		tc.overFlow = overFlow
 	}
 
-	var err error
-	var cacheCreated []uint64
-	tc.cache, cacheCreated, err = getPrevPos(CSTTotalRows, tc.cache, deleted, toDestroy, numAdds, numLeaves)
-	if err != nil {
-		return created, err
-	}
-
-	created = append(created, cacheCreated...)
-
-	for len(created) > tc.maxMem {
-		created = created[1:]
-	}
 	slices.Sort(created)
 
 	return created, nil
@@ -2017,11 +1951,14 @@ func (tc *trackerCache) getPrevPos(deleted, toDestroy []uint64, numAdds uint16, 
 
 // newTrackerCache returns an initialized trackerCache.
 func newTrackerCache(maxMemory int) trackerCache {
-	return trackerCache{
-		cache:    make([]uint64, 0, maxMemory),
-		overFlow: make([]uint64, 0, maxMemory),
-		maxMem:   maxMemory,
+	tc := trackerCache{
+		caches:     make([][]uint64, 0, maxMemory),
+		pickedCnts: make([]int, 0, maxMemory),
+		maxMem:     maxMemory,
 	}
+	tc.caches = append(tc.caches, []uint64{})
+	tc.pickedCnts = append(tc.pickedCnts, 0)
+	return tc
 }
 
 // GenerateCachingSchedule returns the positions that the client should cache to have an optimal
@@ -2045,6 +1982,13 @@ func (cs *CachingScheduleTracker) GenerateCachingSchedule(maxMemory int) ([][]ui
 
 		if toCache == nil {
 			toCache = []uint64{}
+		}
+		prevNumLeaves := uint64(0)
+		if i != 0 {
+			prevNumLeaves = cs.numLeaves[i-1]
+		}
+		for j := range toCache {
+			toCache[j] -= prevNumLeaves
 		}
 		cacheSchedules[i] = toCache
 
