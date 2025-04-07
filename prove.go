@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 
 	"golang.org/x/exp/slices"
 )
@@ -1607,4 +1608,438 @@ func NewCachingScheduleTracker(blockCount int) CachingScheduleTracker {
 		roots:     make([][]rootInfo, 0, blockCount),
 		toDestroy: make([][]uint64, 0, blockCount),
 	}
+}
+
+// undoDel returns the previous positions of the passed in origPositions.
+//
+// NOTE: the returned origPositions keeps the original ordering.
+func undoDel(totalRows uint8, origPositions, deleted []uint64, numLeaves uint64) ([]uint64, error) {
+	// Nothing to do if there's no deletions.
+	if len(deleted) == 0 || len(origPositions) == 0 {
+		return origPositions, nil
+	}
+
+	// Copy and sort.
+	positions := copySortedFunc(origPositions, uint64Cmp)
+
+	m := make(map[uint64]uint64, len(positions))
+	for _, pos := range positions {
+		m[pos] = pos
+	}
+
+	// Copy, sort, and detwin.
+	deTwinedPositions := copySortedFunc(deleted, uint64Cmp)
+	deTwinedPositions = deTwin(deTwinedPositions, totalRows)
+
+	// Loop through all the targets and look for the previous sibling.
+	// If that sibling is included in the proof, include the target into
+	// the proof and remap the positions accordingly.
+	for i := len(deTwinedPositions) - 1; i >= 0; i-- {
+		deTwinedPos := deTwinedPositions[i]
+
+		// When a target is deleted, its sibling moves up to the parent
+		// position. Therefore the current sibling will be in the parent
+		// position of the deleted target if it exists.
+		sibPos := Parent(deTwinedPos, totalRows)
+
+		for j, pos := range positions {
+			// If these positions are in different subtrees, continue.
+			subtree, _, _, _ := DetectOffset(translatePos(deTwinedPos, totalRows, TreeRows(numLeaves)), numLeaves)
+			subtree1, _, _, _ := DetectOffset(translatePos(pos, totalRows, TreeRows(numLeaves)), numLeaves)
+			if subtree != subtree1 {
+				continue
+			}
+
+			if isAncestor(sibPos, pos, totalRows) || sibPos == pos {
+				positions[j] = calcPrevPosition(pos, deTwinedPos, totalRows)
+				v := m[pos]
+				m[positions[j]] = v
+				delete(m, pos)
+				slices.Sort(positions)
+			}
+		}
+	}
+
+	for newPos, orig := range m {
+		idx := slices.Index(origPositions, orig)
+		if idx == -1 {
+			return origPositions, fmt.Errorf("didn't find orig pos of %v", orig)
+		}
+		origPositions[idx] = newPos
+	}
+
+	return origPositions, nil
+}
+
+// moveDownPositions moves the positions in the cached slice to where they were
+// before the delPos was removed.
+//
+// NOTE: the returned positions keeps the original ordering.
+func moveDownPositions(totalRows uint8, position, delPos uint64, cached []uint64, m map[uint64]uint64) []uint64 {
+	for i, pos := range cached {
+		if pos == position || isAncestor(position, pos, totalRows) {
+			cached[i] = calcPrevPosition(pos, delPos, totalRows)
+
+			if m != nil {
+				v := m[pos]
+				m[cached[i]] = v
+				delete(m, pos)
+			}
+		}
+	}
+
+	return cached
+}
+
+// undoSingleAdd removes latest leaf and all the nodes that were created from that leaf.
+// The returned values are the origPositions reverted back before the leaf was added,
+// all the positions that were created because of the added leaf, and the new numLeaves.
+//
+// NOTE: the returned origPositions keeps the original ordering.
+func undoSingleAdd(totalRows uint8, origPositions, toDestroy []uint64, numLeaves uint64) (
+	[]uint64, []uint64, []uint64, []int, uint64) {
+	positions := copySortedFunc(origPositions, uint64Cmp)
+	created := make([]uint64, 0, len(positions))
+	createdIdxes := make([]int, 0, len(positions))
+
+	pos := numLeaves - 1
+
+	m := make(map[uint64]uint64, len(positions))
+	for _, pos := range positions {
+		m[pos] = pos
+	}
+
+	// We work our way down from the root that's being removed.
+	subtree, _, _, _ := DetectOffset(pos, numLeaves)
+	subtreeRows := subtreeRow(numLeaves, subtree)
+	pos = rootPosition(numLeaves, subtreeRows, totalRows)
+
+	for row := int(subtreeRows); row >= 0; row-- {
+		index := slices.Index(positions, pos)
+		if index != -1 {
+			created = append(created, positions[index])
+			positions = slices.Delete(positions, index, index+1)
+
+			v := m[pos]
+			delete(m, pos)
+			idx := slices.Index(origPositions, v)
+			if idx != -1 {
+				createdIdxes = append(createdIdxes, idx)
+				origPositions = slices.Delete(origPositions, idx, idx+1)
+			}
+		}
+
+		possibleRoot := LeftChild(pos, totalRows)
+		index = slices.Index(toDestroy, possibleRoot)
+		if index != -1 {
+			toDestroy = slices.Delete(toDestroy, index, index+1)
+			positions = moveDownPositions(totalRows, pos, possibleRoot, positions, m)
+			created = moveDownPositions(totalRows, pos, possibleRoot, created, nil)
+		}
+
+		pos = RightChild(pos, totalRows)
+	}
+
+	for newPos, orig := range m {
+		idx := slices.Index(origPositions, orig)
+		if idx != -1 {
+			origPositions[idx] = newPos
+		}
+	}
+
+	return origPositions, created, toDestroy, createdIdxes, numLeaves - 1
+}
+
+// undoAdd removes all the added leaves in the past block and all the nodes that were created
+// from that leaf. The returned values are the origPositions reverted back before the leaves
+// were added, all the positions that were created because of the added leaf, and the new numLeaves.
+//
+// NOTE: the returned origPositions keeps the original ordering.
+func undoAdd(totalRows uint8, origPositions, origToDestroy []uint64, numAdds, numLeaves uint64) ([]uint64, []uint64, uint64, error) {
+	positions := make([]uint64, len(origPositions))
+	copy(positions, origPositions)
+
+	toDestroy := make([]uint64, len(origToDestroy))
+	copy(toDestroy, origToDestroy)
+
+	ages := make([]int, len(origPositions))
+	for i := range ages {
+		ages[i] = i
+	}
+
+	created := make([]uint64, 0, len(origPositions))
+	createdAges := make([]int, 0, len(origPositions))
+	for i := 0; i < int(numAdds); i++ {
+		var c []uint64
+		var cIdxs []int
+		positions, c, toDestroy, cIdxs, numLeaves = undoSingleAdd(totalRows, positions, toDestroy, numLeaves)
+
+		if len(c) != 0 {
+			curAge := ages[cIdxs[0]]
+
+			indexToInsert := -1
+			for i, age := range createdAges {
+				if curAge < age {
+					indexToInsert = i
+					break
+				}
+			}
+			if indexToInsert == -1 {
+				created = append(created, c[0])
+				createdAges = append(createdAges, curAge)
+			} else {
+				created = slices.Insert(created, indexToInsert, c[0])
+				createdAges = slices.Insert(createdAges, indexToInsert, curAge)
+			}
+
+			for _, idx := range cIdxs {
+				ages = slices.Delete(ages, idx, idx+1)
+			}
+		}
+	}
+
+	return positions, created, numLeaves, nil
+}
+
+// getPrevPos returns the cached positions to the previous block (minus all the positions that didn't exist then),
+// and all the positions that were created in the block.
+func getPrevPos(totalRows uint8, cached, deleted, toDestroy []uint64, numAdds uint16, numLeaves uint64) ([]uint64, []uint64, error) {
+	var err error
+	var created []uint64
+	cached, created, numLeaves, err = undoAdd(totalRows, cached, toDestroy, uint64(numAdds), numLeaves)
+	if err != nil {
+		return cached, created, err
+	}
+
+	cached, err = undoDel(totalRows, cached, deleted, numLeaves)
+	return cached, created, err
+}
+
+// trackerCache keeps track of the overflowed deletions and keeps track of them
+// separately so that the caching schedule generated never exceeds the max memory
+// limit.
+//
+// The need for this arises due to how we generate the cache schedule. Say we have
+// blocks like so:
+//
+// block 1: creates(0, 1, 2, 3) | dels ()
+// block 2: creates()           | dels ()
+// block 3: creates()           | dels (0, 1, 2, 3)
+//
+// If we have a max cache of 2, then we can cache 2 from the deletion of [0, 1, 2, 3].
+// Since we go backwards, when we're at block 3, we need to keep more than the
+// max cache of 2 since any two from the deletions of [0, 1, 2, 3] can be cached.
+// Here we cache [0, 1] because they're the oldest. But we could be caching [2, 3]
+// instead if the blocks were like so:
+//
+// block 1: creates(0, 1) | dels ()
+// block 2: creates(2, 3) | dels ()
+// block 3: creates()     | dels (0, 1, 2, 3)
+//
+// So the need for caching more than the maxmem exists. But then, why do we also need the
+// overFlow slice and the overFlowDrop count? Let's look at an example like so:
+//
+// block 1: creates(0, 1, 2, 3, 4, 5) | dels ()
+// block 2: creates()                 | dels ()
+// block 3: creates(6)                | dels ()
+// block 4: creates(7)                | dels (6)
+// block 5: creates()                 | dels (0, 5, 7)
+//
+// Maxmem is still 2. We cache [0, 5, 7] at block 5. We can cache two things from the
+// slice of [0, 5, 7]. At block 4, 7 is created so we mark 7 in the cache schedule.
+// Now, we're only able to cache either 0 or 5 since we picked one element to be in the
+// cache schedule. 6 is deleted at this block so we add 6 to the cache. Our cache slice
+// now consists of [0, 5, 6].
+//
+// We can pick two elements from the slice of [0, 5, 6] to be included in the cache schedule.
+// However, we can still only cache either 0 or 5. So the elements we can put in the cache
+// schedule is either [0, 6] or [5, 6].
+//
+// This is where the overFlow slice and the overFlowDrop count comes in handy. The overFlowDrop
+// counts how many elements from the overFlow slice has been added to the cache schedule. The
+// overFlow slice keeps track of [0, 5] separate from [6].
+//
+// In the example above, the trackerCache slice will look like so:
+//
+// Block 6: trackerCache{cache: []uint64{ }, overFlow: []uint64{0, 5, 7}, overFlowDrop: 0, maxMem: 2}
+// Block 5: trackerCache{cache: []uint64{6}, overFlow: []uint64{0, 5   }, overFlowDrop: 1, maxMem: 2}
+// Block 4: trackerCache{cache: []uint64{ }, overFlow: []uint64{0, 5   }, overFlowDrop: 1, maxMem: 2}
+// Block 3: trackerCache{cache: []uint64{ }, overFlow: []uint64{0, 5   }, overFlowDrop: 1, maxMem: 2}
+// Block 2: trackerCache{cache: []uint64{ }, overFlow: []uint64{0, 5   }, overFlowDrop: 1, maxMem: 2}
+// Block 1: trackerCache{cache: []uint64{ }, overFlow: []uint64{       }, overFlowDrop: 0, maxMem: 2}
+//
+// At block 1, we mark 0 to be cached and reset the overFlow slice and the overFlowDrop count.
+type trackerCache struct {
+	caches     [][]uint64
+	pickedCnts []int
+	maxMem     int
+}
+
+// string prints the tracker cache to a readable string with the positions translated as well.
+func (tc *trackerCache) string(numLeaves uint64) string {
+	var str string
+	str += fmt.Sprintf("total of %v caches:\n", len(tc.caches))
+	for i, cache := range tc.caches {
+		str += fmt.Sprintf("    %v: picked %v, %v, [%v]\n",
+			i, tc.pickedCnts[i], cache, translatePositions(cache, 63, TreeRows(numLeaves)))
+	}
+
+	return str
+}
+
+// addSingle adds the given position to the caches.
+func (tc *trackerCache) addSingle(pos uint64) {
+	if len(tc.pickedCnts) == 0 {
+		tc.pickedCnts = append(tc.pickedCnts, 0)
+		tc.caches = append(tc.caches, []uint64{pos})
+		return
+	}
+
+	count := tc.pickedCnts[len(tc.pickedCnts)-1]
+	if count == 0 {
+		tc.caches[len(tc.pickedCnts)-1] = append(tc.caches[len(tc.pickedCnts)-1], pos)
+		return
+	}
+
+	tc.pickedCnts = append(tc.pickedCnts, 0)
+	tc.caches = append(tc.caches, []uint64{pos})
+	return
+}
+
+// add adds all the positions to the cache.
+func (tc *trackerCache) add(positions []uint64) {
+	if len(positions) == 0 {
+		return
+	}
+
+	for _, pos := range positions {
+		tc.addSingle(pos)
+	}
+}
+
+// getPrevPos returns the cached positions to the previous block (minus all the positions that didn't exist then),
+// and all the positions that was created in this block that should be cached.
+func (tc *trackerCache) getPrevPos(deleted, toDestroy []uint64, numAdds uint16, numLeaves uint64) (
+	[]uint64, error) {
+
+	var created []uint64
+	for i := 0; i < len(tc.caches); i++ {
+		cache, c, err := getPrevPos(CSTTotalRows, tc.caches[i], deleted, toDestroy, numAdds, numLeaves)
+		if err != nil {
+			return created, err
+		}
+		tc.caches[i] = cache
+
+		if len(c) > 0 {
+			allPicked := len(c) + tc.pickedCnts[i]
+			if allPicked >= tc.maxMem {
+				tc.caches = slices.Delete(tc.caches, i, i+1)
+				tc.pickedCnts = slices.Delete(tc.pickedCnts, i, i+1)
+				i--
+				c = c[allPicked-tc.maxMem:]
+			} else {
+				tc.pickedCnts[i] += len(c)
+			}
+			created = append(created, c...)
+		}
+	}
+
+	slices.Sort(created)
+
+	return created, nil
+}
+
+// newTrackerCache returns an initialized trackerCache.
+func newTrackerCache(maxMemory int) trackerCache {
+	tc := trackerCache{
+		caches:     make([][]uint64, 0, maxMemory),
+		pickedCnts: make([]int, 0, maxMemory),
+		maxMem:     maxMemory,
+	}
+	tc.caches = append(tc.caches, []uint64{})
+	tc.pickedCnts = append(tc.pickedCnts, 0)
+	return tc
+}
+
+// GenerateCachingSchedule returns the positions that the client should cache to have an optimal
+// caching for the passed in maxMemory.
+//
+// NOTE: maxMemory represents how many targets that the user would like to cache.
+func (cs *CachingScheduleTracker) GenerateCachingSchedule(maxMemory int) ([][]uint64, error) {
+	cacheSchedules := make([][]uint64, len(cs.deletions))
+
+	potentialCache := newTrackerCache(maxMemory)
+	for i := len(cs.deletions) - 1; i >= 0; i-- {
+		deletions := cs.deletions[i]
+		numAdds := cs.numAdds[i]
+		numLeaves := cs.numLeaves[i]
+		toDestroy := cs.toDestroy[i]
+
+		toCache, err := potentialCache.getPrevPos(deletions, toDestroy, numAdds, numLeaves)
+		if err != nil {
+			return nil, err
+		}
+
+		if toCache == nil {
+			toCache = []uint64{}
+		}
+		prevNumLeaves := uint64(0)
+		if i != 0 {
+			prevNumLeaves = cs.numLeaves[i-1]
+		}
+		for j := range toCache {
+			toCache[j] -= prevNumLeaves
+		}
+		cacheSchedules[i] = toCache
+
+		delsToCache := copySortedFunc(deletions, uint64Descending)
+
+		potentialCache.add(delsToCache)
+	}
+
+	return cacheSchedules, nil
+}
+
+// String returns the CachingScheduleTracker as a formatting string.
+func (c *CachingScheduleTracker) String() string {
+	var sb strings.Builder
+
+	sb.WriteString("CachingScheduleTracker:\n")
+
+	// Write deletions
+	sb.WriteString("  deletions:\n")
+	for i, del := range c.deletions {
+		sb.WriteString(fmt.Sprintf("    [%d]: %v (translated %v)\n",
+			i, del, translatePositions(del, CSTTotalRows, TreeRows(c.numLeaves[i]))))
+	}
+
+	// Write numAdds
+	sb.WriteString(fmt.Sprintf("  numAdds: %v\n", c.numAdds))
+
+	// Write numLeaves
+	sb.WriteString(fmt.Sprintf("  numLeaves: %v\n", c.numLeaves))
+
+	// Write toDestroy
+	sb.WriteString("  toDestroy:\n")
+	for i, td := range c.toDestroy {
+		sb.WriteString(fmt.Sprintf("    [%d]: %v (translated %v)\n",
+			i, td, translatePositions(td, CSTTotalRows, TreeRows(c.numLeaves[i]))))
+	}
+
+	// Write roots
+	sb.WriteString("  roots:\n")
+	for i, rootList := range c.roots {
+		sb.WriteString(fmt.Sprintf("    [%d]: [", i))
+		for j, root := range rootList {
+			if j > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(fmt.Sprintf("{pos: %d (translated %d), isZombie: %t}",
+				root.pos, translatePos(root.pos, CSTTotalRows, TreeRows(c.numLeaves[i])),
+				root.isZombie))
+		}
+		sb.WriteString("]\n")
+	}
+
+	return sb.String()
 }

@@ -1398,3 +1398,877 @@ func FuzzAddBlockSummary(f *testing.F) {
 		}
 	})
 }
+
+func TestGetPrevPos(t *testing.T) {
+	testCases := []struct {
+		numLeaves       uint64
+		deletions       []uint64
+		toDestroy       []uint64
+		numAdds         uint16
+		cached          []uint64
+		expectedCached  []uint64
+		expectedCreated []uint64
+	}{
+		// 06:760d
+		// |---------------\
+		// 04:177a         05:0300
+		// |-------\       |-------\
+		// 00:0000 01:0100
+		//
+		// |---------------\
+		// 04:177a
+		// |-------\       |-------\
+		// 00:0000 01:0100 02:XX
+		{
+			numLeaves:       4,
+			deletions:       []uint64{},
+			toDestroy:       []uint64{2},
+			numAdds:         1,
+			cached:          []uint64{translatePos(5, TreeRows(4), CSTTotalRows)},
+			expectedCached:  []uint64{},
+			expectedCreated: []uint64{3},
+		},
+
+		// 06:a3c3
+		// |---------------\
+		// 04:0200         05:0300
+		// |-------\       |-------\
+		//
+		//
+		// |---------------\
+		// 04:XX
+		// |-------\       |-------\
+		//                 02:0200
+		{
+			numLeaves:       4,
+			deletions:       []uint64{},
+			toDestroy:       []uint64{translatePos(4, TreeRows(4), CSTTotalRows)},
+			numAdds:         1,
+			cached:          []uint64{translatePos(4, TreeRows(4), CSTTotalRows)},
+			expectedCached:  []uint64{2},
+			expectedCreated: []uint64{},
+		},
+	}
+
+	for _, test := range testCases {
+		gotCached, gotCreated, err := getPrevPos(CSTTotalRows, test.cached, test.deletions, test.toDestroy, test.numAdds, test.numLeaves)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		require.Equal(t, test.expectedCached, gotCached)
+		require.Equal(t, test.expectedCreated, gotCreated)
+	}
+}
+
+func FuzzGetPrevPos(f *testing.F) {
+	var tests = []struct {
+		numAdds  uint32
+		duration uint32
+		seed     int64
+	}{
+		{3, 3, 0xf1},
+	}
+	for _, test := range tests {
+		f.Add(test.numAdds, test.duration, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		// simulate blocks with simchain
+		sc := newSimChainWithSeed(duration, seed)
+
+		cs := NewCachingScheduleTracker(10)
+
+		addedPositions := make([][]uint64, 0, 10)
+
+		p := NewAccumulator()
+		stump := Stump{}
+		for b := 0; b < 10; b++ {
+			adds, _, delHashes := sc.NextBlock(numAdds)
+
+			// The blockProof is the proof for the utxos being
+			// spent/deleted.
+			blockProof, err := p.Prove(delHashes)
+			if err != nil {
+				t.Fatalf("FuzzGetPrevPos fail at block %d. Error: %v", b, err)
+			}
+
+			added := make([]uint64, 0, len(adds))
+			for i := range adds {
+				pos := p.GetNumLeaves() + uint64(i)
+				added = append(added, pos)
+			}
+			addedPositions = append(addedPositions, added)
+
+			err = p.Modify(adds, delHashes, blockProof)
+			if err != nil {
+				t.Fatalf("FuzzGetPrevPos fail at block %d. Error: %v", b, err)
+			}
+			addHashes := make([]Hash, 0, len(adds))
+			for _, add := range adds {
+				addHashes = append(addHashes, add.Hash)
+			}
+			_, err = stump.Update(delHashes, addHashes, blockProof)
+			if err != nil {
+				t.Fatalf("FuzzGetPrevPos fail at block %d. Error: %v", b, err)
+			}
+
+			cs.AddBlockSummary(blockProof.Targets, uint16(len(adds)))
+
+			cached := make([]uint64, len(blockProof.Targets))
+			copy(cached, translatePositions(blockProof.Targets, TreeRows(p.NumLeaves), CSTTotalRows))
+			for i := b - 1; i >= 0; i-- {
+				c, created, err := getPrevPos(CSTTotalRows, cached, cs.deletions[i],
+					cs.toDestroy[i], cs.numAdds[i], cs.numLeaves[i])
+				if err != nil {
+					t.Fatalf("FuzzGetPrevPos fail at block %d. %v", b, err)
+				}
+				cached = c
+
+				if i > 0 {
+					cached = append(cached, cs.deletions[i]...)
+				}
+				created = translatePositions(created, CSTTotalRows, TreeRows(cs.numLeaves[i]))
+				for _, pos := range created {
+					idx := slices.Index(addedPositions[i], pos)
+					if idx == -1 {
+						t.Fatalf("FuzzGetPrevPos fail at block %d. "+
+							"calculated created position %v at block %v"+
+							" wasn't found",
+							b, pos, i)
+					}
+				}
+			}
+		}
+	})
+}
+
+func TestCachingSchedule(t *testing.T) {
+	tests := []struct {
+		name           string
+		blockDeletions [][]uint64
+		numAdds        []uint16
+		maxMemory      int
+		expected       [][]uint64
+		expectErr      bool
+	}{
+		//{
+		//	// creates(0, 1) | dels ()
+		//	// creates(2, 3) | dels (0)
+		//	// creates(4, 5) | dels (1)
+		//	// creates(6, 7) | dels (2, 3)
+		//	name: "Basic case",
+		//	blockDeletions: [][]uint64{
+		//		{},
+		//		{0},
+		//		{4},
+		//		{8, 9},
+		//	},
+		//	numAdds:   []uint16{2, 2, 2, 2},
+		//	maxMemory: 3,
+		//	expected: [][]uint64{
+		//		{0, 1},
+		//		{2, 3},
+		//		{},
+		//		{},
+		//	},
+		//	expectErr: false,
+		//},
+		//{
+		//	// creates(0, 1) | dels ()
+		//	// creates(2, 3) | dels (0)
+		//	// creates(4, 5) | dels (1)
+		//	// creates(6, 7) | dels (2, 3)
+		//	name: "Basic case with maxMemory of 2",
+		//	blockDeletions: [][]uint64{
+		//		{},
+		//		{0},
+		//		{4},
+		//		{8, 9},
+		//	},
+		//	numAdds:   []uint16{2, 2, 2, 2},
+		//	maxMemory: 2,
+		//	expected: [][]uint64{
+		//		{0, 1},
+		//		{2},
+		//		{},
+		//		{},
+		//	},
+		//	expectErr: false,
+		//},
+		//{
+		//	name: "No additions, no deletions",
+		//	blockDeletions: [][]uint64{
+		//		{},
+		//		{},
+		//		{},
+		//		{},
+		//	},
+		//	numAdds:   []uint16{0, 0, 0, 0},
+		//	maxMemory: 3,
+		//	expected: [][]uint64{
+		//		{}, {}, {}, {},
+		//	},
+		//	expectErr: false,
+		//},
+		//{
+		//	// creates(0, 1, 2, 3, 4, 5, 6, 7) | dels ()
+		//	// creates(8, 9, 10, 11, 12)       | dels ()
+		//	// creates(13, 14, 15)             | dels ()
+		//	name: "No deletions",
+		//	blockDeletions: [][]uint64{
+		//		{},
+		//		{},
+		//		{},
+		//		{},
+		//	},
+		//	numAdds:   []uint16{8, 5, 3, 0},
+		//	maxMemory: 3,
+		//	expected: [][]uint64{
+		//		{}, {}, {}, {},
+		//	},
+		//	expectErr: false,
+		//},
+		//{
+		//	// creates(0, 1) | dels ()
+		//	// creates(2, 3) | dels (0)
+		//	// creates(4, 5) | dels (1, 2)
+		//	// creates(6, 7) | dels (3, 4, 5)
+		//	name: "Cache eviction when maxMemory is exceeded",
+		//	blockDeletions: [][]uint64{
+		//		{},
+		//		{0},
+		//		{4, 2},
+		//		{12, 4, 5},
+		//	},
+		//	numAdds:   []uint16{2, 2, 2, 2},
+		//	maxMemory: 2,
+		//	expected: [][]uint64{
+		//		{0, 1},
+		//		{2},
+		//		{4, 5},
+		//		{},
+		//	},
+		//	expectErr: false,
+		//},
+		//{
+		//	name: "Cache eviction with maxMemory at 1",
+		//	blockDeletions: [][]uint64{
+		//		{},
+		//		{},
+		//		{},
+		//		{0, 1},
+		//	},
+		//	numAdds:   []uint16{7, 0, 0, 0},
+		//	maxMemory: 1,
+		//	expected: [][]uint64{
+		//		{0},
+		//		{},
+		//		{},
+		//		{},
+		//	},
+		//	expectErr: false,
+		//},
+		//{
+		//	// creates(0, 1, 2, 3) | dels ()
+		//	// creates(4, 5, 6, 7) | dels ()
+		//	// creates()           | dels (0, 4)
+		//	// creates()           | dels ()
+		//	name: "Delete 2 leaves",
+		//	blockDeletions: [][]uint64{
+		//		{},
+		//		{},
+		//		{0, 4},
+		//		{},
+		//	},
+		//	numAdds:   []uint16{4, 4, 0, 0},
+		//	maxMemory: 1,
+		//	expected: [][]uint64{
+		//		{},
+		//		{4},
+		//		{},
+		//		{},
+		//	},
+		//	expectErr: false,
+		//},
+		//{
+		//	// creates(0, 1, 2, 3) | dels ()
+		//	// creates(4, 5, 6, 7) | dels ()
+		//	// creates()           | dels (0, 4, 5)
+		//	// creates()           | dels ()
+		//	name: "Delete 3 leaves",
+		//	blockDeletions: [][]uint64{
+		//		{},
+		//		{},
+		//		{0, 4, 5},
+		//		{},
+		//	},
+		//	numAdds:   []uint16{4, 4, 0, 0},
+		//	maxMemory: 2,
+		//	expected: [][]uint64{
+		//		{},
+		//		{4, 5},
+		//		{},
+		//		{},
+		//	},
+		//	expectErr: false,
+		//},
+		//{
+		//	// creates(0, 1, 2, 3) | dels ()
+		//	// creates(4, 5, 6)    | dels ()
+		//	// creates(7)          | dels ()
+		//	// creates()           | dels (0, 4, 7)
+		//	name: "Delete 3 leaves but created at different heights",
+		//	blockDeletions: [][]uint64{
+		//		{},
+		//		{},
+		//		{},
+		//		{0, 4, 7},
+		//	},
+		//	numAdds:   []uint16{4, 3, 1, 0},
+		//	maxMemory: 2,
+		//	expected: [][]uint64{
+		//		{},
+		//		{4},
+		//		{7},
+		//		{},
+		//	},
+		//	expectErr: false,
+		//},
+		//{
+		//	// creates(0, 1, 2, 3, 4, 5, 6) | dels ()
+		//	// creates()                    | dels ()
+		//	// creates()                    | dels ()
+		//	// creates(7)                   | dels ()
+		//	// creates()                    | dels (0, 4)
+		//	// creates()                    | dels (7)
+		//	name: "Expect to remove last deletion",
+		//	blockDeletions: [][]uint64{
+		//		{},
+		//		{},
+		//		{},
+		//		{},
+		//		{0, 4},
+		//		{7},
+		//	},
+		//	numAdds:   []uint16{7, 0, 0, 1, 0, 0},
+		//	maxMemory: 2,
+		//	expected: [][]uint64{
+		//		{0, 4}, {}, {}, {}, {}, {},
+		//	},
+		//	expectErr: false,
+		//},
+		//{
+		//	// creates(0, 1, 2, 3, 4, 5) | dels ()
+		//	// creates()                 | dels ()
+		//	// creates()                 | dels ()
+		//	// creates(6)                | dels ()
+		//	// creates(7)                | dels (6)
+		//	// creates()                 | dels (0, 7)
+		//	name: "Case for when the cache is filled and un-filled. Expect to cache everything",
+		//	blockDeletions: [][]uint64{
+		//		{},
+		//		{},
+		//		{},
+		//		{},
+		//		{6},
+		//		{0, 11},
+		//	},
+		//	numAdds:   []uint16{6, 0, 0, 1, 1, 0},
+		//	maxMemory: 2,
+		//	expected: [][]uint64{
+		//		{0}, {}, {}, {6}, {7}, {},
+		//	},
+		//	expectErr: false,
+		//},
+		{
+			// creates(0, 1, 2, 3, 4, 5) | dels ()
+			// creates()                 | dels ()
+			// creates()                 | dels ()
+			// creates(6)                | dels ()
+			// creates(7)                | dels (6)
+			// creates()                 | dels (0, 5, 7)
+			name: "Case for when the cache is filled and un-filled",
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{},
+				{},
+				{6},
+				{0, 5, 11},
+			},
+			numAdds:   []uint16{6, 0, 0, 1, 1, 0},
+			maxMemory: 2,
+			expected: [][]uint64{
+				{0}, {}, {}, {6}, {7}, {},
+			},
+			expectErr: false,
+		},
+		{
+			// creates(0, 1, 2, 3, 4, 5) | dels ()
+			// creates()                 | dels ()
+			// creates(6)                | dels ()
+			// creates()                 | dels ()
+			// creates(7)                | dels (6)
+			// creates()                 | dels (0, 5, 7)
+			name: "Case for when the cache is filled and un-filled. 6 created earlier.",
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{},
+				{},
+				{6},
+				{0, 5, 11},
+			},
+			numAdds:   []uint16{6, 0, 1, 0, 1, 0},
+			maxMemory: 2,
+			expected: [][]uint64{
+				{0}, {}, {6}, {}, {7}, {},
+			},
+			expectErr: false,
+		},
+		{
+			// creates(0, 1, 2, 3, 4, 5, 6, 7) | dels ()
+			// creates()                       | dels ()
+			// creates()                       | dels ()
+			// creates()                       | dels (4)
+			// creates()                       | dels (6)
+			// creates()                       | dels (0, 5, 7)
+			name: "Expect to choose deletions with lower ttl",
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{},
+				{4},
+				{6},
+				{0, 10, 11},
+			},
+			numAdds:   []uint16{8, 0, 0, 0, 0, 0},
+			maxMemory: 2,
+			expected: [][]uint64{
+				{4, 6}, {}, {}, {}, {}, {},
+			},
+			expectErr: false,
+		},
+		{
+			// creates(0, 1, 2, 3, 4, 5) | dels ()
+			// creates(6, 7)             | dels ()
+			// creates()                 | dels ()
+			// creates()                 | dels (4)
+			// creates()                 | dels (5)
+			// creates()                 | dels (0, 6, 7)
+			name: "Expect to choose deletions with lower ttl. Cached deletions created at height 0",
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{},
+				{4},
+				{10},
+				{0, 10, 11},
+			},
+			numAdds:   []uint16{8, 0, 0, 0, 0, 0},
+			maxMemory: 2,
+			expected: [][]uint64{
+				{4, 5}, {}, {}, {}, {}, {},
+			},
+			expectErr: false,
+		},
+		{
+			// creates(0)                   | dels ()
+			// creates(1, 2, 3, 4, 5, 6, 7) | dels ()
+			// creates()                    | dels (4)
+			// creates()                    | dels (6)
+			// creates()                    | dels (0, 5, 7)
+			name: "Expect to choose deletions with lower ttl. Different create heights.",
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{},
+				{4},
+				{6},
+				{0, 10, 11},
+			},
+			numAdds:   []uint16{1, 7, 0, 0, 0, 0},
+			maxMemory: 2,
+			expected: [][]uint64{
+				{}, {4, 6}, {}, {}, {}, {},
+			},
+			expectErr: false,
+		},
+		{
+			// creates(0)             | dels ()
+			// creates(1, 2, 3, 4, 5) | dels ()
+			// creates(6, 7)          | dels ()
+			// creates()              | dels (6)
+			// creates()              | dels (0, 1, 5, 7)
+			name: "Expect to choose deletions with lower ttl. Force eviction.",
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{},
+				{},
+				{6},
+				{0, 1, 5, 11},
+			},
+			numAdds:   []uint16{1, 5, 2, 0, 0, 0},
+			maxMemory: 2,
+			expected: [][]uint64{
+				{}, {}, {6, 7}, {}, {}, {},
+			},
+			expectErr: false,
+		},
+		{
+			// creates(0)             | dels ()
+			// creates(1, 2, 3, 4, 5) | dels ()
+			// creates(6, 7)          | dels ()
+			// creates()              | dels (4)
+			// creates()              | dels (6)
+			// creates()              | dels (0, 5, 7)
+			name: "Expect to choose deletions with lower ttl. Force eviction.",
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{},
+				{4},
+				{6},
+				{0, 10, 11},
+			},
+			numAdds:   []uint16{1, 5, 2, 0, 0, 0},
+			maxMemory: 2,
+			expected: [][]uint64{
+				{}, {}, {6, 7}, {}, {}, {},
+			},
+			expectErr: false,
+		},
+		{
+			// creates(0, 1, 2, 3) | dels ()
+			// creates()           | dels ()
+			// creates()           | dels (0, 3)
+			// creates(4, 5, 6)    | dels ()
+			// creates()           | dels (4, 5, 6)
+			// creates()           | dels (1, 2)
+			name: "Cache emptied and filled",
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{0, 3},
+				{},
+				{4, 5, 6},
+				{8, 9},
+			},
+			numAdds:   []uint16{4, 0, 0, 3, 0, 0},
+			maxMemory: 2,
+			expected: [][]uint64{
+				{0, 3}, {}, {}, {4, 5}, {}, {},
+			},
+			expectErr: false,
+		},
+		{
+			// creates(0, 1, 2, 3) | dels ()
+			// creates()           | dels ()
+			// creates()           | dels (0)
+			// creates(4, 5, 6)    | dels ()
+			// creates()           | dels (4, 5, 6)
+			// creates()           | dels (1, 2)
+			name: "Cache partially filled and then filled",
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{0},
+				{},
+				{4, 5, 6},
+				{8, 2},
+			},
+			numAdds:   []uint16{4, 0, 0, 3, 0, 0},
+			maxMemory: 2,
+			expected: [][]uint64{
+				{0}, {}, {}, {4, 5}, {}, {},
+			},
+			expectErr: false,
+		},
+		{
+			// creates(0, 1, 2, 3) | dels ()
+			// creates()           | dels ()
+			// creates()           | dels (0, 3)
+			// creates(4, 5, 6)    | dels ()
+			// creates()           | dels (4, 5)
+			// creates()           | dels (1)
+			name: "Expect to cache everything",
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{0, 3},
+				{},
+				{4, 5},
+				{8},
+			},
+			numAdds:   []uint16{4, 0, 0, 3, 0, 0},
+			maxMemory: 3,
+			expected: [][]uint64{
+				{0, 1, 3}, {}, {}, {4, 5}, {}, {},
+			},
+			expectErr: false,
+		},
+		{
+			// [2, 3, 5,       10,    12,         ]
+			// [2, 3, 5, 7, 9, 10, 8, 12, 4, 6, 11]
+
+			// creates(0, 1)   | dels ()
+			// creates(2, 3)   | dels ()           | cache 2, 3
+			// creates(4, 5)   | dels ()           | cache 5
+			// creates(6, 7)   | dels ()
+			// creates(8, 9)   | dels (2)
+			// creates(10, 11) | dels (3, 5)       | cache 10
+			// creates(12, 13) | dels (7, 9)       | cache 12
+			// creates(14, 15) | dels (10)
+			// creates(16, 17) | dels (8, 12)
+			// creates(18, 19) | dels (4, 6, 11)
+
+			// [2,    5, 7, 9, 10,    12,       11]
+			// [2, 3, 5, 7, 9, 10, 8, 12, 4, 6, 11]
+
+			// creates (0, 1)   | ()
+			// creates (2, 3)   | ()                                 | cache 2
+			// creates (4, 5)   | (2)                                | cache 5
+			// creates (6, 7)   | (5, 3) (2)                         | cache 7
+			// creates (8, 9)   | (7, 5, 3) (2)                      | cache 9
+			// creates (10, 11) | (9, 7, 5, 3)                       | cache 10, 11
+			// creates (12, 13) | (11, 6, 4, 8, 10) (9, 7)           | cache 12
+			// creates (14, 15) | (11, 6, 4, 12, 8, 10)
+			// creates (16, 17) | (11, 6, 4, 12, 8)
+			// creates (18, 19) | (11, 6, 4)
+
+			// [2, 3, 5,    9, 10,    12,       11]
+			// [2, 3, 5, 7, 9, 10, 8, 12, 4, 6, 11]
+
+			// creates(0, 1)   | cache()           | ttl()        | dels ()
+			// creates(2, 3)   | cache(2, 3)       | ttl(3, 4)    | dels ()
+			// creates(4, 5)   | cache(2, 3, 5)    | ttl(2, 3, 3) | dels ()
+			// creates(6, 7)   | cache(2, 3, 5)    | ttl(1, 2, 2) | dels ()
+			// creates(8, 9)   | cache(3, 5, 9)    | ttl(1, 1, 2) | dels (2)
+			// creates(10, 11) | cache(9, 10, 11)  | ttl(1, 2, 4) | dels (3, 5)
+			// creates(12, 13) | cache(10, 11, 12) | ttl(1, 3, 2) | dels (7, 9)
+			// creates(14, 15) | cache(11, 12)     | ttl(2, 1)    | dels (10)
+			// creates(16, 17) | cache(11)         | ttl(1)       | dels (8, 12)
+			// creates(18, 19) | cache()           | ttl()        | dels (4, 6, 11)
+			name: "Fuzz failure case 1",
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{},
+				{},
+				{2},
+				{17, 5},
+				{7, 9},
+				{10},
+				{20, 12},
+				{34, 35, 50},
+			},
+			numAdds:   []uint16{2, 2, 2, 2, 2, 2, 2, 2, 2, 2},
+			maxMemory: 3,
+			expected: [][]uint64{
+				{}, {2}, {5}, {7}, {9}, {10, 11}, {12}, {}, {}, {},
+			},
+			expectErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		cs := NewCachingScheduleTracker(0)
+		for i, numAdd := range tt.numAdds {
+			cs.AddBlockSummary(tt.blockDeletions[i], numAdd)
+		}
+
+		result, err := cs.GenerateCachingSchedule(tt.maxMemory)
+		for i, row := range result {
+			numLeaves := uint64(0)
+			if i != 0 {
+				numLeaves = cs.numLeaves[i-1]
+			}
+			for j := range row {
+				row[j] += numLeaves
+			}
+		}
+
+		if tt.expectErr {
+			if err == nil {
+				t.Errorf("Test %s: expected an error but got nil", tt.name)
+			}
+		} else {
+			if err != nil {
+				t.Errorf("Test %s: unexpected error: %v", tt.name, err)
+			}
+
+			require.Equal(t, tt.expected, result)
+		}
+	}
+}
+
+func FuzzGenerateCachingSchedule(f *testing.F) {
+	var tests = []struct {
+		numAdds  uint32
+		duration uint32
+		seed     int64
+	}{
+		{2, 0x07, 0x07},
+	}
+	for _, test := range tests {
+		f.Add(test.numAdds, test.duration, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
+		// simulate blocks with simchain
+		sc := newSimChainWithSeed(duration, seed)
+
+		//blockNum := 1000
+		blockNum := 10
+		dels := make([][]Hash, 0, blockNum)
+		adds := make([][]Leaf, 0, blockNum)
+		durations := make([][]int32, 0, blockNum)
+
+		cs := NewCachingScheduleTracker(blockNum)
+
+		p := NewAccumulator()
+		for b := 1; b <= blockNum; b++ {
+			add, duration, delHashes := sc.NextBlock(numAdds)
+
+			adds = append(adds, add)
+			durations = append(durations, duration)
+			dels = append(dels, delHashes)
+
+			proof, err := p.Prove(delHashes)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			fmt.Printf("%v deleted %v\n%v\n", b, proof.Targets, printHashes(delHashes))
+			err = p.Modify(add, delHashes, proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			fmt.Println(p.String())
+
+			cs.AddBlockSummary(proof.Targets, uint16(len(add)))
+		}
+
+		maxMem := 3
+		cachingSchedule, err := cs.GenerateCachingSchedule(maxMem)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		fmt.Println("cachingSchedule", cachingSchedule)
+
+		err = verifyCachingIsOptimal(maxMem, durations, cachingSchedule, dels, adds)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// If index i is not cached, nothing coming after it should be cached.
+func checkNextIndexesAreUncached(cacheSchedule []uint64, adds []Leaf) error {
+	if len(cacheSchedule) > len(adds) {
+		return fmt.Errorf("have more cacheSchedules with %v, than adds with a count of %v",
+			len(cacheSchedule), len(adds))
+	}
+
+	for i, pos := range cacheSchedule {
+		if i+1 < len(cacheSchedule) {
+			if pos > cacheSchedule[i+1] {
+				return fmt.Errorf("cache schedule not in order")
+			}
+
+			if pos == cacheSchedule[i+1] {
+				return fmt.Errorf("cache schedule hash duplicates")
+			}
+		}
+	}
+
+	return nil
+}
+
+func verifyCachingIsOptimal(maxMem int, durations [][]int32, cacheSchedules [][]uint64, dels [][]Hash, adds [][]Leaf) error {
+	uncached := make(map[Hash][2]int32)
+	currentCached := make(map[Hash]int32)
+
+	for i, cacheSchedule := range cacheSchedules {
+		fmt.Println(cacheSchedule)
+		// Remove from maps.
+		for _, del := range dels[i] {
+			//fmt.Println("remove", i, del)
+			delete(currentCached, del)
+			delete(uncached, del)
+		}
+
+		err := checkNextIndexesAreUncached(cacheSchedule, adds[i])
+		if err != nil {
+			return err
+		}
+
+		cacheIdx := 0
+		for j, add := range adds[i] {
+			// Calculate spent height.
+			duration := durations[i][j]
+			spentHeight := duration
+			if duration != 0 {
+				spentHeight = duration + int32(i)
+			}
+
+			// Check if the added leaf is supposed to be cached.
+			isCached := false
+			if cacheIdx < len(cacheSchedule) && j == int(cacheSchedule[cacheIdx]) {
+				isCached = true
+				//fmt.Println("cache", add, cacheSchedule[cacheIdx])
+				cacheIdx++
+			} else {
+				//fmt.Println("not cache")
+			}
+
+			if isCached {
+				currentCached[add.Hash] = spentHeight
+				if duration == 0 {
+					return fmt.Errorf("have cached %v but it is not spent", add.Hash)
+				}
+
+				// Make sure all the uncached leaves are not spent before this leaf.
+				for uncachedHash, uncachedSpentHeight := range uncached {
+					if uncachedSpentHeight[0] == 0 {
+						continue
+					}
+
+					if spentHeight > uncachedSpentHeight[1] {
+						fmt.Printf("uncached dur %v, mydur %v\n", uncachedSpentHeight[0]-int32(i), duration)
+						return fmt.Errorf("cached %v spent at %v but earlier %v spent at %v",
+							add.Hash, spentHeight, uncachedHash, uncachedSpentHeight)
+					}
+				}
+			} else {
+				spentHeight := duration
+				if duration != 0 {
+					spentHeight = duration + int32(i)
+				}
+				uncached[add.Hash] = [2]int32{duration, spentHeight}
+			}
+		}
+
+		// Make sure we don't go over the maxmem limit.
+		if len(currentCached) > maxMem {
+			fmt.Println("cached\n", currentCached)
+			fmt.Println(i)
+			return fmt.Errorf("have %v cached but maxmem is %v", len(currentCached), maxMem)
+		}
+
+		// Because our cache is full, we don't penalize for omitting these from the cache
+		// instead of later leaves. If we're optimal here, that's the best we can do and
+		// we can't cache these in the future.
+		if len(currentCached) == maxMem {
+			uncached = make(map[Hash][2]int32)
+		}
+	}
+
+	return nil
+}
