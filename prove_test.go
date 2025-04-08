@@ -1563,3 +1563,276 @@ func FuzzGetPrevPos(f *testing.F) {
 		}
 	})
 }
+
+func TestGenTTLs(t *testing.T) {
+	tests := []struct {
+		blockDeletions [][]uint64
+		numAdds        []uint16
+		expected       [][]ttlInfo
+	}{
+		{
+			// creates(0, 1) | ttl(1, 2) | dels ()
+			// creates(2, 3) | ttl(2, 2) | dels (0)
+			// creates(4, 5) | ttl(x, x) | dels (1)
+			// creates(6, 7) | ttl(x, x) | dels (2, 3)
+			blockDeletions: [][]uint64{
+				{},
+				{0},
+				{4},
+				{8, 9},
+			},
+			numAdds: []uint16{2, 2, 2, 2},
+			expected: [][]ttlInfo{
+				{{pos: 0, ttl: 1}, {pos: 1, ttl: 2}},
+				{{pos: 2, ttl: 2}, {pos: 3, ttl: 2}},
+				nil,
+				nil,
+			},
+		},
+		{
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{},
+				{},
+			},
+			numAdds: []uint16{0, 0, 0, 0},
+			expected: [][]ttlInfo{
+				nil,
+				nil,
+				nil,
+				nil,
+			},
+		},
+		{
+			// creates(0, 1, 2, 3, 4, 5, 6, 7) | dels ()
+			// creates(8, 9, 10, 11, 12)       | dels ()
+			// creates(13, 14, 15)             | dels ()
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{},
+				{},
+			},
+			numAdds: []uint16{8, 5, 3, 0},
+			expected: [][]ttlInfo{
+				nil,
+				nil,
+				nil,
+				nil,
+			},
+		},
+		{
+			// creates(0, 1) | ttl(1, 2) | dels ()
+			// creates(2, 3) | ttl(1, 2) | dels (0)
+			// creates(4, 5) | ttl(1, 1) | dels (1, 2)
+			// creates(6, 7) | ttl(x, x) | dels (3, 4, 5)
+			blockDeletions: [][]uint64{
+				{},
+				{0},
+				{4, 2},
+				{12, 4, 5},
+			},
+			numAdds: []uint16{2, 2, 2, 2},
+			expected: [][]ttlInfo{
+				{{pos: 0, ttl: 1}, {pos: 1, ttl: 2}},
+				{{pos: 2, ttl: 1}, {pos: 3, ttl: 2}},
+				{{pos: 4, ttl: 1}, {pos: 5, ttl: 1}},
+				nil,
+			},
+		},
+		{
+			// creates(0, 1, 2, 3, 4, 5, 6) | ttl(3, 3, x, x, x, x, x) | dels ()
+			// creates()                    | ttl()                    | dels ()
+			// creates()                    | ttl()                    | dels ()
+			// creates()                    | ttl()                    | dels (0, 1)
+			blockDeletions: [][]uint64{
+				nil,
+				nil,
+				nil,
+				{0, 1},
+			},
+			numAdds: []uint16{7, 0, 0, 0},
+			expected: [][]ttlInfo{
+				{{pos: 0, ttl: 3}, {pos: 1, ttl: 3}},
+				nil,
+				nil,
+				nil,
+			},
+		},
+		{
+			// creates(0, 1, 2, 3, 4, 5) | ttl(5, x, x, x, x, x) | dels ()
+			// creates()                 | ttl()                 | dels ()
+			// creates()                 | ttl()                 | dels ()
+			// creates(6)                | ttl(1)                | dels ()
+			// creates(7)                | ttl(1)                | dels (6)
+			// creates()                 | ttl()                 | dels (0, 7)
+			blockDeletions: [][]uint64{
+				nil,
+				nil,
+				nil,
+				nil,
+				{6},
+				{0, 11},
+			},
+			numAdds: []uint16{6, 0, 0, 1, 1, 0},
+			expected: [][]ttlInfo{
+				{{pos: 0, ttl: 5}},
+				nil,
+				nil,
+				{{pos: 6, ttl: 1}},
+				{{pos: 7, ttl: 1}},
+				nil,
+			},
+		},
+		{
+			// creates(0, 1, 2, 3, 4, 5) | ttl(5, x, x, x, x, 5) | dels ()
+			// creates()                 | ttl()                 | dels ()
+			// creates()                 | ttl()                 | dels ()
+			// creates(6)                | ttl(1)                | dels ()
+			// creates(7)                | ttl(1)                | dels (6)
+			// creates()                 | ttl()                 | dels (0, 5, 7)
+			blockDeletions: [][]uint64{
+				nil,
+				nil,
+				nil,
+				nil,
+				{6},
+				{0, 5, 11},
+			},
+			numAdds: []uint16{6, 0, 0, 1, 1, 0},
+			expected: [][]ttlInfo{
+				{{pos: 0, ttl: 5}, {pos: 5, ttl: 5}},
+				nil,
+				nil,
+				{{pos: 6, ttl: 1}},
+				{{pos: 7, ttl: 1}},
+				nil,
+			},
+		},
+		{
+			// creates(0, 1, 2, 3, 4, 5) | ttl(5, x, x, x, x, 5) | dels ()
+			// creates()                 | ttl()                 | dels ()
+			// creates(6)                | ttl(2)                | dels ()
+			// creates()                 | ttl()                 | dels ()
+			// creates(7)                | ttl(1)                | dels (6)
+			// creates()                 | ttl()                 | dels (0, 5, 7)
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{},
+				{},
+				{6},
+				{0, 5, 11},
+			},
+			numAdds: []uint16{6, 0, 1, 0, 1, 0},
+			expected: [][]ttlInfo{
+				{{pos: 0, ttl: 5}, {pos: 5, ttl: 5}},
+				nil,
+				{{pos: 6, ttl: 2}},
+				nil,
+				{{pos: 7, ttl: 1}},
+				nil,
+			},
+		},
+		{
+			// creates(0, 1, 2, 3, 4, 5, 6, 7) | ttl(5, x, x, x, 3, 5, 4, 5) | dels ()
+			// creates()                       | ttl()                       | dels ()
+			// creates()                       | ttl()                       | dels ()
+			// creates()                       | ttl()                       | dels (4)
+			// creates()                       | ttl()                       | dels (6)
+			// creates()                       | ttl()                       | dels (0, 5, 7)
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{},
+				{4},
+				{6},
+				{0, 10, 11},
+			},
+			numAdds: []uint16{8, 0, 0, 0, 0, 0},
+			expected: [][]ttlInfo{
+				{{pos: 0, ttl: 5}, {pos: 4, ttl: 3}, {pos: 5, ttl: 5}, {pos: 6, ttl: 4}, {pos: 7, ttl: 5}},
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		cs := NewCachingScheduleTracker(0)
+		for i, numAdd := range tt.numAdds {
+			cs.AddBlockSummary(tt.blockDeletions[i], numAdd)
+		}
+
+		cs.genTTLs()
+		require.Equal(t, tt.expected, cs.ttls)
+	}
+}
+
+func FuzzGenTTLs(f *testing.F) {
+	var tests = []struct {
+		numAdds  uint32
+		duration uint32
+		seed     int64
+	}{
+		{3, 0x07, 0x07},
+	}
+	for _, test := range tests {
+		f.Add(test.numAdds, test.duration, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
+		// simulate blocks with simchain
+		sc := newSimChainWithSeed(duration, seed)
+
+		blockNum := 10
+		dels := make([][]Hash, 0, blockNum)
+		adds := make([][]Leaf, 0, blockNum)
+		durations := make([][]int32, 0, blockNum)
+		expectedTTLs := make([][]ttlInfo, blockNum)
+
+		cs := NewCachingScheduleTracker(blockNum)
+
+		p := NewAccumulator()
+		for b := 1; b <= blockNum; b++ {
+			add, duration, delHashes := sc.NextBlock(numAdds)
+
+			for i, ttl := range duration {
+				if ttl+int32(b) > int32(blockNum) || ttl == 0 {
+					continue
+				}
+
+				expectedTTLs[b-1] = append(expectedTTLs[b-1],
+					ttlInfo{
+						pos: uint64(i) + p.NumLeaves,
+						ttl: int(ttl),
+					})
+			}
+
+			adds = append(adds, add)
+			durations = append(durations, duration)
+			dels = append(dels, delHashes)
+
+			proof, err := p.Prove(delHashes)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = p.Modify(add, delHashes, proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cs.AddBlockSummary(proof.Targets, uint16(len(add)))
+		}
+
+		cs.genTTLs()
+		require.Equal(t, expectedTTLs, cs.ttls)
+	})
+}

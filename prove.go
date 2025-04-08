@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 
 	"golang.org/x/exp/slices"
 )
@@ -1501,10 +1502,17 @@ type rootInfo struct {
 // CSTTotalRows is the total rows that will be used for the CachingScheduleTracker.
 const CSTTotalRows = 63
 
+// ttlInfo is the position attached with its ttl value.
+type ttlInfo struct {
+	pos uint64
+	ttl int
+}
+
 // CachingScheduleTracker keeps track of all the information needed to generate a clairvoyant caching
 // schedule for downloading utreexo proofs.
 type CachingScheduleTracker struct {
 	deletions [][]uint64
+	ttls      [][]ttlInfo
 	numAdds   []uint16
 	numLeaves []uint64
 	toDestroy [][]uint64
@@ -1740,4 +1748,110 @@ func getPrevPos(totalRows uint8, cached, deleted, toDestroy []uint64, numAdds ui
 	cached, created = undoAdd(totalRows, cached, toDestroy, numAdds, numLeaves)
 	cached = undoDel(totalRows, cached, deleted, numLeaves-uint64(numAdds))
 	return cached, created
+}
+
+// genTTLs creates the ttl values for the deletions. Only the numAdds that we know is spent
+// will have ttls.
+func (cs *CachingScheduleTracker) genTTLs() {
+	// Init ttls.
+	cs.ttls = make([][]ttlInfo, len(cs.numAdds))
+
+	// cached contains the deletions that we'll be reverting each block until
+	// we get to the position that it started off as. xy cointains the corresponding
+	// xy values for each of the position in the cached slice.
+	cached := make([]uint64, 0, len(cs.deletions))
+	xy := make([][2]int, 0, len(cs.deletions))
+
+	for i := len(cs.deletions) - 1; i >= 0; i-- {
+		deletions := cs.deletions[i]
+		numAdds := cs.numAdds[i]
+		numLeaves := cs.numLeaves[i]
+		toDestroy := cs.toDestroy[i]
+
+		// Revert the cached positions by a block.
+		var createdIdxs []int
+		cached, createdIdxs = getPrevPos(
+			CSTTotalRows, cached, deletions, toDestroy, numAdds, numLeaves)
+
+		// Set ttls. We go backwards since the undo undoes the bigger positions first.
+		for j := len(createdIdxs) - 1; j >= 0; j-- {
+			idx := createdIdxs[j]
+
+			cords := xy[idx]
+
+			deletedAt := cords[0]
+			createdAt := i
+			ttl := deletedAt - createdAt
+
+			cs.ttls[i] = append(cs.ttls[i], ttlInfo{
+				pos: cached[idx],
+				ttl: ttl,
+			})
+		}
+
+		// Remove the created positions from the cache.
+		slices.Sort(createdIdxs)
+		for i, idx := range createdIdxs {
+			useIdx := idx - i
+			cached = slices.Delete(cached, useIdx, useIdx+1)
+			xy = slices.Delete(xy, useIdx, useIdx+1)
+		}
+
+		// Append new deletions.
+		cached = append(cached, deletions...)
+		for j := range deletions {
+			xy = append(xy, [2]int{i, j})
+		}
+	}
+}
+
+// String returns the CachingScheduleTracker as a formatting string.
+func (c *CachingScheduleTracker) String() string {
+	var sb strings.Builder
+
+	sb.WriteString("CachingScheduleTracker:\n")
+
+	// Write deletions
+	sb.WriteString("  deletions:\n")
+	for i, del := range c.deletions {
+		sb.WriteString(fmt.Sprintf("    [%d]: %v (translated %v)\n",
+			i, del, translatePositions(del, CSTTotalRows, TreeRows(c.numLeaves[i]))))
+	}
+
+	// Write ttls
+	sb.WriteString("  ttls:\n")
+	for i, ttl := range c.ttls {
+		sb.WriteString(fmt.Sprintf("    [%d]: %v\n",
+			i, ttl))
+	}
+
+	// Write numAdds
+	sb.WriteString(fmt.Sprintf("  numAdds: %v\n", c.numAdds))
+
+	// Write numLeaves
+	sb.WriteString(fmt.Sprintf("  numLeaves: %v\n", c.numLeaves))
+
+	// Write toDestroy
+	sb.WriteString("  toDestroy:\n")
+	for i, td := range c.toDestroy {
+		sb.WriteString(fmt.Sprintf("    [%d]: %v (translated %v)\n",
+			i, td, translatePositions(td, CSTTotalRows, TreeRows(c.numLeaves[i]))))
+	}
+
+	// Write roots
+	sb.WriteString("  roots:\n")
+	for i, rootList := range c.roots {
+		sb.WriteString(fmt.Sprintf("    [%d]: [", i))
+		for j, root := range rootList {
+			if j > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(fmt.Sprintf("{pos: %d (translated %d), isZombie: %t}",
+				root.pos, translatePos(root.pos, CSTTotalRows, TreeRows(c.numLeaves[i])),
+				root.isZombie))
+		}
+		sb.WriteString("]\n")
+	}
+
+	return sb.String()
 }
