@@ -1855,3 +1855,65 @@ func (c *CachingScheduleTracker) String() string {
 
 	return sb.String()
 }
+
+// GenerateCachingSchedule returns the positions that the client should cache to have an optimal
+// caching for the passed in maxMemory.
+//
+// NOTE: maxMemory represents how many targets that the user would like to cache.
+func (cs *CachingScheduleTracker) GenerateCachingSchedule(maxMemory int) [][]uint64 {
+	// Generate the ttls first.
+	cs.genTTLs()
+
+	cachingSch := make([][]uint64, len(cs.numAdds))
+
+	cache := make([]ttlInfo, 0, maxMemory)
+	createHeights := make(map[uint64]int, maxMemory)
+	for i, ttls := range cs.ttls {
+
+		// Check the cache for spent positions.
+		for j := 0; j < len(cache); j++ {
+			// TTL value decremented by one.
+			cache[j].ttl -= 1
+
+			// If the position is spent here, then we add it to the
+			// caching schedule.
+			if cache[j].ttl == 0 {
+				height := createHeights[cache[j].pos]
+				delete(createHeights, cache[j].pos)
+				cachingSch[height] = append(cachingSch[height], cache[j].pos)
+				slices.Sort(cachingSch[height])
+
+				cache = slices.Delete(cache, j, j+1)
+				j--
+			}
+		}
+
+		// Operate on the ttls in this block.
+		for _, ttl := range ttls {
+			// Easy path if the cache is free.
+			if len(cache) < maxMemory {
+				cache = append(cache, ttl)
+				createHeights[ttl.pos] = i
+				continue
+			}
+
+			// If the cache is full, check if we can replace a value with
+			// a greater ttl.
+			for k := range cache {
+				if cache[k].ttl > ttl.ttl {
+					// Remove.
+					delete(createHeights, cache[k].pos)
+					cache = slices.Delete(cache, k, k+1)
+
+					// Replace.
+					cache = append(cache, ttl)
+					createHeights[ttl.pos] = i
+
+					break
+				}
+			}
+		}
+	}
+
+	return cachingSch
+}
