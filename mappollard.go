@@ -1164,6 +1164,11 @@ func (m *MapPollard) Ingest(delHashes []Hash, proof Proof) error {
 //
 // This function is different from Ingest() in that it's not safe for concurrent access.
 func (m *MapPollard) ingest(delHashes []Hash, proof Proof) error {
+	// Nothing to ingest if we already have everything.
+	if m.Full {
+		return nil
+	}
+
 	hnp := toHashAndPos(proof.Targets, delHashes)
 	if m.TotalRows != TreeRows(m.NumLeaves) {
 		hnp.positions = translatePositions(hnp.positions, TreeRows(m.NumLeaves), m.TotalRows)
@@ -1197,9 +1202,6 @@ func (m *MapPollard) ingest(delHashes []Hash, proof Proof) error {
 	// Ingest the targets and the intermediate positions and their hashes.
 	for i, pos := range intermediate.positions {
 		remember := false
-		if m.Full {
-			remember = true
-		}
 		for i := range hnp.positions {
 			if hnp.positions[i] == pos {
 				remember = true
