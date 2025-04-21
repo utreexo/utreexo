@@ -160,6 +160,9 @@ type MapPollard struct {
 	// accumulator.
 	NumLeaves uint64
 
+	// CurrentModifies counts how many modifies the pollard has had.
+	CurrentModifies uint32
+
 	// TotalRows is the number of rows the accumulator has allocated for.
 	TotalRows uint8
 
@@ -197,6 +200,8 @@ func (m *MapPollard) Modify(adds []Leaf, delHashes []Hash, proof Proof) error {
 	if err != nil {
 		return err
 	}
+
+	m.CurrentModifies++
 
 	return nil
 }
@@ -924,6 +929,8 @@ func (m *MapPollard) Undo(numAdds uint64, proof Proof, hashes, origPrevRoots []H
 		}
 		m.Nodes.Put(rootPos[i], Leaf{Hash: origPrevRoots[i], Remember: remember})
 	}
+
+	m.CurrentModifies--
 
 	return nil
 }
