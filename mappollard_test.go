@@ -58,8 +58,8 @@ func (m *MapPollard) sanityCheck() error {
 // checkCachedNodesAreRemembered checks that cached leaves are present in m.Nodes and that they're
 // marked to be remembered.
 func (m *MapPollard) checkCachedNodesAreRemembered() error {
-	return m.CachedLeaves.ForEach(func(k Hash, v uint64) error {
-		leaf, found := m.Nodes.Get(v)
+	return m.CachedLeaves.ForEach(func(k Hash, v LeafInfo) error {
+		leaf, found := m.Nodes.Get(v.Position)
 		if !found {
 			return fmt.Errorf("Cached node of %s at pos %d not cached in m.Nodes", k, v)
 		}
@@ -75,10 +75,10 @@ func (m *MapPollard) checkCachedNodesAreRemembered() error {
 // checkPruned checks that unneeded nodes aren't cached.
 func (m *MapPollard) checkPruned() error {
 	neededPos := make(map[uint64]struct{})
-	m.CachedLeaves.ForEach(func(_ Hash, v uint64) error {
-		neededPos[v] = struct{}{}
+	m.CachedLeaves.ForEach(func(_ Hash, v LeafInfo) error {
+		neededPos[v.Position] = struct{}{}
 
-		needs, computables := ProofPositions([]uint64{v}, m.NumLeaves, m.TotalRows)
+		needs, computables := ProofPositions([]uint64{v.Position}, m.NumLeaves, m.TotalRows)
 		for _, need := range needs {
 			neededPos[need] = struct{}{}
 		}
@@ -109,8 +109,8 @@ func (m *MapPollard) checkPruned() error {
 // of nodes.
 func (m *MapPollard) checkProofNodes() error {
 	// Sanity check.
-	return m.CachedLeaves.ForEach(func(k Hash, v uint64) error {
-		leaf, found := m.Nodes.Get(v)
+	return m.CachedLeaves.ForEach(func(k Hash, v LeafInfo) error {
+		leaf, found := m.Nodes.Get(v.Position)
 		if !found {
 			return fmt.Errorf("Corrupted pollard. Missing cached leaf %s at %d", k, v)
 		}
@@ -120,7 +120,7 @@ func (m *MapPollard) checkProofNodes() error {
 				v, k, leaf.Hash)
 		}
 
-		proofPos := proofPosition(v, m.NumLeaves, m.TotalRows)
+		proofPos := proofPosition(v.Position, m.NumLeaves, m.TotalRows)
 		for _, pos := range proofPos {
 			_, found := m.Nodes.Get(pos)
 			if !found {
@@ -141,7 +141,7 @@ func (m *MapPollard) checkHashes() error {
 	}
 
 	leafHashes := make([]Hash, 0, m.CachedLeaves.Length())
-	m.CachedLeaves.ForEach(func(k Hash, _ uint64) error {
+	m.CachedLeaves.ForEach(func(k Hash, _ LeafInfo) error {
 		leafHashes = append(leafHashes, k)
 		return nil
 	})
@@ -306,7 +306,7 @@ func FuzzMapPollardChain(f *testing.F) {
 
 			cachedHashes := make([]Hash, 0, m.CachedLeaves.Length())
 			leafHashes := make([]Hash, 0, m.CachedLeaves.Length())
-			m.CachedLeaves.ForEach(func(k Hash, _ uint64) error {
+			m.CachedLeaves.ForEach(func(k Hash, _ LeafInfo) error {
 				cachedHashes = append(cachedHashes, k)
 				leafHashes = append(leafHashes, k)
 				return nil
@@ -483,17 +483,17 @@ func FuzzMapPollardPrune(f *testing.F) {
 
 		toPrune := make([]Hash, 0, count)
 		notPruned := make([]Hash, 0, acc.CachedLeaves.Length()-count)
-		acc.CachedLeaves.ForEach(func(k Hash, v uint64) error {
+		acc.CachedLeaves.ForEach(func(k Hash, v LeafInfo) error {
 			if len(toPrune) >= count {
-				targets = append(targets, v)
+				targets = append(targets, v.Position)
 				notPruned = append(notPruned, k)
 				return nil
 			}
 			if rand.Int()%2 == 0 {
 				toPrune = append(toPrune, k)
-				prunedPositions = append(prunedPositions, v)
+				prunedPositions = append(prunedPositions, v.Position)
 			} else {
-				targets = append(targets, v)
+				targets = append(targets, v.Position)
 				notPruned = append(notPruned, k)
 			}
 
