@@ -242,6 +242,48 @@ func (m *MapPollard) Modify(adds []Leaf, delHashes []Hash, proof Proof) error {
 	return nil
 }
 
+// Modify takes in the additions and deletions and updates the accumulator accordingly.
+// It returns the created heights and the indexes of the deleted leaves. The height and the index
+// returns as math.MaxUint32 if the leaves were added with ingest or if they were a result of
+// and Undo with the ttls being provided.
+func (m *MapPollard) ModifyAndReturnTTLs(adds []Leaf, delHashes []Hash, proof Proof) (
+	[]uint32, []uint32, error) {
+
+	m.rwLock.Lock()
+	defer m.rwLock.Unlock()
+
+	// Check first that we have all the necessary nodes for deletion.
+	if !m.cached(delHashes) {
+		return nil, nil, fmt.Errorf("Cannot delete:\n%s\nas not all of them are cached",
+			printHashes(delHashes))
+	}
+
+	createHeights := make([]uint32, 0, len(delHashes))
+	createIndexes := make([]uint32, 0, len(delHashes))
+	for _, delHash := range delHashes {
+		leafInfo, _ := m.CachedLeaves.Get(delHash)
+		createHeights = append(createHeights, leafInfo.AddHeight)
+		createIndexes = append(createIndexes, leafInfo.AddIndex)
+	}
+
+	err := m.remove(proof)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Remove dels from the cached leaves.
+	m.uncacheLeaves(delHashes)
+
+	err = m.add(adds)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	m.CurrentModifies++
+
+	return createHeights, createIndexes, nil
+}
+
 // String prints out the whole thing. Only viable for forest that have height of 5 and less.
 func (m *MapPollard) String() string {
 	return String(m)
@@ -927,6 +969,39 @@ func (m *MapPollard) undoAdd(numAdds uint64, origTargets []uint64, origPrevRoots
 	}
 
 	return err
+}
+
+// Undo will undo the last modify. The numAdds, proof, hashes, MUST be the data from the previous modify.
+// The origPrevRoots MUST be the roots that this Undo will go back to.
+func (m *MapPollard) UndoWithTTLs(numAdds uint64, createHeight, createIndex []uint32,
+	proof Proof, hashes, origPrevRoots []Hash) error {
+
+	m.rwLock.Lock()
+	defer m.rwLock.Unlock()
+
+	err := m.undoAdd(numAdds, proof.Targets, origPrevRoots)
+	if err != nil {
+		return fmt.Errorf("Undo errored while undoing added leaves. %v", err)
+	}
+
+	err = m.undoDeletion(createHeight, createIndex, proof, hashes)
+	if err != nil {
+		return fmt.Errorf("Undo errored while undoing deleted leaves. %v", err)
+	}
+
+	_, rootPos := m.getRoots()
+	for i := range rootPos {
+		var remember bool
+		_, found := m.CachedLeaves.Get(origPrevRoots[i])
+		if found || m.Full {
+			remember = true
+		}
+		m.Nodes.Put(rootPos[i], Leaf{Hash: origPrevRoots[i], Remember: remember})
+	}
+
+	m.CurrentModifies--
+
+	return nil
 }
 
 // Undo will undo the last modify. The numAdds, proof, hashes, MUST be the data from the previous modify.
