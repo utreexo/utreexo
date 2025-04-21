@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"golang.org/x/exp/slices"
 )
 
@@ -945,4 +946,82 @@ func TestGetLeafHashPositions(t *testing.T) {
 		t.Fatalf("for hash %v, expected %v but got %v",
 			leaves[0].Hash, expected, got)
 	}
+}
+
+func FuzzMapPollardTTLs(f *testing.F) {
+	var tests = []struct {
+		numAdds  uint32
+		duration uint32
+		seed     int64
+	}{
+		{3, 0x07, 0x07},
+	}
+	for _, test := range tests {
+		f.Add(test.numAdds, test.duration, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
+		// simulate blocks with simchain
+		sc := newSimChainWithSeed(duration, seed)
+
+		m := NewMapPollard(true)
+
+		leafMap := make(map[Hash][2]uint32, 50*numAdds)
+
+		var totalAdds, totalDels int
+		for b := 1; b <= 50; b++ {
+			adds, _, delHashes := sc.NextBlock(numAdds)
+			totalAdds += len(adds)
+			totalDels += len(delHashes)
+
+			for i, add := range adds {
+				leafMap[add.Hash] = [2]uint32{uint32(b), uint32(i)}
+			}
+
+			proof, err := m.Prove(delHashes)
+			if err != nil {
+				t.Fatalf("FuzzTTLs fail at block %d. Couldn't prove\n%s\nError: %v",
+					b, printHashes(delHashes), err)
+			}
+
+			origRoots := m.GetRoots()
+
+			createHeight, createIndex, err := m.ModifyAndReturnTTLs(adds, delHashes, proof)
+			if err != nil {
+				t.Fatalf("FuzzTTLs fail at block %d. Error: %v", b, err)
+			}
+
+			for i, delHash := range delHashes {
+				ttlInfo, found := leafMap[delHash]
+				if !found {
+					t.Fatalf("FuzzTTLs fail at block %d. Expected to find delhash %v but didn't",
+						b, delHash)
+				}
+
+				if createHeight[i]+1 != ttlInfo[0] {
+					t.Fatalf("FuzzTTLs fail at block %d. For %v, expected create height %v got %v",
+						b, delHash, ttlInfo[0], createHeight[i])
+				}
+				if createIndex[i] != ttlInfo[1] {
+					t.Fatalf("FuzzTTLs fail at block %d. For %v, expected create index %v got %v",
+						b, delHash, ttlInfo[1], createIndex[i])
+				}
+			}
+
+			err = m.UndoWithTTLs(uint64(len(adds)), createHeight, createIndex, proof, delHashes, origRoots)
+			if err != nil {
+				t.Fatalf("FuzzTTLs fail at block %d. Error: %v", b, err)
+			}
+
+			gotHeights, gotIndex, err := m.ModifyAndReturnTTLs(adds, delHashes, proof)
+			if err != nil {
+				t.Fatalf("FuzzTTLs fail at block %d. Error: %v", b, err)
+			}
+
+			require.Equal(t, createHeight, gotHeights)
+			require.Equal(t, createIndex, gotIndex)
+		}
+	})
 }
