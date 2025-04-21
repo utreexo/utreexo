@@ -191,10 +191,19 @@ func (m *MapPollard) Modify(adds []Leaf, delHashes []Hash, proof Proof) error {
 	m.rwLock.Lock()
 	defer m.rwLock.Unlock()
 
-	err := m.remove(proof, delHashes)
+	// Check first that we have all the necessary nodes for deletion.
+	if !m.cached(delHashes) {
+		return fmt.Errorf("Cannot delete:\n%s\nas not all of them are cached",
+			printHashes(delHashes))
+	}
+
+	err := m.remove(proof)
 	if err != nil {
 		return err
 	}
+
+	// Remove dels from the cached leaves.
+	m.uncacheLeaves(delHashes)
 
 	err = m.add(adds)
 	if err != nil {
@@ -620,16 +629,7 @@ func (m *MapPollard) removeSingle(del uint64) error {
 // and hashes do not have to be in the same order.
 //
 // NOTE: dels MUST be sorted.
-func (m *MapPollard) remove(proof Proof, delHashes []Hash) error {
-	// Check first that we have all the necessary nodes for deletion.
-	if !m.cached(delHashes) {
-		return fmt.Errorf("Cannot delete:\n%s\nas not all of them are cached",
-			printHashes(delHashes))
-	}
-
-	// Remove dels from the cached leaves.
-	m.uncacheLeaves(delHashes)
-
+func (m *MapPollard) remove(proof Proof) error {
 	detwinedDels := copySortedFunc(proof.Targets, uint64Cmp)
 	if m.TotalRows != TreeRows(m.NumLeaves) {
 		detwinedDels = translatePositions(detwinedDels, TreeRows(m.NumLeaves), m.TotalRows)
