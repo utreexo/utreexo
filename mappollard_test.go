@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"golang.org/x/exp/slices"
 )
 
@@ -58,8 +59,8 @@ func (m *MapPollard) sanityCheck() error {
 // checkCachedNodesAreRemembered checks that cached leaves are present in m.Nodes and that they're
 // marked to be remembered.
 func (m *MapPollard) checkCachedNodesAreRemembered() error {
-	return m.CachedLeaves.ForEach(func(k Hash, v uint64) error {
-		leaf, found := m.Nodes.Get(v)
+	return m.CachedLeaves.ForEach(func(k Hash, v LeafInfo) error {
+		leaf, found := m.Nodes.Get(v.Position)
 		if !found {
 			return fmt.Errorf("Cached node of %s at pos %d not cached in m.Nodes", k, v)
 		}
@@ -75,10 +76,10 @@ func (m *MapPollard) checkCachedNodesAreRemembered() error {
 // checkPruned checks that unneeded nodes aren't cached.
 func (m *MapPollard) checkPruned() error {
 	neededPos := make(map[uint64]struct{})
-	m.CachedLeaves.ForEach(func(_ Hash, v uint64) error {
-		neededPos[v] = struct{}{}
+	m.CachedLeaves.ForEach(func(_ Hash, v LeafInfo) error {
+		neededPos[v.Position] = struct{}{}
 
-		needs, computables := ProofPositions([]uint64{v}, m.NumLeaves, m.TotalRows)
+		needs, computables := ProofPositions([]uint64{v.Position}, m.NumLeaves, m.TotalRows)
 		for _, need := range needs {
 			neededPos[need] = struct{}{}
 		}
@@ -109,8 +110,8 @@ func (m *MapPollard) checkPruned() error {
 // of nodes.
 func (m *MapPollard) checkProofNodes() error {
 	// Sanity check.
-	return m.CachedLeaves.ForEach(func(k Hash, v uint64) error {
-		leaf, found := m.Nodes.Get(v)
+	return m.CachedLeaves.ForEach(func(k Hash, v LeafInfo) error {
+		leaf, found := m.Nodes.Get(v.Position)
 		if !found {
 			return fmt.Errorf("Corrupted pollard. Missing cached leaf %s at %d", k, v)
 		}
@@ -120,7 +121,7 @@ func (m *MapPollard) checkProofNodes() error {
 				v, k, leaf.Hash)
 		}
 
-		proofPos := proofPosition(v, m.NumLeaves, m.TotalRows)
+		proofPos := proofPosition(v.Position, m.NumLeaves, m.TotalRows)
 		for _, pos := range proofPos {
 			_, found := m.Nodes.Get(pos)
 			if !found {
@@ -141,7 +142,7 @@ func (m *MapPollard) checkHashes() error {
 	}
 
 	leafHashes := make([]Hash, 0, m.CachedLeaves.Length())
-	m.CachedLeaves.ForEach(func(k Hash, _ uint64) error {
+	m.CachedLeaves.ForEach(func(k Hash, _ LeafInfo) error {
 		leafHashes = append(leafHashes, k)
 		return nil
 	})
@@ -306,7 +307,7 @@ func FuzzMapPollardChain(f *testing.F) {
 
 			cachedHashes := make([]Hash, 0, m.CachedLeaves.Length())
 			leafHashes := make([]Hash, 0, m.CachedLeaves.Length())
-			m.CachedLeaves.ForEach(func(k Hash, _ uint64) error {
+			m.CachedLeaves.ForEach(func(k Hash, _ LeafInfo) error {
 				cachedHashes = append(cachedHashes, k)
 				leafHashes = append(leafHashes, k)
 				return nil
@@ -483,17 +484,17 @@ func FuzzMapPollardPrune(f *testing.F) {
 
 		toPrune := make([]Hash, 0, count)
 		notPruned := make([]Hash, 0, acc.CachedLeaves.Length()-count)
-		acc.CachedLeaves.ForEach(func(k Hash, v uint64) error {
+		acc.CachedLeaves.ForEach(func(k Hash, v LeafInfo) error {
 			if len(toPrune) >= count {
-				targets = append(targets, v)
+				targets = append(targets, v.Position)
 				notPruned = append(notPruned, k)
 				return nil
 			}
 			if rand.Int()%2 == 0 {
 				toPrune = append(toPrune, k)
-				prunedPositions = append(prunedPositions, v)
+				prunedPositions = append(prunedPositions, v.Position)
 			} else {
-				targets = append(targets, v)
+				targets = append(targets, v.Position)
 				notPruned = append(notPruned, k)
 			}
 
@@ -945,4 +946,82 @@ func TestGetLeafHashPositions(t *testing.T) {
 		t.Fatalf("for hash %v, expected %v but got %v",
 			leaves[0].Hash, expected, got)
 	}
+}
+
+func FuzzMapPollardTTLs(f *testing.F) {
+	var tests = []struct {
+		numAdds  uint32
+		duration uint32
+		seed     int64
+	}{
+		{3, 0x07, 0x07},
+	}
+	for _, test := range tests {
+		f.Add(test.numAdds, test.duration, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
+		// simulate blocks with simchain
+		sc := newSimChainWithSeed(duration, seed)
+
+		m := NewMapPollard(true)
+
+		leafMap := make(map[Hash][2]uint32, 50*numAdds)
+
+		var totalAdds, totalDels int
+		for b := 1; b <= 50; b++ {
+			adds, _, delHashes := sc.NextBlock(numAdds)
+			totalAdds += len(adds)
+			totalDels += len(delHashes)
+
+			for i, add := range adds {
+				leafMap[add.Hash] = [2]uint32{uint32(b), uint32(i)}
+			}
+
+			proof, err := m.Prove(delHashes)
+			if err != nil {
+				t.Fatalf("FuzzTTLs fail at block %d. Couldn't prove\n%s\nError: %v",
+					b, printHashes(delHashes), err)
+			}
+
+			origRoots := m.GetRoots()
+
+			createHeight, createIndex, err := m.ModifyAndReturnTTLs(adds, delHashes, proof)
+			if err != nil {
+				t.Fatalf("FuzzTTLs fail at block %d. Error: %v", b, err)
+			}
+
+			for i, delHash := range delHashes {
+				ttlInfo, found := leafMap[delHash]
+				if !found {
+					t.Fatalf("FuzzTTLs fail at block %d. Expected to find delhash %v but didn't",
+						b, delHash)
+				}
+
+				if createHeight[i]+1 != ttlInfo[0] {
+					t.Fatalf("FuzzTTLs fail at block %d. For %v, expected create height %v got %v",
+						b, delHash, ttlInfo[0], createHeight[i])
+				}
+				if createIndex[i] != ttlInfo[1] {
+					t.Fatalf("FuzzTTLs fail at block %d. For %v, expected create index %v got %v",
+						b, delHash, ttlInfo[1], createIndex[i])
+				}
+			}
+
+			err = m.UndoWithTTLs(uint64(len(adds)), createHeight, createIndex, proof, delHashes, origRoots)
+			if err != nil {
+				t.Fatalf("FuzzTTLs fail at block %d. Error: %v", b, err)
+			}
+
+			gotHeights, gotIndex, err := m.ModifyAndReturnTTLs(adds, delHashes, proof)
+			if err != nil {
+				t.Fatalf("FuzzTTLs fail at block %d. Error: %v", b, err)
+			}
+
+			require.Equal(t, createHeight, gotHeights)
+			require.Equal(t, createIndex, gotIndex)
+		}
+	})
 }
