@@ -1000,7 +1000,7 @@ func FuzzMapPollardTTLs(f *testing.F) {
 						b, delHash)
 				}
 
-				if createHeight[i]+1 != ttlInfo[0] {
+				if createHeight[i] != ttlInfo[0] {
 					t.Fatalf("FuzzTTLs fail at block %d. For %v, expected create height %v got %v",
 						b, delHash, ttlInfo[0], createHeight[i])
 				}

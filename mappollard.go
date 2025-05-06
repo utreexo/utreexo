@@ -172,6 +172,10 @@ func newNodesMap() *NodesMap {
 
 // MapPollard is an implementation of the utreexo accumulators that supports pollard
 // functionality.
+//
+// NOTE: CurrentHeight must be set to 1 if the caller is initializing the MapPollard
+// themselves instead of using NewMapPollard as ModifyAndReturnTTLs and UndoWithTTLs
+// won't be correct.
 type MapPollard struct {
 	// rwLock protects the below maps from concurrent accesses.
 	rwLock *sync.RWMutex
@@ -187,8 +191,9 @@ type MapPollard struct {
 	// accumulator.
 	NumLeaves uint64
 
-	// CurrentModifies counts how many modifies the pollard has had.
-	CurrentModifies uint32
+	// CurrentHeight is the current height this pollard is at in terms of modifies.
+	// The count starts at 1.
+	CurrentHeight uint32
 
 	// TotalRows is the number of rows the accumulator has allocated for.
 	TotalRows uint8
@@ -205,11 +210,12 @@ type MapPollard struct {
 // pretty printing.
 func NewMapPollard(full bool) MapPollard {
 	return MapPollard{
-		rwLock:       new(sync.RWMutex),
-		CachedLeaves: newCachedLeavesMap(),
-		Nodes:        newNodesMap(),
-		TotalRows:    63,
-		Full:         full,
+		rwLock:        new(sync.RWMutex),
+		CachedLeaves:  newCachedLeavesMap(),
+		Nodes:         newNodesMap(),
+		TotalRows:     63,
+		CurrentHeight: 1,
+		Full:          full,
 	}
 }
 
@@ -237,7 +243,7 @@ func (m *MapPollard) Modify(adds []Leaf, delHashes []Hash, proof Proof) error {
 		return err
 	}
 
-	m.CurrentModifies++
+	m.CurrentHeight++
 
 	return nil
 }
@@ -279,7 +285,7 @@ func (m *MapPollard) ModifyAndReturnTTLs(adds []Leaf, delHashes []Hash, proof Pr
 		return nil, nil, err
 	}
 
-	m.CurrentModifies++
+	m.CurrentHeight++
 
 	return createHeights, createIndexes, nil
 }
@@ -409,7 +415,7 @@ func (m *MapPollard) addSingle(add Leaf, index int) error {
 
 	m.Nodes.Put(position, Leaf{Hash: add.Hash, Remember: add.Remember})
 	if add.Remember {
-		m.CachedLeaves.Add(add.Hash, position, m.CurrentModifies, uint32(index))
+		m.CachedLeaves.Add(add.Hash, position, m.CurrentHeight, uint32(index))
 	}
 
 	for h := uint8(0); (m.NumLeaves>>h)&1 == 1; h++ {
@@ -999,7 +1005,7 @@ func (m *MapPollard) UndoWithTTLs(numAdds uint64, createHeight, createIndex []ui
 		m.Nodes.Put(rootPos[i], Leaf{Hash: origPrevRoots[i], Remember: remember})
 	}
 
-	m.CurrentModifies--
+	m.CurrentHeight--
 
 	return nil
 }
@@ -1030,7 +1036,7 @@ func (m *MapPollard) Undo(numAdds uint64, proof Proof, hashes, origPrevRoots []H
 		m.Nodes.Put(rootPos[i], Leaf{Hash: origPrevRoots[i], Remember: remember})
 	}
 
-	m.CurrentModifies--
+	m.CurrentHeight--
 
 	return nil
 }
