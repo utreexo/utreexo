@@ -20,9 +20,6 @@ type LeafInfo struct {
 	// Position is the current position in the accumulator for this leaf.
 	Position uint64
 
-	// AddHeight is the height this leaf was added at.
-	AddHeight uint32
-
 	// AddIndex indicates which leaf it was at the height the leaf was added.
 	AddIndex uint32
 }
@@ -32,8 +29,8 @@ type CachedLeavesInterface interface {
 	// Get returns the LeafInfo and a boolean to indicate if it was found or not.
 	Get(Hash) (LeafInfo, bool)
 
-	// Add adds a hash with the given position, created height, and created index.
-	Add(Hash, uint64, uint32, uint32)
+	// Add adds a hash with the given position and the created index.
+	Add(Hash, uint64, uint32)
 
 	// Update updates the position of the given hash with the passed in position.
 	Update(Hash, uint64)
@@ -63,8 +60,8 @@ func (m *cachedLeavesMap) Get(k Hash) (LeafInfo, bool) {
 }
 
 // Add adds the given hash with the passed in information.
-func (m *cachedLeavesMap) Add(k Hash, v uint64, h, i uint32) {
-	m.m[k] = LeafInfo{v, h, i}
+func (m *cachedLeavesMap) Add(k Hash, v uint64, i uint32) {
+	m.m[k] = LeafInfo{v, i}
 }
 
 // Update updates the hash with the new position.
@@ -172,10 +169,6 @@ func newNodesMap() *NodesMap {
 
 // MapPollard is an implementation of the utreexo accumulators that supports pollard
 // functionality.
-//
-// NOTE: CurrentHeight must be set to 1 if the caller is initializing the MapPollard
-// themselves instead of using NewMapPollard as ModifyAndReturnTTLs and UndoWithTTLs
-// won't be correct.
 type MapPollard struct {
 	// rwLock protects the below maps from concurrent accesses.
 	rwLock *sync.RWMutex
@@ -190,10 +183,6 @@ type MapPollard struct {
 	// NumLeaves are the number of total additions that have happened in the
 	// accumulator.
 	NumLeaves uint64
-
-	// CurrentHeight is the current height this pollard is at in terms of modifies.
-	// The count starts at 1.
-	CurrentHeight uint32
 
 	// TotalRows is the number of rows the accumulator has allocated for.
 	TotalRows uint8
@@ -210,12 +199,11 @@ type MapPollard struct {
 // pretty printing.
 func NewMapPollard(full bool) MapPollard {
 	return MapPollard{
-		rwLock:        new(sync.RWMutex),
-		CachedLeaves:  newCachedLeavesMap(),
-		Nodes:         newNodesMap(),
-		TotalRows:     63,
-		CurrentHeight: 1,
-		Full:          full,
+		rwLock:       new(sync.RWMutex),
+		CachedLeaves: newCachedLeavesMap(),
+		Nodes:        newNodesMap(),
+		TotalRows:    63,
+		Full:         full,
 	}
 }
 
@@ -243,8 +231,6 @@ func (m *MapPollard) Modify(adds []Leaf, delHashes []Hash, proof Proof) error {
 		return err
 	}
 
-	m.CurrentHeight++
-
 	return nil
 }
 
@@ -253,28 +239,26 @@ func (m *MapPollard) Modify(adds []Leaf, delHashes []Hash, proof Proof) error {
 // returns as math.MaxUint32 if the leaves were added with ingest or if they were a result of
 // and Undo with the ttls being provided.
 func (m *MapPollard) ModifyAndReturnTTLs(adds []Leaf, delHashes []Hash, proof Proof) (
-	[]uint32, []uint32, error) {
+	[]uint32, error) {
 
 	m.rwLock.Lock()
 	defer m.rwLock.Unlock()
 
 	// Check first that we have all the necessary nodes for deletion.
 	if !m.cached(delHashes) {
-		return nil, nil, fmt.Errorf("Cannot delete:\n%s\nas not all of them are cached",
+		return nil, fmt.Errorf("Cannot delete:\n%s\nas not all of them are cached",
 			printHashes(delHashes))
 	}
 
-	createHeights := make([]uint32, 0, len(delHashes))
 	createIndexes := make([]uint32, 0, len(delHashes))
 	for _, delHash := range delHashes {
 		leafInfo, _ := m.CachedLeaves.Get(delHash)
-		createHeights = append(createHeights, leafInfo.AddHeight)
 		createIndexes = append(createIndexes, leafInfo.AddIndex)
 	}
 
 	err := m.remove(proof)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Remove dels from the cached leaves.
@@ -282,12 +266,10 @@ func (m *MapPollard) ModifyAndReturnTTLs(adds []Leaf, delHashes []Hash, proof Pr
 
 	err = m.add(adds)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	m.CurrentHeight++
-
-	return createHeights, createIndexes, nil
+	return createIndexes, nil
 }
 
 // String prints out the whole thing. Only viable for forest that have height of 5 and less.
@@ -415,7 +397,7 @@ func (m *MapPollard) addSingle(add Leaf, index int) error {
 
 	m.Nodes.Put(position, Leaf{Hash: add.Hash, Remember: add.Remember})
 	if add.Remember {
-		m.CachedLeaves.Add(add.Hash, position, m.CurrentHeight, uint32(index))
+		m.CachedLeaves.Add(add.Hash, position, uint32(index))
 	}
 
 	for h := uint8(0); (m.NumLeaves>>h)&1 == 1; h++ {
@@ -789,7 +771,7 @@ func (m *MapPollard) placeEmptyRoot(prevRootPos uint64) error {
 
 // undoDeletion undo-es all the deletions that are passed in. The deletions that happened
 // should be done in a single modify.
-func (m *MapPollard) undoDeletion(createHeight, createIndex []uint32, proof Proof, hashes []Hash) error {
+func (m *MapPollard) undoDeletion(createIndex []uint32, proof Proof, hashes []Hash) error {
 	// Sort and translate the positions if needed.
 	hnp := toHashAndPos(proof.Targets, hashes)
 	if TreeRows(m.NumLeaves) != m.TotalRows {
@@ -893,10 +875,10 @@ func (m *MapPollard) undoDeletion(createHeight, createIndex []uint32, proof Proo
 
 		// Only add it to the cached leaves if remember is true.
 		if remember {
-			if createHeight == nil || createIndex == nil {
-				m.CachedLeaves.Add(newhnp.hashes[i], pos, math.MaxUint32, math.MaxUint32)
+			if createIndex == nil {
+				m.CachedLeaves.Add(newhnp.hashes[i], pos, math.MaxUint32)
 			} else {
-				m.CachedLeaves.Add(newhnp.hashes[i], pos, createHeight[index], createIndex[index])
+				m.CachedLeaves.Add(newhnp.hashes[i], pos, createIndex[index])
 			}
 		}
 	}
@@ -979,7 +961,7 @@ func (m *MapPollard) undoAdd(numAdds uint64, origTargets []uint64, origPrevRoots
 
 // Undo will undo the last modify. The numAdds, proof, hashes, MUST be the data from the previous modify.
 // The origPrevRoots MUST be the roots that this Undo will go back to.
-func (m *MapPollard) UndoWithTTLs(numAdds uint64, createHeight, createIndex []uint32,
+func (m *MapPollard) UndoWithTTLs(numAdds uint64, createIndex []uint32,
 	proof Proof, hashes, origPrevRoots []Hash) error {
 
 	m.rwLock.Lock()
@@ -990,7 +972,7 @@ func (m *MapPollard) UndoWithTTLs(numAdds uint64, createHeight, createIndex []ui
 		return fmt.Errorf("Undo errored while undoing added leaves. %v", err)
 	}
 
-	err = m.undoDeletion(createHeight, createIndex, proof, hashes)
+	err = m.undoDeletion(createIndex, proof, hashes)
 	if err != nil {
 		return fmt.Errorf("Undo errored while undoing deleted leaves. %v", err)
 	}
@@ -1004,8 +986,6 @@ func (m *MapPollard) UndoWithTTLs(numAdds uint64, createHeight, createIndex []ui
 		}
 		m.Nodes.Put(rootPos[i], Leaf{Hash: origPrevRoots[i], Remember: remember})
 	}
-
-	m.CurrentHeight--
 
 	return nil
 }
@@ -1021,7 +1001,7 @@ func (m *MapPollard) Undo(numAdds uint64, proof Proof, hashes, origPrevRoots []H
 		return fmt.Errorf("Undo errored while undoing added leaves. %v", err)
 	}
 
-	err = m.undoDeletion(nil, nil, proof, hashes)
+	err = m.undoDeletion(nil, proof, hashes)
 	if err != nil {
 		return fmt.Errorf("Undo errored while undoing deleted leaves. %v", err)
 	}
@@ -1035,8 +1015,6 @@ func (m *MapPollard) Undo(numAdds uint64, proof Proof, hashes, origPrevRoots []H
 		}
 		m.Nodes.Put(rootPos[i], Leaf{Hash: origPrevRoots[i], Remember: remember})
 	}
-
-	m.CurrentHeight--
 
 	return nil
 }
@@ -1291,7 +1269,7 @@ func (m *MapPollard) ingest(delHashes []Hash, proof Proof) error {
 		}
 		m.Nodes.Put(pos, Leaf{Hash: intermediate.hashes[i], Remember: remember})
 		if remember {
-			m.CachedLeaves.Add(intermediate.hashes[i], pos, math.MaxUint32, math.MaxUint32)
+			m.CachedLeaves.Add(intermediate.hashes[i], pos, math.MaxUint32)
 		}
 	}
 
@@ -1609,7 +1587,7 @@ func (m *MapPollard) Read(r io.Reader) (int, error) {
 			return totalBytes, err
 		}
 		totalBytes += bytes
-		m.CachedLeaves.Add(hash, binary.LittleEndian.Uint64(buf[:]), math.MaxUint32, math.MaxUint32)
+		m.CachedLeaves.Add(hash, binary.LittleEndian.Uint64(buf[:]), math.MaxUint32)
 	}
 
 	// Read the count for the node elements in the map.

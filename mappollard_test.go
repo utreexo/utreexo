@@ -968,7 +968,7 @@ func FuzzMapPollardTTLs(f *testing.F) {
 
 		m := NewMapPollard(true)
 
-		leafMap := make(map[Hash][2]uint32, 50*numAdds)
+		leafMap := make(map[Hash]uint32, 50*numAdds)
 
 		var totalAdds, totalDels int
 		for b := 1; b <= 50; b++ {
@@ -977,7 +977,7 @@ func FuzzMapPollardTTLs(f *testing.F) {
 			totalDels += len(delHashes)
 
 			for i, add := range adds {
-				leafMap[add.Hash] = [2]uint32{uint32(b), uint32(i)}
+				leafMap[add.Hash] = uint32(i)
 			}
 
 			proof, err := m.Prove(delHashes)
@@ -988,7 +988,7 @@ func FuzzMapPollardTTLs(f *testing.F) {
 
 			origRoots := m.GetRoots()
 
-			createHeight, createIndex, err := m.ModifyAndReturnTTLs(adds, delHashes, proof)
+			createIndex, err := m.ModifyAndReturnTTLs(adds, delHashes, proof)
 			if err != nil {
 				t.Fatalf("FuzzTTLs fail at block %d. Error: %v", b, err)
 			}
@@ -1000,27 +1000,22 @@ func FuzzMapPollardTTLs(f *testing.F) {
 						b, delHash)
 				}
 
-				if createHeight[i] != ttlInfo[0] {
-					t.Fatalf("FuzzTTLs fail at block %d. For %v, expected create height %v got %v",
-						b, delHash, ttlInfo[0], createHeight[i])
-				}
-				if createIndex[i] != ttlInfo[1] {
+				if createIndex[i] != ttlInfo {
 					t.Fatalf("FuzzTTLs fail at block %d. For %v, expected create index %v got %v",
-						b, delHash, ttlInfo[1], createIndex[i])
+						b, delHash, ttlInfo, createIndex[i])
 				}
 			}
 
-			err = m.UndoWithTTLs(uint64(len(adds)), createHeight, createIndex, proof, delHashes, origRoots)
+			err = m.UndoWithTTLs(uint64(len(adds)), createIndex, proof, delHashes, origRoots)
 			if err != nil {
 				t.Fatalf("FuzzTTLs fail at block %d. Error: %v", b, err)
 			}
 
-			gotHeights, gotIndex, err := m.ModifyAndReturnTTLs(adds, delHashes, proof)
+			gotIndex, err := m.ModifyAndReturnTTLs(adds, delHashes, proof)
 			if err != nil {
 				t.Fatalf("FuzzTTLs fail at block %d. Error: %v", b, err)
 			}
 
-			require.Equal(t, createHeight, gotHeights)
 			require.Equal(t, createIndex, gotIndex)
 		}
 	})
