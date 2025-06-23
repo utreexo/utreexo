@@ -1436,13 +1436,13 @@ func (m *MapPollard) GetLeafHashPositions(hashes []Hash) []uint64 {
 
 // NewMapPollardFromRoots returns a new MapPollard initialized with the roots and the
 // numLeaves that was passed in.
-func NewMapPollardFromRoots(rootHashes []Hash, numLeaves uint64, full bool) MapPollard {
-	m := NewMapPollard(full)
+func NewMapPollardFromRoots(rootHashes []Hash, numLeaves uint64) MapPollard {
+	m := NewMapPollard(false)
 	m.NumLeaves = numLeaves
 
 	rootPositions := RootPositions(m.NumLeaves, m.TotalRows)
 	for i, rootPosition := range rootPositions {
-		m.Nodes.Put(rootPosition, Leaf{Hash: rootHashes[i], Remember: m.Full})
+		m.Nodes.Put(rootPosition, Leaf{Hash: rootHashes[i]})
 	}
 
 	return m
