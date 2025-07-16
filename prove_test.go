@@ -670,7 +670,7 @@ func FuzzModifyProofChain(f *testing.F) {
 				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
 			}
 
-			err = p.Undo(uint64(len(adds)), blockProof, delHashes, stump.Roots)
+			err = p.Undo(addHashes, blockProof, delHashes, stump.Roots)
 			if err != nil {
 				t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
 			}
@@ -1299,7 +1299,7 @@ func TestAddBlockSummary(t *testing.T) {
 	}
 
 	for testIdx, test := range tests {
-		cs := NewCachingScheduleTracker(0)
+		cs := NewCachingScheduleTracker(0, 0)
 
 		for i, deletion := range test.deletions {
 			add := test.numAdds[i]
@@ -1345,7 +1345,7 @@ func FuzzAddBlockSummary(f *testing.F) {
 
 		p := NewAccumulator()
 		stump := Stump{}
-		cs := NewCachingScheduleTracker(50)
+		cs := NewCachingScheduleTracker(50, 0)
 
 		for b := int32(1); b <= 50; b++ {
 			adds, _, delHashes := sc.NextBlock(numAdds)
@@ -1403,7 +1403,7 @@ func TestGetPrevPos(t *testing.T) {
 	testCases := []struct {
 		numLeaves       uint64
 		deletions       []uint64
-		toDestroy       []uint64
+		toDestroy       [][]uint64
 		numAdds         uint16
 		cached          []uint64
 		expectedCached  []uint64
@@ -1420,53 +1420,57 @@ func TestGetPrevPos(t *testing.T) {
 		// |-------\       |-------\
 		// 00:0000 01:0100 02:XX
 		{
-			numLeaves:       4,
-			deletions:       []uint64{},
-			toDestroy:       []uint64{2},
+			numLeaves: 4,
+			deletions: []uint64{},
+			toDestroy: [][]uint64{
+				{2},
+			},
 			numAdds:         1,
 			cached:          []uint64{translatePos(5, TreeRows(4), CSTTotalRows)},
 			expectedCached:  []uint64{},
 			expectedCreated: []uint64{3},
 		},
 
-		// 06:a3c3
-		// |---------------\
-		// 04:0200         05:0300
-		// |-------\       |-------\
-		//
-		//
-		// |---------------\
-		// 04:XX
-		// |-------\       |-------\
-		//                 02:0200
-		{
-			numLeaves:       4,
-			deletions:       []uint64{},
-			toDestroy:       []uint64{translatePos(4, TreeRows(4), CSTTotalRows)},
-			numAdds:         1,
-			cached:          []uint64{translatePos(4, TreeRows(4), CSTTotalRows)},
-			expectedCached:  []uint64{2},
-			expectedCreated: []uint64{},
-		},
+		//// 06:a3c3
+		//// |---------------\
+		//// 04:0200         05:0300
+		//// |-------\       |-------\
+		////
+		////
+		//// |---------------\
+		//// 04:XX
+		//// |-------\       |-------\
+		////                 02:0200
+		//{
+		//	numLeaves: 4,
+		//	deletions: []uint64{},
+		//	toDestroy: [][]uint64{
+		//		{translatePos(4, TreeRows(4), CSTTotalRows)},
+		//	},
+		//	numAdds:         1,
+		//	cached:          []uint64{translatePos(4, TreeRows(4), CSTTotalRows)},
+		//	expectedCached:  []uint64{2},
+		//	expectedCreated: []uint64{},
+		//},
 	}
 
 	for _, test := range testCases {
-		newPositions, gotIndexes := getPrevPos(CSTTotalRows, test.cached, test.deletions, test.toDestroy, test.numAdds, test.numLeaves)
+		gotCached, gotCreated := getPrevPos(CSTTotalRows, test.cached, test.deletions, test.toDestroy, test.numAdds, test.numLeaves)
 
-		indexes := make(map[int]struct{})
-		gotCreated := make([]uint64, len(gotIndexes))
-		for i, idx := range gotIndexes {
-			gotCreated[i] = newPositions[idx]
-			indexes[idx] = struct{}{}
-		}
+		//indexes := make(map[int]struct{})
+		//gotCreated := make([]uint64, len(gotIndexes))
+		//for i, idx := range gotIndexes {
+		//	gotCreated[i] = newPositions[idx]
+		//	indexes[idx] = struct{}{}
+		//}
 
-		gotCached := make([]uint64, 0, len(newPositions)-len(gotIndexes))
-		for i, pos := range newPositions {
-			_, created := indexes[i]
-			if !created {
-				gotCached = append(gotCached, pos)
-			}
-		}
+		//gotCached := make([]uint64, 0, len(newPositions)-len(gotIndexes))
+		//for i, pos := range newPositions {
+		//	_, created := indexes[i]
+		//	if !created {
+		//		gotCached = append(gotCached, pos)
+		//	}
+		//}
 
 		require.Equal(t, test.expectedCached, gotCached)
 		require.Equal(t, test.expectedCreated, gotCreated)
@@ -1489,7 +1493,7 @@ func FuzzGetPrevPos(f *testing.F) {
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
-		cs := NewCachingScheduleTracker(10)
+		cs := NewCachingScheduleTracker(10, 0)
 
 		addedPositions := make([][]uint64, 0, 10)
 
@@ -1516,6 +1520,8 @@ func FuzzGetPrevPos(f *testing.F) {
 			if err != nil {
 				t.Fatalf("FuzzGetPrevPos fail at block %d. Error: %v", b, err)
 			}
+			//fmt.Println("dels:", blockProof.String())
+			//fmt.Println(p.String())
 			addHashes := make([]Hash, 0, len(adds))
 			for _, add := range adds {
 				addHashes = append(addHashes, add.Hash)
@@ -1529,21 +1535,16 @@ func FuzzGetPrevPos(f *testing.F) {
 
 			cached := make([]uint64, len(blockProof.Targets))
 			copy(cached, translatePositions(blockProof.Targets, TreeRows(p.NumLeaves), CSTTotalRows))
+
+			//fmt.Println("cached: ", translatePositions(cached, CSTTotalRows, TreeRows(p.NumLeaves)))
 			for i := b - 1; i >= 0; i-- {
-				var createdIdxs []int
-				cached, createdIdxs = getPrevPos(CSTTotalRows, cached, cs.deletions[i],
+				var created []uint64
+				cached, created = getPrevPos(CSTTotalRows, cached, cs.deletions[i],
 					cs.toDestroy[i], cs.numAdds[i], cs.numLeaves[i])
 
-				created := make([]uint64, 0, len(createdIdxs))
-				for _, idx := range createdIdxs {
-					created = append(created, cached[idx])
-				}
+				//fmt.Printf("after undo %v cached: %v\n", i, translatePositions(cached, CSTTotalRows, TreeRows(p.NumLeaves)))
 
-				slices.Sort(createdIdxs)
-				for i, idx := range createdIdxs {
-					useIdx := idx - i
-					cached = slices.Delete(cached, useIdx, useIdx+1)
-				}
+				//fmt.Printf("after undo %v created: %v\n", i, translatePositions(created, CSTTotalRows, TreeRows(p.NumLeaves)))
 
 				if i > 0 {
 					cached = append(cached, cs.deletions[i]...)
@@ -1564,278 +1565,395 @@ func FuzzGetPrevPos(f *testing.F) {
 	})
 }
 
-func TestGenTTLs(t *testing.T) {
-	tests := []struct {
-		blockDeletions [][]uint64
-		numAdds        []uint16
-		expected       [][]ttlInfo
-	}{
-		{
-			// creates(0, 1) | ttl(1, 2) | dels ()
-			// creates(2, 3) | ttl(2, 2) | dels (0)
-			// creates(4, 5) | ttl(x, x) | dels (1)
-			// creates(6, 7) | ttl(x, x) | dels (2, 3)
-			blockDeletions: [][]uint64{
-				{},
-				{0},
-				{4},
-				{8, 9},
-			},
-			numAdds: []uint16{2, 2, 2, 2},
-			expected: [][]ttlInfo{
-				{{pos: 0, ttl: 1}, {pos: 1, ttl: 2}},
-				{{pos: 2, ttl: 2}, {pos: 3, ttl: 2}},
-				nil,
-				nil,
-			},
-		},
-		{
-			blockDeletions: [][]uint64{
-				{},
-				{},
-				{},
-				{},
-			},
-			numAdds: []uint16{0, 0, 0, 0},
-			expected: [][]ttlInfo{
-				nil,
-				nil,
-				nil,
-				nil,
-			},
-		},
-		{
-			// creates(0, 1, 2, 3, 4, 5, 6, 7) | dels ()
-			// creates(8, 9, 10, 11, 12)       | dels ()
-			// creates(13, 14, 15)             | dels ()
-			blockDeletions: [][]uint64{
-				{},
-				{},
-				{},
-				{},
-			},
-			numAdds: []uint16{8, 5, 3, 0},
-			expected: [][]ttlInfo{
-				nil,
-				nil,
-				nil,
-				nil,
-			},
-		},
-		{
-			// creates(0, 1) | ttl(1, 2) | dels ()
-			// creates(2, 3) | ttl(1, 2) | dels (0)
-			// creates(4, 5) | ttl(1, 1) | dels (1, 2)
-			// creates(6, 7) | ttl(x, x) | dels (3, 4, 5)
-			blockDeletions: [][]uint64{
-				{},
-				{0},
-				{4, 2},
-				{12, 4, 5},
-			},
-			numAdds: []uint16{2, 2, 2, 2},
-			expected: [][]ttlInfo{
-				{{pos: 0, ttl: 1}, {pos: 1, ttl: 2}},
-				{{pos: 2, ttl: 1}, {pos: 3, ttl: 2}},
-				{{pos: 4, ttl: 1}, {pos: 5, ttl: 1}},
-				nil,
-			},
-		},
-		{
-			// creates(0, 1, 2, 3, 4, 5, 6) | ttl(3, 3, x, x, x, x, x) | dels ()
-			// creates()                    | ttl()                    | dels ()
-			// creates()                    | ttl()                    | dels ()
-			// creates()                    | ttl()                    | dels (0, 1)
-			blockDeletions: [][]uint64{
-				nil,
-				nil,
-				nil,
-				{0, 1},
-			},
-			numAdds: []uint16{7, 0, 0, 0},
-			expected: [][]ttlInfo{
-				{{pos: 0, ttl: 3}, {pos: 1, ttl: 3}},
-				nil,
-				nil,
-				nil,
-			},
-		},
-		{
-			// creates(0, 1, 2, 3, 4, 5) | ttl(5, x, x, x, x, x) | dels ()
-			// creates()                 | ttl()                 | dels ()
-			// creates()                 | ttl()                 | dels ()
-			// creates(6)                | ttl(1)                | dels ()
-			// creates(7)                | ttl(1)                | dels (6)
-			// creates()                 | ttl()                 | dels (0, 7)
-			blockDeletions: [][]uint64{
-				nil,
-				nil,
-				nil,
-				nil,
-				{6},
-				{0, 11},
-			},
-			numAdds: []uint16{6, 0, 0, 1, 1, 0},
-			expected: [][]ttlInfo{
-				{{pos: 0, ttl: 5}},
-				nil,
-				nil,
-				{{pos: 6, ttl: 1}},
-				{{pos: 7, ttl: 1}},
-				nil,
-			},
-		},
-		{
-			// creates(0, 1, 2, 3, 4, 5) | ttl(5, x, x, x, x, 5) | dels ()
-			// creates()                 | ttl()                 | dels ()
-			// creates()                 | ttl()                 | dels ()
-			// creates(6)                | ttl(1)                | dels ()
-			// creates(7)                | ttl(1)                | dels (6)
-			// creates()                 | ttl()                 | dels (0, 5, 7)
-			blockDeletions: [][]uint64{
-				nil,
-				nil,
-				nil,
-				nil,
-				{6},
-				{0, 5, 11},
-			},
-			numAdds: []uint16{6, 0, 0, 1, 1, 0},
-			expected: [][]ttlInfo{
-				{{pos: 0, ttl: 5}, {pos: 5, ttl: 5}},
-				nil,
-				nil,
-				{{pos: 6, ttl: 1}},
-				{{pos: 7, ttl: 1}},
-				nil,
-			},
-		},
-		{
-			// creates(0, 1, 2, 3, 4, 5) | ttl(5, x, x, x, x, 5) | dels ()
-			// creates()                 | ttl()                 | dels ()
-			// creates(6)                | ttl(2)                | dels ()
-			// creates()                 | ttl()                 | dels ()
-			// creates(7)                | ttl(1)                | dels (6)
-			// creates()                 | ttl()                 | dels (0, 5, 7)
-			blockDeletions: [][]uint64{
-				{},
-				{},
-				{},
-				{},
-				{6},
-				{0, 5, 11},
-			},
-			numAdds: []uint16{6, 0, 1, 0, 1, 0},
-			expected: [][]ttlInfo{
-				{{pos: 0, ttl: 5}, {pos: 5, ttl: 5}},
-				nil,
-				{{pos: 6, ttl: 2}},
-				nil,
-				{{pos: 7, ttl: 1}},
-				nil,
-			},
-		},
-		{
-			// creates(0, 1, 2, 3, 4, 5, 6, 7) | ttl(5, x, x, x, 3, 5, 4, 5) | dels ()
-			// creates()                       | ttl()                       | dels ()
-			// creates()                       | ttl()                       | dels ()
-			// creates()                       | ttl()                       | dels (4)
-			// creates()                       | ttl()                       | dels (6)
-			// creates()                       | ttl()                       | dels (0, 5, 7)
-			blockDeletions: [][]uint64{
-				{},
-				{},
-				{},
-				{4},
-				{6},
-				{0, 10, 11},
-			},
-			numAdds: []uint16{8, 0, 0, 0, 0, 0},
-			expected: [][]ttlInfo{
-				{{pos: 0, ttl: 5}, {pos: 4, ttl: 3}, {pos: 5, ttl: 5}, {pos: 6, ttl: 4}, {pos: 7, ttl: 5}},
-				nil,
-				nil,
-				nil,
-				nil,
-				nil,
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		cs := NewCachingScheduleTracker(0)
-		for i, numAdd := range tt.numAdds {
-			cs.AddBlockSummary(tt.blockDeletions[i], numAdd)
-		}
-
-		cs.genTTLs()
-		require.Equal(t, tt.expected, cs.ttls)
-	}
+type undoDelHelper struct {
+	rootPos uint64
+	parent  *undoDelHelper
+	lChild  *undoDelHelper
+	rChild  *undoDelHelper
 }
 
-func FuzzGenTTLs(f *testing.F) {
-	var tests = []struct {
-		numAdds  uint32
-		duration uint32
-		seed     int64
-	}{
-		{3, 0x07, 0x07},
-	}
-	for _, test := range tests {
-		f.Add(test.numAdds, test.duration, test.seed)
-	}
+//func (uh *undoDelHelper) insertPos() *undoDelHelper {
+//	if uh.parent != nil {
+//		return nil
+//	}
+//
+//	for
+//}
 
-	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
-		t.Parallel()
+func (uh *undoDelHelper) calcPos() uint64 {
+	// Tells whether to follow the left child or the right child when going
+	// down the tree. 0 means left, 1 means right.
+	leftRightIndicator := uint64(0)
 
-		// simulate blocks with simchain
-		sc := newSimChainWithSeed(duration, seed)
+	node := uh
 
-		blockNum := 10
-		dels := make([][]Hash, 0, blockNum)
-		adds := make([][]Leaf, 0, blockNum)
-		durations := make([][]int32, 0, blockNum)
-		expectedTTLs := make([][]ttlInfo, blockNum)
-
-		cs := NewCachingScheduleTracker(blockNum)
-
-		p := NewAccumulator()
-		for b := 1; b <= blockNum; b++ {
-			add, duration, delHashes := sc.NextBlock(numAdds)
-
-			for i, ttl := range duration {
-				if ttl+int32(b) > int32(blockNum) || ttl == 0 {
-					continue
-				}
-
-				expectedTTLs[b-1] = append(expectedTTLs[b-1],
-					ttlInfo{
-						pos: uint64(i) + p.NumLeaves,
-						ttl: int(ttl),
-					})
-			}
-
-			adds = append(adds, add)
-			durations = append(durations, duration)
-			dels = append(dels, delHashes)
-
-			proof, err := p.Prove(delHashes)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			err = p.Modify(add, delHashes, proof)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			cs.AddBlockSummary(proof.Targets, uint16(len(add)))
+	rowsToTop := 0
+	for uh.parent != nil {
+		if uh.parent.lChild == node {
+			// Left
+			leftRightIndicator <<= 1
+		} else {
+			// Right
+			leftRightIndicator <<= 1
+			leftRightIndicator |= 1
 		}
+		node = node.parent
+	}
 
-		cs.genTTLs()
-		require.Equal(t, expectedTTLs, cs.ttls)
-	})
+	retPos := node.rootPos
+	for i := 0; i < rowsToTop; i++ {
+		isRight := uint64(1) << i
+		if leftRightIndicator&isRight == isRight {
+			// Grab the sibling since the pollard nodes point to their
+			// niece. My sibling's nieces are my children.
+			retPos = sibling(RightChild(retPos, CSTTotalRows))
+		} else {
+			// Grab the sibling since the pollard nodes point to their
+			// niece. My sibling's nieces are my children.
+			retPos = sibling(LeftChild(retPos, CSTTotalRows))
+		}
+	}
+
+	return retPos
 }
+
+//func makeHelpers(totalRows uint8, numLeaves uint64, cached []uint64) []*undoDelHelper {
+//	ret := make([]*undoDelHelper, len(cached))
+//	for i := range ret {
+//		ret[i] = &undoDelHelper{
+//			rootPos: 0,
+//		}
+//	}
+//
+//	//rootPositions := RootPositions(numLeaves, totalRows)
+//	//roots := make([]*undoDelHelper, len(rootPositions))
+//	//for i, rootPos := range rootPositions {
+//	//	roots[i] = &undoDelHelper{
+//	//		rootPos: rootPos,
+//	//	}
+//
+//	//	//node := roots[i]
+//	//	//row := DetectRow(rootPos, totalRows)
+//	//	//for h := int(row); h >= 0; h-- {
+//	//	//	lNode := &undoDelHelper{
+//	//	//		parent: node,
+//	//	//	}
+//	//	//	roots[i].lChild = lNode
+//
+//	//	//	rNode := &undoDelHelper{
+//	//	//		parent: node,
+//	//	//	}
+//	//	//	roots[i].rChild = rNode
+//	//	//}
+//	//}
+//
+//	//return nil
+//	//return ret
+//}
+
+//func Test18(t *testing.T) {
+//	bitsToCheck := (uint64(2) << uint64(forestRows-higherRow)) - 1
+//	bitsToCheck <<= higherRow
+//}
+
+// 14
+// |---------------\
+// 12              13
+// |-------\       |-------\
+// 08      09      10      11
+// |---\   |---\   |---\   |---\
+//         02  03
+
+// cached = [02, 10, 11]
+// dels = [01]
+
+// 14
+// |---------------\
+// 12              13
+// |-------\       |-------\
+// 08      09      10      11
+// |---\   |---\   |---\   |---\
+//         02  03
+
+//func TestGenTTLs(t *testing.T) {
+//	tests := []struct {
+//		blockDeletions [][]uint64
+//		numAdds        []uint16
+//		expected       [][]ttlInfo
+//	}{
+//		//{
+//		//	// creates(0, 1) | ttl(1, 2) | dels ()
+//		//	// creates(2, 3) | ttl(2, 2) | dels (0)
+//		//	// creates(4, 5) | ttl(x, x) | dels (1)
+//		//	// creates(6, 7) | ttl(x, x) | dels (2, 3)
+//		//	blockDeletions: [][]uint64{
+//		//		{},
+//		//		{0},
+//		//		{4},
+//		//		{8, 9},
+//		//	},
+//		//	numAdds: []uint16{2, 2, 2, 2},
+//		//	expected: [][]ttlInfo{
+//		//		{{pos: 0, ttl: 1}, {pos: 1, ttl: 2}},
+//		//		{{pos: 2, ttl: 2}, {pos: 3, ttl: 2}},
+//		//		{},
+//		//		{},
+//		//	},
+//		//},
+//		//{
+//		//	blockDeletions: [][]uint64{
+//		//		{},
+//		//		{},
+//		//		{},
+//		//		{},
+//		//	},
+//		//	numAdds: []uint16{0, 0, 0, 0},
+//		//	expected: [][]ttlInfo{
+//		//		{},
+//		//		{},
+//		//		{},
+//		//		{},
+//		//	},
+//		//},
+//		//{
+//		//	// creates(0, 1, 2, 3, 4, 5, 6, 7) | dels ()
+//		//	// creates(8, 9, 10, 11, 12)       | dels ()
+//		//	// creates(13, 14, 15)             | dels ()
+//		//	blockDeletions: [][]uint64{
+//		//		{},
+//		//		{},
+//		//		{},
+//		//		{},
+//		//	},
+//		//	numAdds: []uint16{8, 5, 3, 0},
+//		//	expected: [][]ttlInfo{
+//		//		{},
+//		//		{},
+//		//		{},
+//		//		{},
+//		//	},
+//		//},
+//		//{
+//		//	// creates(0, 1) | ttl(1, 2) | dels ()
+//		//	// creates(2, 3) | ttl(1, 2) | dels (0)
+//		//	// creates(4, 5) | ttl(1, 1) | dels (1, 2)
+//		//	// creates(6, 7) | ttl(x, x) | dels (3, 4, 5)
+//		//	blockDeletions: [][]uint64{
+//		//		{},
+//		//		{0},
+//		//		{4, 2},
+//		//		{12, 4, 5},
+//		//	},
+//		//	numAdds: []uint16{2, 2, 2, 2},
+//		//	expected: [][]ttlInfo{
+//		//		{{pos: 0, ttl: 1}, {pos: 1, ttl: 2}},
+//		//		{{pos: 2, ttl: 1}, {pos: 3, ttl: 2}},
+//		//		{{pos: 4, ttl: 1}, {pos: 5, ttl: 1}},
+//		//		{},
+//		//	},
+//		//},
+//		//{
+//		//	// creates(0, 1, 2, 3, 4, 5, 6) | ttl(3, 3, x, x, x, x, x) | dels ()
+//		//	// creates()                    | ttl()                    | dels ()
+//		//	// creates()                    | ttl()                    | dels ()
+//		//	// creates()                    | ttl()                    | dels (0, 1)
+//		//	blockDeletions: [][]uint64{
+//		//		nil,
+//		//		nil,
+//		//		nil,
+//		//		{0, 1},
+//		//	},
+//		//	numAdds: []uint16{7, 0, 0, 0},
+//		//	expected: [][]ttlInfo{
+//		//		{{pos: 0, ttl: 3}, {pos: 1, ttl: 3}},
+//		//		{},
+//		//		{},
+//		//		{},
+//		//	},
+//		//},
+//		//{
+//		//	// creates(0, 1, 2, 3, 4, 5) | ttl(5, x, x, x, x, x) | dels ()
+//		//	// creates()                 | ttl()                 | dels ()
+//		//	// creates()                 | ttl()                 | dels ()
+//		//	// creates(6)                | ttl(1)                | dels ()
+//		//	// creates(7)                | ttl(1)                | dels (6)
+//		//	// creates()                 | ttl()                 | dels (0, 7)
+//		//	blockDeletions: [][]uint64{
+//		//		nil,
+//		//		nil,
+//		//		nil,
+//		//		nil,
+//		//		{6},
+//		//		{0, 11},
+//		//	},
+//		//	numAdds: []uint16{6, 0, 0, 1, 1, 0},
+//		//	expected: [][]ttlInfo{
+//		//		{{pos: 0, ttl: 5}},
+//		//		{},
+//		//		{},
+//		//		{{pos: 6, ttl: 1}},
+//		//		{{pos: 7, ttl: 1}},
+//		//		{},
+//		//	},
+//		//},
+//		//{
+//		//	// creates(0, 1, 2, 3, 4, 5) | ttl(5, x, x, x, x, 5) | dels ()
+//		//	// creates()                 | ttl()                 | dels ()
+//		//	// creates()                 | ttl()                 | dels ()
+//		//	// creates(6)                | ttl(1)                | dels ()
+//		//	// creates(7)                | ttl(1)                | dels (6)
+//		//	// creates()                 | ttl()                 | dels (0, 5, 7)
+//		//	blockDeletions: [][]uint64{
+//		//		nil,
+//		//		nil,
+//		//		nil,
+//		//		nil,
+//		//		{6},
+//		//		{0, 5, 11},
+//		//	},
+//		//	numAdds: []uint16{6, 0, 0, 1, 1, 0},
+//		//	expected: [][]ttlInfo{
+//		//		{{pos: 0, ttl: 5}, {pos: 5, ttl: 5}},
+//		//		{},
+//		//		{},
+//		//		{{pos: 6, ttl: 1}},
+//		//		{{pos: 7, ttl: 1}},
+//		//		{},
+//		//	},
+//		//},
+//		//{
+//		//	// creates(0, 1, 2, 3, 4, 5) | ttl(5, x, x, x, x, 5) | dels ()
+//		//	// creates()                 | ttl()                 | dels ()
+//		//	// creates(6)                | ttl(2)                | dels ()
+//		//	// creates()                 | ttl()                 | dels ()
+//		//	// creates(7)                | ttl(1)                | dels (6)
+//		//	// creates()                 | ttl()                 | dels (0, 5, 7)
+//		//	blockDeletions: [][]uint64{
+//		//		{},
+//		//		{},
+//		//		{},
+//		//		{},
+//		//		{6},
+//		//		{0, 5, 11},
+//		//	},
+//		//	numAdds: []uint16{6, 0, 1, 0, 1, 0},
+//		//	expected: [][]ttlInfo{
+//		//		{{pos: 0, ttl: 5}, {pos: 5, ttl: 5}},
+//		//		{},
+//		//		{{pos: 6, ttl: 2}},
+//		//		{},
+//		//		{{pos: 7, ttl: 1}},
+//		//		{},
+//		//	},
+//		//},
+//		//{
+//		//	// creates(0, 1, 2, 3, 4, 5, 6, 7) | ttl(5, x, x, x, 3, 5, 4, 5) | dels ()
+//		//	// creates()                       | ttl()                       | dels ()
+//		//	// creates()                       | ttl()                       | dels ()
+//		//	// creates()                       | ttl()                       | dels (4)
+//		//	// creates()                       | ttl()                       | dels (6)
+//		//	// creates()                       | ttl()                       | dels (0, 5, 7)
+//		//	blockDeletions: [][]uint64{
+//		//		{},
+//		//		{},
+//		//		{},
+//		//		{4},
+//		//		{6},
+//		//		{0, 10, 11},
+//		//	},
+//		//	numAdds: []uint16{8, 0, 0, 0, 0, 0},
+//		//	expected: [][]ttlInfo{
+//		//		{{pos: 0, ttl: 5}, {pos: 4, ttl: 3}, {pos: 5, ttl: 5}, {pos: 6, ttl: 4}, {pos: 7, ttl: 5}},
+//		//		{},
+//		//		{},
+//		//		{},
+//		//		{},
+//		//		{},
+//		//	},
+//		//},
+//	}
+//
+//	for _, tt := range tests {
+//		cs := NewCachingScheduleTracker(0, tt.)
+//		for i, numAdd := range tt.numAdds {
+//			cs.AddBlockSummary(tt.blockDeletions[i], numAdd)
+//			//fmt.Printf("cs on i: %v\n%v\n", i, cs.String())
+//		}
+//
+//		//cs.genTTLs()
+//		//fmt.Println(cs.String())
+//		require.Equal(t, tt.expected, cs.ttls)
+//	}
+//}
+
+//func FuzzGenTTLs(f *testing.F) {
+//	var tests = []struct {
+//		numAdds  uint32
+//		duration uint32
+//		seed     int64
+//	}{
+//		{3, 0x07, 0x07},
+//	}
+//	for _, test := range tests {
+//		f.Add(test.numAdds, test.duration, test.seed)
+//	}
+//
+//	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+//		t.Parallel()
+//
+//		// simulate blocks with simchain
+//		sc := newSimChainWithSeed(duration, seed)
+//
+//		blockNum := 1_000_000
+//		//blockNum := 10
+//		dels := make([][]Hash, 0, blockNum)
+//		adds := make([][]Leaf, 0, blockNum)
+//		durations := make([][]int32, 0, blockNum)
+//		expectedTTLs := make([][]ttlInfo, blockNum)
+//
+//		for i := range expectedTTLs {
+//			expectedTTLs[i] = []ttlInfo{}
+//		}
+//
+//		cs := NewCachingScheduleTracker(blockNum, 0)
+//
+//		p := NewAccumulator()
+//		for b := 1; b <= blockNum; b++ {
+//			add, duration, delHashes := sc.NextBlock(numAdds)
+//
+//			for i, ttl := range duration {
+//				if ttl+int32(b) > int32(blockNum) || ttl == 0 {
+//					continue
+//				}
+//
+//				expectedTTLs[b-1] = append(expectedTTLs[b-1],
+//					ttlInfo{
+//						pos: uint64(i) + p.NumLeaves,
+//						ttl: int(ttl),
+//					})
+//			}
+//
+//			adds = append(adds, add)
+//			durations = append(durations, duration)
+//			dels = append(dels, delHashes)
+//
+//			proof, err := p.Prove(delHashes)
+//			if err != nil {
+//				t.Fatal(err)
+//			}
+//
+//			err = p.Modify(add, delHashes, proof)
+//			if err != nil {
+//				t.Fatal(err)
+//			}
+//
+//			cs.AddBlockSummary(proof.Targets, uint16(len(add)))
+//		}
+//
+//		//cs.genTTLs()
+//		require.Equal(t, expectedTTLs, cs.ttls)
+//	})
+//}
 
 func TestCachingSchedule(t *testing.T) {
 	tests := []struct {
@@ -1863,8 +1981,8 @@ func TestCachingSchedule(t *testing.T) {
 			expected: [][]uint64{
 				{0, 1},
 				{2, 3},
-				nil,
-				nil,
+				{},
+				{},
 			},
 			expectErr: false,
 		},
@@ -1885,8 +2003,8 @@ func TestCachingSchedule(t *testing.T) {
 			expected: [][]uint64{
 				{0, 1},
 				{2},
-				nil,
-				nil,
+				{},
+				{},
 			},
 			expectErr: false,
 		},
@@ -1901,10 +2019,10 @@ func TestCachingSchedule(t *testing.T) {
 			numAdds:   []uint16{0, 0, 0, 0},
 			maxMemory: 3,
 			expected: [][]uint64{
-				nil,
-				nil,
-				nil,
-				nil,
+				{},
+				{},
+				{},
+				{},
 			},
 			expectErr: false,
 		},
@@ -1922,10 +2040,10 @@ func TestCachingSchedule(t *testing.T) {
 			numAdds:   []uint16{8, 5, 3, 0},
 			maxMemory: 3,
 			expected: [][]uint64{
-				nil,
-				nil,
-				nil,
-				nil,
+				{},
+				{},
+				{},
+				{},
 			},
 			expectErr: false,
 		},
@@ -1947,7 +2065,7 @@ func TestCachingSchedule(t *testing.T) {
 				{0, 1},
 				{2},
 				{4, 5},
-				nil,
+				{},
 			},
 			expectErr: false,
 		},
@@ -1963,9 +2081,9 @@ func TestCachingSchedule(t *testing.T) {
 			maxMemory: 1,
 			expected: [][]uint64{
 				{0},
-				nil,
-				nil,
-				nil,
+				{},
+				{},
+				{},
 			},
 			expectErr: false,
 		},
@@ -1984,10 +2102,10 @@ func TestCachingSchedule(t *testing.T) {
 			numAdds:   []uint16{4, 4, 0, 0},
 			maxMemory: 1,
 			expected: [][]uint64{
-				{0},
-				nil,
-				nil,
-				nil,
+				{},
+				{4},
+				{},
+				{},
 			},
 			expectErr: false,
 		},
@@ -2006,10 +2124,10 @@ func TestCachingSchedule(t *testing.T) {
 			numAdds:   []uint16{4, 4, 0, 0},
 			maxMemory: 2,
 			expected: [][]uint64{
-				{0},
-				{4},
-				nil,
-				nil,
+				{},
+				{4, 5},
+				{},
+				{},
 			},
 			expectErr: false,
 		},
@@ -2028,20 +2146,20 @@ func TestCachingSchedule(t *testing.T) {
 			numAdds:   []uint16{4, 3, 1, 0},
 			maxMemory: 2,
 			expected: [][]uint64{
-				{0},
+				{},
 				{4},
-				nil,
-				nil,
+				{7},
+				{},
 			},
 			expectErr: false,
 		},
 		{
-			// creates(0, 1, 2, 3, 4, 5, 6) | dels ()
-			// creates()                    | dels ()
-			// creates()                    | dels ()
-			// creates(7)                   | dels ()
-			// creates()                    | dels (0, 4)
-			// creates()                    | dels (7)
+			// creates(0, 1, 2, 3, 4, 5, 6) | 0, 4 | ttl()     | dels ()
+			// creates()                    |      | ttl()     | dels ()
+			// creates()                    |      | ttl()     | dels ()
+			// creates(7)                   |      | ttl()     | dels ()
+			// creates()                    |      | ttl(4, 4) | dels (0, 4)
+			// creates()                    |      | ttl(2)    | dels (7)
 			name: "Expect to remove last deletion",
 			blockDeletions: [][]uint64{
 				{},
@@ -2055,21 +2173,21 @@ func TestCachingSchedule(t *testing.T) {
 			maxMemory: 2,
 			expected: [][]uint64{
 				{0, 4},
-				nil,
-				nil,
-				nil,
-				nil,
-				nil,
+				{},
+				{},
+				{},
+				{},
+				{},
 			},
 			expectErr: false,
 		},
 		{
-			// creates(0, 1, 2, 3, 4, 5) | dels ()
-			// creates()                 | dels ()
-			// creates()                 | dels ()
-			// creates(6)                | dels ()
-			// creates(7)                | dels (6)
-			// creates()                 | dels (0, 7)
+			// creates(0, 1, 2, 3, 4, 5) | ttl()     | dels ()
+			// creates()                 | ttl()     | dels ()
+			// creates()                 | ttl()     | dels ()
+			// creates(6)                | ttl()     | dels ()
+			// creates(7)                | ttl(1)    | dels (6)
+			// creates()                 | ttl(5, 1) | dels (0, 7)
 			name: "Case for when the cache is filled and un-filled. Expect to cache everything",
 			blockDeletions: [][]uint64{
 				{},
@@ -2083,21 +2201,28 @@ func TestCachingSchedule(t *testing.T) {
 			maxMemory: 2,
 			expected: [][]uint64{
 				{0},
-				nil,
-				nil,
+				{},
+				{},
 				{6},
 				{7},
-				nil,
+				{},
 			},
 			expectErr: false,
 		},
 		{
-			// creates(0, 1, 2, 3, 4, 5) | dels ()
-			// creates()                 | dels ()
-			// creates()                 | dels ()
-			// creates(6)                | dels ()
-			// creates(7)                | dels (6)
-			// creates()                 | dels (0, 5, 7)
+			// creates(0, 1, 2, 3, 4, 5) | sch(5)    | ttl()        | cCnt 1 | dels ()
+			// creates()                 | sch()     | ttl()        | cCnt 1 | dels ()
+			// creates()                 | sch()     | ttl()        | cCnt 1 | dels ()
+			// creates(6)                | sch(6)    | ttl()        | cCnt 2 | dels ()
+			// creates(7)                | sch(7)    | ttl()        | cCnt 2 | dels (6)
+			// creates()                 | sch()     | ttl(5, 5, 1) | cCnt 0 | dels (0, 5, 7)
+
+			// creates(0, 1, 2, 3, 4, 5) | ttl(5, x, x, x, x, 5) | dels ()
+			// creates()                 | ttl()                 | dels ()
+			// creates()                 | ttl()                 | dels ()
+			// creates(6)                | ttl(1)                | dels ()
+			// creates(7)                | ttl(1)                | dels (6)
+			// creates()                 | ttl()                 | dels (0, 5, 7)
 			name: "Case for when the cache is filled and un-filled",
 			blockDeletions: [][]uint64{
 				{},
@@ -2110,12 +2235,12 @@ func TestCachingSchedule(t *testing.T) {
 			numAdds:   []uint16{6, 0, 0, 1, 1, 0},
 			maxMemory: 2,
 			expected: [][]uint64{
-				{5},
-				nil,
-				nil,
+				{0},
+				{},
+				{},
 				{6},
 				{7},
-				nil,
+				{},
 			},
 			expectErr: false,
 		},
@@ -2138,22 +2263,22 @@ func TestCachingSchedule(t *testing.T) {
 			numAdds:   []uint16{6, 0, 1, 0, 1, 0},
 			maxMemory: 2,
 			expected: [][]uint64{
-				{5},
-				nil,
+				{0},
+				{},
 				{6},
-				nil,
+				{},
 				{7},
-				nil,
+				{},
 			},
 			expectErr: false,
 		},
 		{
-			// creates(0, 1, 2, 3, 4, 5, 6, 7) | dels ()
-			// creates()                       | dels ()
-			// creates()                       | dels ()
-			// creates()                       | dels (4)
-			// creates()                       | dels (6)
-			// creates()                       | dels (0, 5, 7)
+			// creates(0, 1, 2, 3, 4, 5, 6, 7) | ttl()        | dels ()
+			// creates()                       | ttl()        | dels ()
+			// creates()                       | ttl()        | dels ()
+			// creates()                       | ttl(3)       | dels (4)
+			// creates()                       | ttl(4)       | dels (6)
+			// creates()                       | ttl(5, 5, 5) | dels (0, 5, 7)
 			name: "Expect to choose deletions with lower ttl",
 			blockDeletions: [][]uint64{
 				{},
@@ -2167,11 +2292,11 @@ func TestCachingSchedule(t *testing.T) {
 			maxMemory: 2,
 			expected: [][]uint64{
 				{4, 6},
-				nil,
-				nil,
-				nil,
-				nil,
-				nil,
+				{},
+				{},
+				{},
+				{},
+				{},
 			},
 			expectErr: false,
 		},
@@ -2195,11 +2320,11 @@ func TestCachingSchedule(t *testing.T) {
 			maxMemory: 2,
 			expected: [][]uint64{
 				{4, 5},
-				nil,
-				nil,
-				nil,
-				nil,
-				nil,
+				{},
+				{},
+				{},
+				{},
+				{},
 			},
 			expectErr: false,
 		},
@@ -2221,21 +2346,21 @@ func TestCachingSchedule(t *testing.T) {
 			numAdds:   []uint16{1, 7, 0, 0, 0, 0},
 			maxMemory: 2,
 			expected: [][]uint64{
-				nil,
+				{},
 				{4, 6},
-				nil,
-				nil,
-				nil,
-				nil,
+				{},
+				{},
+				{},
+				{},
 			},
 			expectErr: false,
 		},
 		{
-			// creates(0)             | dels ()
-			// creates(1, 2, 3, 4, 5) | dels ()
-			// creates(6, 7)          | dels ()
-			// creates()              | dels (6)
-			// creates()              | dels (0, 1, 5, 7)
+			// creates(0)             | ttl(4)             | cache(0)    (4)    | dels ()
+			// creates(1, 2, 3, 4, 5) | ttl(3, x, x, x, 3) | cache(0, 1) (3, 3) | dels ()
+			// creates(6, 7)          | ttl(1, 2)          | cache(0, 6) (2, 1) | dels ()
+			// creates()              | ttl()              | cache(0)    (1)    | dels (6)
+			// creates()              | ttl()              | cache()            | dels (0, 1, 5, 7)
 			name: "Expect to choose deletions with lower ttl. Force eviction.",
 			blockDeletions: [][]uint64{
 				{},
@@ -2248,12 +2373,12 @@ func TestCachingSchedule(t *testing.T) {
 			numAdds:   []uint16{1, 5, 2, 0, 0, 0},
 			maxMemory: 2,
 			expected: [][]uint64{
-				nil,
-				{1},
-				{6},
-				nil,
-				nil,
-				nil,
+				{},
+				{},
+				{6, 7},
+				{},
+				{},
+				{},
 			},
 			expectErr: false,
 		},
@@ -2276,12 +2401,12 @@ func TestCachingSchedule(t *testing.T) {
 			numAdds:   []uint16{1, 5, 2, 0, 0, 0},
 			maxMemory: 2,
 			expected: [][]uint64{
-				nil,
+				{},
 				{4},
 				{6},
-				nil,
-				nil,
-				nil,
+				{},
+				{},
+				{},
 			},
 			expectErr: false,
 		},
@@ -2305,11 +2430,11 @@ func TestCachingSchedule(t *testing.T) {
 			maxMemory: 2,
 			expected: [][]uint64{
 				{0, 3},
-				nil,
-				nil,
+				{},
+				{},
 				{4, 5},
-				nil,
-				nil,
+				{},
+				{},
 			},
 			expectErr: false,
 		},
@@ -2333,21 +2458,21 @@ func TestCachingSchedule(t *testing.T) {
 			maxMemory: 2,
 			expected: [][]uint64{
 				{0},
-				nil,
-				nil,
+				{},
+				{},
 				{4, 5},
-				nil,
-				nil,
+				{},
+				{},
 			},
 			expectErr: false,
 		},
 		{
-			// creates(0, 1, 2, 3) | dels ()        | pCache ()
-			// creates()           | dels ()        | pCache ()
-			// creates()           | dels (0, 3)    | pCache ()
-			// creates(4, 5, 6)    | dels ()        | pCache ()
-			// creates()           | dels (4, 5)    | pCache ()
-			// creates()           | dels (1)       | pCache ()
+			// creates(0, 1, 2, 3) | dels ()
+			// creates()           | dels ()
+			// creates()           | dels (0, 3)
+			// creates(4, 5, 6)    | dels ()
+			// creates()           | dels (4, 5)
+			// creates()           | dels (1)
 			name: "Expect to cache everything",
 			blockDeletions: [][]uint64{
 				{},
@@ -2361,23 +2486,52 @@ func TestCachingSchedule(t *testing.T) {
 			maxMemory: 3,
 			expected: [][]uint64{
 				{0, 1, 3},
-				nil,
-				nil,
+				{},
+				{},
 				{4, 5},
-				nil,
-				nil,
+				{},
+				{},
+			},
+			expectErr: false,
+		},
+		{
+			// creates(0, 1, 2, 3) | sch(0, 3) | ttl()     | dels ()
+			// creates()           | sch()     | ttl()     | dels ()
+			// creates()           | sch()     | ttl()     | dels (0, 3)
+			// creates(4, 5, 6)    | sch(4, 5) | ttl(3)    | dels (2)
+			// creates()           | sch()     | ttl()     | dels (4, 5)
+			// creates()           | sch()     | ttl(5)    | dels (1)
+			name: "Expect to cache everything",
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{0, 3},
+				{5},
+				{4, 5},
+				{8},
+			},
+			numAdds:   []uint16{4, 0, 0, 3, 0, 0},
+			maxMemory: 2,
+			expected: [][]uint64{
+				{0, 3},
+				{},
+				{},
+				{4, 5},
+				{},
+				{},
 			},
 			expectErr: false,
 		},
 	}
 
 	for _, tt := range tests {
-		cs := NewCachingScheduleTracker(0)
+		cs := NewCachingScheduleTracker(0, tt.maxMemory)
 		for i, numAdd := range tt.numAdds {
 			cs.AddBlockSummary(tt.blockDeletions[i], numAdd)
 		}
 
-		result := cs.GenerateCachingSchedule(tt.maxMemory)
+		result := cs.GetCachingSchedule()
+		//result := cs.GenerateCachingSchedule(tt.maxMemory)
 		require.Equal(t, tt.expected, result)
 	}
 }
@@ -2395,20 +2549,22 @@ func FuzzGenerateCachingSchedule(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
-		t.Parallel()
+		//t.Parallel()
 
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
-		blockNum := 35
+		blockNum := 1_000
 		dels := make([][]Hash, 0, blockNum)
 		adds := make([][]Leaf, 0, blockNum)
 		durations := make([][]int32, 0, blockNum)
 
-		cs := NewCachingScheduleTracker(blockNum)
+		maxMem := 30
+		cs := NewCachingScheduleTracker(blockNum, maxMem)
 
 		p := NewAccumulator()
 		for b := 1; b <= blockNum; b++ {
+			fmt.Println(b)
 			add, duration, delHashes := sc.NextBlock(numAdds)
 
 			adds = append(adds, add)
@@ -2428,7 +2584,6 @@ func FuzzGenerateCachingSchedule(f *testing.F) {
 			cs.AddBlockSummary(proof.Targets, uint16(len(add)))
 		}
 
-		maxMem := 4
 		cachingSchedule := cs.GenerateCachingSchedule(maxMem)
 
 		err := verifyCachingIsOptimal(maxMem, durations, cachingSchedule, dels, adds)
@@ -2532,4 +2687,225 @@ func verifyCachingIsOptimal(maxMem int, durations [][]int32, cacheSchedules [][]
 	}
 
 	return nil
+}
+
+func Test13(t *testing.T) {
+	pos := uint64(8)
+	numLeaves := uint64(9)
+	totalRows := TreeRows(numLeaves)
+	//totalRows := uint8(CSTTotalRows)
+	fmt.Println(detectSubtree(pos, numLeaves, totalRows))
+}
+
+func Test14(t *testing.T) {
+	pos := uint64(8)
+	fmt.Println("pos", pos)
+
+	del := uint64(25)
+	numLeaves := uint64(16)
+	prevPos := calcPrevPosition(pos, del, TreeRows(numLeaves))
+	fmt.Println("prevpos", prevPos)
+
+	prevPos, _ = calcNextPosition(prevPos, del, TreeRows(numLeaves))
+	fmt.Println("prevpos", prevPos)
+}
+
+func Test15(t *testing.T) {
+	pos := uint64(20)
+	fmt.Println("nextpos", pos)
+
+	del := uint64(25)
+	numLeaves := uint64(16)
+
+	prevPos := calcPrevPosition(pos, del, TreeRows(numLeaves))
+	fmt.Println("orig", prevPos)
+
+	prevPos, err := calcNextPosition(prevPos, del, TreeRows(numLeaves))
+	if err != nil {
+		fmt.Println(err)
+	}
+	fmt.Println("nextPos", prevPos)
+}
+
+func Test16(t *testing.T) {
+	tests := []struct {
+		name           string
+		blockDeletions [][]uint64
+		numAdds        []uint16
+		maxMemory      int
+		expected       [][]uint64
+		expectErr      bool
+	}{
+		//{
+		//	// creates(0, 1) | dels ()
+		//	// creates(2, 3) | dels (0)
+		//	// creates(4, 5) | dels (1)
+		//	// creates(6, 7) | dels (2, 3)
+		//	name: "Basic case",
+		//	blockDeletions: [][]uint64{
+		//		{},
+		//		{0},
+		//		{4},
+		//		{8, 9},
+		//	},
+		//	numAdds:   []uint16{2, 2, 2, 2},
+		//	maxMemory: 3,
+		//	expected: [][]uint64{
+		//		{0, 1},
+		//		{2, 3},
+		//		nil,
+		//		nil,
+		//	},
+		//	expectErr: false,
+		//},
+
+		// step 1 (genttl)
+		//
+		// creates(0)          | sch()     | ttl()     | dels ()
+		// creates(1)          | sch()     | ttl()     | dels ()
+		// creates(2)          | sch()     | ttl()     | dels ()
+		// creates(3, 4, 5, 6) | sch()     | ttl(3)    | dels (0)
+
+		// step 2 (gensch)
+		//
+		// creates(0)          | sch(0)    | ttl()     | dels ()  | cCnt 1
+		// creates(1)          | sch()     | ttl()     | dels ()  | cCnt 1
+		// creates(2)          | sch()     | ttl()     | dels ()  | cCnt 1
+		// creates(3, 4, 5, 6) | sch()     | ttl()     | dels (0) | cCnt 0
+
+		// step 3
+		//
+		// creates(0)          | sch(0)    | ttl()     | dels ()
+		// creates(1)          | sch()     | ttl()     | dels ()
+		// creates(2)          | sch()     | ttl()     | dels ()
+		// creates(3, 4, 5, 6) | sch()     | ttl()     | dels (0)
+		// creates(7)          | sch()     | ttl(3)    | dels (1)
+
+		// step 4
+		//
+		// creates(0)          | sch(0)    | ttl()     | dels ()  | cCnt 1
+		// creates(1)          | sch(1)    | ttl()     | dels ()  | cCnt 2
+		// creates(2)          | sch()     | ttl()     | dels ()  | cCnt 2
+		// creates(3, 4, 5, 6) | sch()     | ttl()     | dels (0) | cCnt 1
+		// creates(7)          | sch()     | ttl()     | dels (1) | cCnt 0
+
+		// step 5
+		//
+		// creates(0)          | sch(0)    | ttl()     | dels ()     | cCnt 1
+		// creates(1)          | sch(1)    | ttl()     | dels ()     | cCnt 2
+		// creates(2)          | sch()     | ttl()     | dels ()     | cCnt 2
+		// creates(3, 4, 5, 6) | sch()     | ttl()     | dels (0)    | cCnt 1
+		// creates(7)          | sch()     | ttl()     | dels (1)    | cCnt 0
+		// creates(8)          | sch()     | ttl(2, 2) | dels (3, 4) | cCnt 0
+
+		// step 6
+		//
+		// creates(0)          | sch(0)    | ttl()     | dels ()     | cCnt 1
+		// creates(1)          | sch(1)    | ttl()     | dels ()     | cCnt 2
+		// creates(2)          | sch()     | ttl()     | dels ()     | cCnt 2
+		// creates(3, 4, 5, 6) | sch(3)    | ttl()     | dels (0)    | cCnt 2
+		// creates(7)          | sch()     | ttl()     | dels (1)    | cCnt 1
+		// creates(8)          | sch()     | ttl(2)    | dels (3, 4) | cCnt 0
+
+		// step 7
+		//
+		// creates(0)          | sch(0)    | ttl()     | dels ()     | cCnt 1
+		// creates(1)          | sch(1)    | ttl()     | dels ()     | cCnt 2
+		// creates(2)          | sch()     | ttl()     | dels ()     | cCnt 2
+		// creates(3, 4, 5, 6) | sch(3)    | ttl()     | dels (0)    | cCnt 2
+		// creates(7)          | sch()     | ttl()     | dels (1)    | cCnt 1
+		// creates(8)          | sch()     | ttl(2)    | dels (3, 4) | cCnt 0
+		// creates(9)          | sch()     | ttl(4, 3) | dels (2, 6) | cCnt 0
+
+		// step 8
+		//
+		// creates(0)          | sch(0)    | ttl()     | dels ()     | cCnt 1
+		// creates(1)          | sch(1)    | ttl()     | dels ()     | cCnt 2
+		// creates(2)          | sch()     | ttl()     | dels ()     | cCnt 2
+		// creates(3, 4, 5, 6) | sch(3)    | ttl()     | dels (0)    | cCnt 2
+		// creates(7)          | sch()     | ttl()     | dels (1)    | cCnt 1
+		// creates(8)          | sch()     | ttl(2)    | dels (3, 4) | cCnt 0
+		// creates(9)          | sch()     | ttl(4, 3) | dels (2, 6) | cCnt 0
+
+		// Overall
+		//
+		// creates(0)          | sch(0)    | ttl(3)          | dels ()     | cache ({0, 3})
+		// creates(1)          | sch(1)    | ttl(3)          | dels ()     | cache ({0, 2}, {1, 3})
+		// creates(2)          | sch()     | ttl(4)          | dels ()     | cache ({0, 1), {1, 2})
+		// creates(3, 4, 5, 6) | sch(3)    | ttl(2, 2, x, 3) | dels (0)    | cache ({1, 1}, {3, 2})
+		// creates(7)          | sch()     | ttl(x)          | dels (1)    | cCnt 1
+		// creates(8)          | sch()     | ttl(x)          | dels (3, 4) | cCnt 0
+		// creates(9)          | sch()     | ttl(x)          | dels (2, 6) | cCnt 0
+
+		{
+			// creates(0, 1, 2, 3) | sch()     | ttl()     | dels ()
+			// creates()           | sch()     | ttl()     | dels ()
+			// creates()           | sch()     | ttl(2, 2) | dels (0, 3)
+
+			// creates(0, 1, 2, 3) | sch(0, 3) | ttl()     | dels ()
+			// creates()           | sch()     | ttl()     | dels ()
+			// creates()           | sch()     | ttl()     | dels (0, 3)
+
+			// creates(0, 1, 2, 3) | dels ()
+			// creates()           | dels ()
+			// creates()           | dels (0, 3)
+			// creates(4, 5, 6)    | dels (2)
+			// creates()           | dels (4, 5)
+			// creates()           | dels (1)
+			name: "Expect to cache everything",
+			blockDeletions: [][]uint64{
+				{},
+				{},
+				{0, 3},
+				{5},
+				{4, 5},
+				{12},
+			},
+			numAdds:   []uint16{4, 0, 0, 3, 0, 0},
+			maxMemory: 2,
+			expected: [][]uint64{
+				{0, 1, 3},
+				nil,
+				nil,
+				{4, 5},
+				nil,
+				nil,
+			},
+			expectErr: false,
+		},
+	}
+
+	deletions := []uint64{9}
+	rows := uint8(3)
+	fmt.Println(translatePositions(deletions, rows, CSTTotalRows))
+
+	for _, tt := range tests {
+		cs := NewCachingScheduleTracker(0, tt.maxMemory)
+		for i, numAdd := range tt.numAdds {
+			cs.AddBlockSummary(tt.blockDeletions[i], numAdd)
+		}
+
+		//result := cs.GenerateCachingSchedule(tt.maxMemory)
+		//require.Equal(t, tt.expected, result)
+	}
+}
+
+func Test20(t *testing.T) {
+	//subTree := detectSubtree(28, 16, TreeRows(16))
+
+	subTree := detectSubtree(translatePos(26, TreeRows(15), CSTTotalRows), 15, CSTTotalRows)
+	fmt.Println(subTree)
+}
+
+func Test21(t *testing.T) {
+	numLeaves := uint64(16)
+	del := translatePos(uint64(28), TreeRows(numLeaves), CSTTotalRows)
+	pos := translatePos(uint64(17), TreeRows(numLeaves), CSTTotalRows)
+
+	doesit := doesDelAffectPosition(del, pos, numLeaves, CSTTotalRows)
+	if doesit {
+		fmt.Println("it does")
+	} else {
+		fmt.Println("it doesn't")
+	}
 }

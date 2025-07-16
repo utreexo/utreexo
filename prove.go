@@ -536,6 +536,478 @@ func getNextPos(slice1, slice2 []uint64, slice1Idx, slice2Idx int) (uint64, int,
 	return pos, idx, sibIdx
 }
 
+type insertDelInfo struct {
+	pHash    Hash
+	sibHash  Hash
+	prevHash Hash
+	isLeft   bool
+}
+
+type updateHashInfo struct {
+	curHash  Hash
+	origHash Hash
+	isRoot   bool
+	rootPos  uint64
+}
+
+type UndoInfo struct {
+	insertDelInfos  []*insertDelInfo
+	updateHashInfos []*updateHashInfo
+}
+
+func (u *UndoInfo) addUpdateHashInfo(info updateHashInfo) {
+	u.updateHashInfos = append(u.updateHashInfos, &info)
+	u.insertDelInfos = append(u.insertDelInfos, nil)
+}
+
+func (u *UndoInfo) addInsertDelInfo(info insertDelInfo) {
+	u.insertDelInfos = append(u.insertDelInfos, &info)
+	u.updateHashInfos = append(u.updateHashInfos, nil)
+}
+
+func (u *UndoInfo) pop() (*updateHashInfo, *insertDelInfo) {
+	var uhInfo *updateHashInfo
+	var idInfo *insertDelInfo
+
+	uhInfo, u.updateHashInfos = u.updateHashInfos[len(u.updateHashInfos)-1], u.updateHashInfos[:len(u.updateHashInfos)-1]
+	idInfo, u.insertDelInfos = u.insertDelInfos[len(u.insertDelInfos)-1], u.insertDelInfos[:len(u.insertDelInfos)-1]
+	return uhInfo, idInfo
+}
+
+func (u *UndoInfo) length() int {
+	return len(u.insertDelInfos)
+}
+
+func (u *UndoInfo) String() string {
+	str := ""
+	for i, uhInfo := range u.updateHashInfos {
+		if uhInfo != nil {
+			str += fmt.Sprintf("%v -> %v\n", uhInfo.origHash, uhInfo.curHash)
+		} else {
+			idInfo := u.insertDelInfos[i]
+			str += fmt.Sprintf("%v(isLeft: %v), %v, %v\n",
+				idInfo.prevHash, idInfo.isLeft, idInfo.sibHash, idInfo.pHash)
+		}
+	}
+
+	return str
+}
+
+func initUndoInfo(count int) UndoInfo {
+	u := UndoInfo{}
+	u.insertDelInfos = make([]*insertDelInfo, 0, count)
+	u.updateHashInfos = make([]*updateHashInfo, 0, count)
+
+	return u
+}
+
+type IngestInstruction struct {
+	Hashes []Hash
+	isLeaf []bool
+}
+
+func (ins *IngestInstruction) String() string {
+	str := ""
+	for i, hash := range ins.Hashes {
+		str += fmt.Sprintf("%v (%v)\n", hash, ins.isLeaf[i])
+	}
+
+	return str
+}
+
+type ModifyInstruction struct {
+	Before    []Hash
+	After     []Hash
+	positions []uint64
+}
+
+func (m *ModifyInstruction) String() string {
+	str := ""
+	for i, beforeHash := range m.Before {
+		str += fmt.Sprintf("(%v): %v -> %v\n", m.positions[i], beforeHash, m.After[i])
+	}
+
+	return str
+}
+
+func (m *ModifyInstruction) Detwin(totalRows uint8) {
+	for i := 0; i < len(m.After); i++ {
+		// 1: Check that there's at least 2 elements in the slice left.
+		// 2: Check if the right sibling of the current element matches
+		//    up with the next element in the slice.
+		if i+1 < len(m.positions) && rightSib(m.positions[i]) == m.positions[i+1] {
+			hash, sibHash := m.After[i], m.After[i+1]
+			if hash != empty || sibHash != empty {
+				continue
+			}
+
+			// Remove both of the detwined nodes from the slice.
+			m.positions = append(m.positions[:i], m.positions[i+1:]...)
+			m.Before = append(m.Before[:i], m.Before[i+1:]...)
+			m.After = append(m.After[:i], m.After[i+1:]...)
+
+			m.positions = append(m.positions[:i], m.positions[i+1:]...)
+			m.Before = append(m.Before[:i], m.Before[i+1:]...)
+			m.After = append(m.After[:i], m.After[i+1:]...)
+
+			// Decrement one since the next element we should
+			// look at is at the same index because the slice decreased
+			// in length by one.
+			i--
+		}
+	}
+}
+
+func (m *ModifyInstruction) RemoveParents(totalRows uint8) {
+	for i := 0; i < len(m.After); i++ {
+		hash, pos := m.After[i], m.positions[i]
+		if hash != empty {
+			continue
+		}
+
+		parent := Parent(pos, totalRows)
+
+		idx := slices.Index(m.positions, parent)
+		if idx == -1 {
+			continue
+		}
+
+		// Remove both of the detwined nodes from the slice.
+		m.positions = append(m.positions[:idx], m.positions[idx+1:]...)
+		m.Before = append(m.Before[:idx], m.Before[idx+1:]...)
+		m.After = append(m.After[:idx], m.After[idx+1:]...)
+
+		// Decrement one since the next element we should
+		// look at is at the same index because the slice decreased
+		// in length by one.
+		i--
+	}
+}
+
+func calculateHashes3(numLeaves uint64, delHashes []Hash, proof Proof) (
+	ModifyInstruction, UndoInfo, []Hash, error) {
+
+	totalRows := TreeRows(numLeaves)
+
+	// Where all the parent hashes we've calculated in a given row will go to.
+	nextProves := hashAndPos{make([]uint64, 0, len(proof.Targets)), make([]Hash, 0, len(proof.Targets))}
+	nextProvesIdx := 0
+
+	// Where all the parent hashes we've calculated in a given row will go to.
+	nextHashes := hashAndPos{make([]uint64, 0, len(proof.Targets)), make([]Hash, 0, len(proof.Targets))}
+
+	undoInfo := initUndoInfo(len(proof.Proof))
+
+	toProve := toHashAndPos(proof.Targets, delHashes)
+	toProveIdx := 0
+
+	// Where all the root hashes that we've calculated will go to.
+	calculatedRootHashes := make([]Hash, 0, numRoots(numLeaves))
+
+	// Separate index for the hashes in the passed in proof.
+	proofHashIdx := 0
+	for row := uint8(0); row <= totalRows; {
+		// Grab the next position and hash to process.
+		var proveHash Hash
+		var modifyHash Hash
+		provePos, idx, sibIdx := getNextPos(toProve.positions, nextProves.positions, toProveIdx, nextProvesIdx)
+		if idx == -1 {
+			break
+		}
+		if idx == 0 {
+			proveHash = toProve.hashes[toProveIdx]
+			modifyHash = empty
+			toProveIdx++
+		} else {
+			proveHash = nextProves.hashes[nextProvesIdx]
+			modifyHash = nextHashes.hashes[nextProvesIdx]
+			nextProvesIdx++
+		}
+
+		// Keep incrementing the row if the current position is greater
+		// than the max position on this row.
+		//
+		// Cannot error out here because this loop already checks that
+		// row is lower than totalRows.
+		maxPos, _ := maxPositionAtRow(row, totalRows, numLeaves)
+		for provePos > maxPos {
+			row++
+			maxPos, _ = maxPositionAtRow(row, totalRows, numLeaves)
+		}
+
+		// This means we hashed all the way to the top of this subtree.
+		if isRootPositionOnRow(provePos, numLeaves, row) {
+			calculatedRootHashes = append(calculatedRootHashes, proveHash)
+
+			//fmt.Println("next root", modifyHash, proveHash, provePos)
+			if modifyHash == empty {
+				undoInfo.addUpdateHashInfo(
+					updateHashInfo{
+						origHash: proveHash,
+						curHash:  modifyHash,
+						isRoot:   true,
+						rootPos:  provePos,
+					})
+			}
+			continue
+		}
+
+		var sibHash Hash
+		var modifySibHash Hash
+		sibPresent := sibIdx != -1
+		if sibPresent {
+			if sibIdx == 0 {
+				sibHash = toProve.hashes[toProveIdx]
+				modifySibHash = empty
+				toProveIdx++
+			} else {
+				sibHash = nextProves.hashes[nextProvesIdx]
+				modifySibHash = nextHashes.hashes[nextProvesIdx]
+				nextProvesIdx++
+			}
+		} else {
+			if len(proof.Proof) <= proofHashIdx {
+				return ModifyInstruction{}, UndoInfo{}, nil,
+					fmt.Errorf("invalid proof. Proof too short.")
+			}
+
+			// If the next prove isn't the sibling of this prove, we fetch
+			// the next proof hash to calculate the parent.
+			sibHash = proof.Proof[proofHashIdx]
+			modifySibHash = sibHash
+			proofHashIdx++
+		}
+
+		// Calculate the next hash.
+		nextHash := getNextHash(provePos, proveHash, sibHash)
+		nextProves.Append(Parent(provePos, totalRows), nextHash)
+
+		modifyNextHash := getNextHash(provePos, modifyHash, modifySibHash)
+		nextHashes.Append(Parent(provePos, totalRows), modifyNextHash)
+
+		// Write undo info data.  If only one of the child is empty, this means its sibling
+		// is moving up.
+		if (modifyHash == empty) != (modifySibHash == empty) {
+			if modifyHash == empty {
+				undoInfo.addInsertDelInfo(
+					insertDelInfo{
+						pHash:    nextHash,
+						sibHash:  modifySibHash,
+						prevHash: proveHash,
+						isLeft:   isLeftNiece(provePos),
+					})
+			} else {
+				undoInfo.addInsertDelInfo(
+					insertDelInfo{
+						pHash:    nextHash,
+						sibHash:  modifyHash,
+						prevHash: sibHash,
+						isLeft:   isLeftNiece(sibling(provePos)),
+					})
+			}
+		} else if (modifyHash != empty) && (modifySibHash != empty) {
+			// If neither are empty, then it's an existing node getting its hash updated.
+			undoInfo.addUpdateHashInfo(
+				updateHashInfo{
+					origHash: nextHash,
+					curHash:  modifyNextHash,
+				})
+		}
+	}
+
+	nextProves = mergeSortedHashAndPos(nextProves, toProve)
+	for i := range toProve.hashes {
+		toProve.hashes[i] = empty
+	}
+	nextHashes = mergeSortedHashAndPos(nextHashes, toProve)
+
+	m := ModifyInstruction{
+		Before:    nextProves.hashes,
+		After:     nextHashes.hashes,
+		positions: nextProves.positions,
+	}
+
+	return m, undoInfo, calculatedRootHashes, nil
+}
+
+func calculateHashes2(numLeaves uint64, delHashes []Hash, proof Proof) (
+	IngestInstruction, ModifyInstruction, UndoInfo, []Hash, error) {
+
+	totalRows := TreeRows(numLeaves)
+
+	ingestIns := IngestInstruction{Hashes: make([]Hash, 0, len(delHashes)*2)}
+
+	// Where all the parent hashes we've calculated in a given row will go to.
+	nextProves := hashAndPos{make([]uint64, 0, len(proof.Targets)), make([]Hash, 0, len(proof.Targets))}
+	nextProvesIdx := 0
+
+	// Where all the parent hashes we've calculated in a given row will go to.
+	nextHashes := hashAndPos{make([]uint64, 0, len(proof.Targets)), make([]Hash, 0, len(proof.Targets))}
+
+	undoInfo := initUndoInfo(len(proof.Proof))
+
+	toProve := toHashAndPos(proof.Targets, delHashes)
+	toProveIdx := 0
+	// Where all the root hashes that we've calculated will go to.
+	calculatedRootHashes := make([]Hash, 0, numRoots(numLeaves))
+
+	ingestInsParentToIndexMap := make(map[Hash]int, len(delHashes))
+
+	// Separate index for the hashes in the passed in proof.
+	proofHashIdx := 0
+	for row := uint8(0); row <= totalRows; {
+		// Grab the next position and hash to process.
+		var proveHash Hash
+		var modifyHash Hash
+		provePos, idx, sibIdx := getNextPos(toProve.positions, nextProves.positions, toProveIdx, nextProvesIdx)
+		if idx == -1 {
+			break
+		}
+		if idx == 0 {
+			proveHash = toProve.hashes[toProveIdx]
+			modifyHash = empty
+			toProveIdx++
+		} else {
+			proveHash = nextProves.hashes[nextProvesIdx]
+			modifyHash = nextHashes.hashes[nextProvesIdx]
+			nextProvesIdx++
+		}
+
+		// Keep incrementing the row if the current position is greater
+		// than the max position on this row.
+		//
+		// Cannot error out here because this loop already checks that
+		// row is lower than totalRows.
+		maxPos, _ := maxPositionAtRow(row, totalRows, numLeaves)
+		for provePos > maxPos {
+			row++
+			maxPos, _ = maxPositionAtRow(row, totalRows, numLeaves)
+		}
+
+		// This means we hashed all the way to the top of this subtree.
+		if isRootPositionOnRow(provePos, numLeaves, row) {
+			calculatedRootHashes = append(calculatedRootHashes, proveHash)
+
+			//fmt.Println("next root", modifyHash, proveHash, provePos)
+			if modifyHash == empty {
+				undoInfo.addUpdateHashInfo(
+					updateHashInfo{
+						origHash: proveHash,
+						curHash:  modifyHash,
+						isRoot:   true,
+						rootPos:  provePos,
+					})
+			}
+			continue
+		}
+
+		var sibHash Hash
+		var modifySibHash Hash
+		sibPresent := sibIdx != -1
+		if sibPresent {
+			if sibIdx == 0 {
+				sibHash = toProve.hashes[toProveIdx]
+				modifySibHash = empty
+				toProveIdx++
+			} else {
+				sibHash = nextProves.hashes[nextProvesIdx]
+				modifySibHash = nextHashes.hashes[nextProvesIdx]
+				nextProvesIdx++
+			}
+		} else {
+			if len(proof.Proof) <= proofHashIdx {
+				return IngestInstruction{}, ModifyInstruction{}, UndoInfo{}, nil,
+					fmt.Errorf("invalid proof. Proof too short.")
+			}
+
+			// If the next prove isn't the sibling of this prove, we fetch
+			// the next proof hash to calculate the parent.
+			sibHash = proof.Proof[proofHashIdx]
+			modifySibHash = sibHash
+			proofHashIdx++
+		}
+
+		// Calculate the next hash.
+		nextHash := getNextHash(provePos, proveHash, sibHash)
+		nextProves.Append(Parent(provePos, totalRows), nextHash)
+
+		insI, IFound := ingestInsParentToIndexMap[proveHash]
+		insJ, JFound := ingestInsParentToIndexMap[sibHash]
+
+		if IFound {
+			ingestIns.Hashes[insI] = sibHash
+			delete(ingestInsParentToIndexMap, proveHash)
+		}
+		if JFound {
+			ingestIns.Hashes[insJ] = proveHash
+			delete(ingestInsParentToIndexMap, sibHash)
+		}
+
+		// Add to the ingest instructions
+		if isLeftNiece(provePos) {
+			ingestIns.isLeaf = append(ingestIns.isLeaf, idx == 0, sibIdx == 0, false)
+			ingestIns.Hashes = append(ingestIns.Hashes, proveHash, sibHash, nextHash)
+			ingestInsParentToIndexMap[nextHash] = len(ingestIns.Hashes) - 1
+		} else {
+			ingestIns.isLeaf = append(ingestIns.isLeaf, sibIdx == 0, idx == 0, false)
+			ingestIns.Hashes = append(ingestIns.Hashes, sibHash, proveHash, nextHash)
+			ingestInsParentToIndexMap[nextHash] = len(ingestIns.Hashes) - 1
+		}
+
+		modifyNextHash := getNextHash(provePos, modifyHash, modifySibHash)
+		nextHashes.Append(Parent(provePos, totalRows), modifyNextHash)
+
+		// Write undo info data.  If only one of the child is empty, this means its sibling
+		// is moving up.
+		if (modifyHash == empty) != (modifySibHash == empty) {
+			if modifyHash == empty {
+				//fmt.Printf("0 removed %v, sib %v, parent %v\n", proveHash, modifySibHash, nextHash)
+
+				undoInfo.addInsertDelInfo(
+					insertDelInfo{
+						pHash:    nextHash,
+						sibHash:  modifySibHash,
+						prevHash: proveHash,
+						isLeft:   isLeftNiece(provePos),
+					})
+			} else {
+				//fmt.Printf("1 removed %v, sib %v, parent %v\n", sibHash, modifyHash, nextHash)
+
+				undoInfo.addInsertDelInfo(
+					insertDelInfo{
+						pHash:    nextHash,
+						sibHash:  modifyHash,
+						prevHash: sibHash,
+						isLeft:   isLeftNiece(sibling(provePos)),
+					})
+			}
+		} else if (modifyHash != empty) && (modifySibHash != empty) {
+			// If neither are empty, then it's an existing node getting its hash updated.
+			//fmt.Printf("%v -> %v\n", nextHash, modifyNextHash)
+
+			undoInfo.addUpdateHashInfo(
+				updateHashInfo{
+					origHash: nextHash,
+					curHash:  modifyNextHash,
+				})
+		}
+	}
+
+	nextProves = mergeSortedHashAndPos(nextProves, toProve)
+	for i := range toProve.hashes {
+		toProve.hashes[i] = empty
+	}
+	nextHashes = mergeSortedHashAndPos(nextHashes, toProve)
+
+	m := ModifyInstruction{
+		Before:    nextProves.hashes,
+		After:     nextHashes.hashes,
+		positions: nextProves.positions,
+	}
+
+	return ingestIns, m, undoInfo, calculatedRootHashes, nil
+}
+
 // calculateHashes returns the hashes of the roots and all the nodes that
 // were used to calculate the roots. Passing nil delHashes will return the
 // hashes of the roots and the nodes used to calculate the roots after the
@@ -1419,7 +1891,7 @@ func (p *Proof) updateProofAdd(adds, cachedDelHashes []Hash, remembers []uint32,
 
 // rootInfoToDestroy returns the positions of the root informations that get destroyed by
 // the additions.
-func rootInfoToDestroy(totalRows uint8, numAdds, numLeaves uint64, origRoots []rootInfo) []uint64 {
+func rootInfoToDestroy(totalRows uint8, numAdds, numLeaves uint64, origRoots []rootInfo) [][]uint64 {
 	// Check if there are any empty roots. If there are not, return early.
 	exists := false
 	for _, root := range origRoots {
@@ -1429,20 +1901,20 @@ func rootInfoToDestroy(totalRows uint8, numAdds, numLeaves uint64, origRoots []r
 		}
 	}
 	if !exists {
-		return []uint64{}
+		return nil
 	}
 
 	roots := make([]rootInfo, len(origRoots))
 	copy(roots, origRoots)
 
-	deleted := make([]uint64, 0, TreeRows(numLeaves+numAdds))
+	deleted := make([][]uint64, numAdds)
 	for i := uint64(0); i < numAdds; i++ {
 		for h := uint8(0); (numLeaves>>h)&1 == 1; h++ {
 			root := roots[len(roots)-1]
 			roots = roots[:len(roots)-1]
 			if root.isZombie {
 				rootPos := rootPosition(numLeaves, h, totalRows)
-				deleted = append(deleted, rootPos)
+				deleted[i] = append(deleted[i], rootPos)
 			}
 		}
 		// Just adding a non-zero value to the slice.
@@ -1474,15 +1946,15 @@ func addRootInfo(totalRows uint8, origRoots []rootInfo, numAdds uint16, numLeave
 }
 
 // delRootInfo modifies the root infos as if deletions on the passed in targets have happened.
-func delRootInfo(totalRows uint8, origRoots []rootInfo, targets []uint64) []rootInfo {
-	if len(targets) == 0 {
+func delRootInfo(origRoots []rootInfo, detwinedTargets []uint64) []rootInfo {
+	if len(detwinedTargets) == 0 {
 		return origRoots
 	}
 
-	deTwinedPositions := copySortedFunc(targets, uint64Cmp)
-	deTwinedPositions = deTwin(deTwinedPositions, totalRows)
+	//deTwinedPositions := copySortedFunc(targets, uint64Cmp)
+	//deTwinedPositions = deTwin(deTwinedPositions, totalRows)
 
-	for _, pos := range deTwinedPositions {
+	for _, pos := range detwinedTargets {
 		for i, root := range origRoots {
 			if root.pos == pos {
 				origRoots[i].isZombie = true
@@ -1515,8 +1987,13 @@ type CachingScheduleTracker struct {
 	ttls      [][]ttlInfo
 	numAdds   []uint16
 	numLeaves []uint64
-	toDestroy [][]uint64
+	toDestroy [][][]uint64
 	roots     [][]rootInfo
+
+	cacheCount        []int
+	cachedCountFilled int
+	schedule          [][]ttlInfo
+	maxMemory         int
 }
 
 // getRoots returns the translated root positions that the desired height.
@@ -1543,9 +2020,11 @@ func (cs *CachingScheduleTracker) getToDestroy(height int32) []uint64 {
 	}
 	idx := height - 1
 
-	toDestroy := make([]uint64, len(cs.toDestroy[idx]))
-	for i, pos := range cs.toDestroy[idx] {
-		toDestroy[i] = translatePos(pos, CSTTotalRows, TreeRows(cs.numLeaves[idx]))
+	toDestroy := make([]uint64, 0, len(cs.toDestroy[idx]))
+	for _, slice := range cs.toDestroy[idx] {
+		for _, pos := range slice {
+			toDestroy = append(toDestroy, translatePos(pos, CSTTotalRows, TreeRows(cs.numLeaves[idx])))
+		}
 	}
 
 	return toDestroy
@@ -1575,27 +2054,40 @@ func (cs *CachingScheduleTracker) AddBlockSummary(deletions []uint64, numAdds ui
 		cs.deletions = append(cs.deletions, deletions)
 		cs.numAdds = append(cs.numAdds, numAdds)
 
+		cs.ttls = append(cs.ttls, make([]ttlInfo, 0, numAdds))
+		cs.schedule = append(cs.schedule, make([]ttlInfo, 0, numAdds))
+		cs.cacheCount = append(cs.cacheCount, 0)
+
 		newRoots, newNumLeaves := addRootInfo(CSTTotalRows, []rootInfo{}, numAdds, 0)
-		cs.toDestroy = append(cs.toDestroy, []uint64{})
+		cs.toDestroy = append(cs.toDestroy, nil)
 		cs.roots = append(cs.roots, newRoots)
 		cs.numLeaves = append(cs.numLeaves, newNumLeaves)
 
 		return
 	}
 
-	// Grab the current state.
+	cs.ttls = append(cs.ttls, make([]ttlInfo, 0, numAdds))
+	cs.schedule = append(cs.schedule, make([]ttlInfo, 0, numAdds))
+	cs.cacheCount = append(cs.cacheCount, 0)
+	//fmt.Println("cs.ttls", len(cs.ttls))
+
 	numLeaves := cs.numLeaves[len(cs.numLeaves)-1]
+	rows := TreeRows(numLeaves)
+	translatedDels := translatePositions(deletions, rows, CSTTotalRows)
+	slices.Sort(translatedDels)
+	ttls := cs.incrementalGenTTLsForDels(translatedDels, len(cs.deletions))
+
+	// Grab the current state.
 	roots := make([]rootInfo, len(cs.roots[len(cs.roots)-1]))
 	copy(roots, cs.roots[len(cs.roots)-1])
 
 	// Keep track of the block summary information.
-	rows := TreeRows(numLeaves)
-	translatedDels := translatePositions(deletions, rows, CSTTotalRows)
+	translatedDels = deTwin(translatedDels, CSTTotalRows)
 	cs.deletions = append(cs.deletions, translatedDels)
 	cs.numAdds = append(cs.numAdds, numAdds)
 
 	// Perform root info modification.
-	roots = delRootInfo(CSTTotalRows, roots, translatedDels)
+	roots = delRootInfo(roots, translatedDels)
 	toDestroy := rootInfoToDestroy(CSTTotalRows, uint64(numAdds), numLeaves, roots)
 	newRoots, newNumLeaves := addRootInfo(CSTTotalRows, roots, numAdds, numLeaves)
 
@@ -1603,55 +2095,191 @@ func (cs *CachingScheduleTracker) AddBlockSummary(deletions []uint64, numAdds ui
 	cs.toDestroy = append(cs.toDestroy, toDestroy)
 	cs.roots = append(cs.roots, newRoots)
 	cs.numLeaves = append(cs.numLeaves, newNumLeaves)
+
+	cs.incrementalCachingSchedule(len(cs.deletions)-1, ttls)
 }
 
 // NewCachingScheduleTracker returns an initialized caching schedule tracker.
 // Passed in blockCount is used to pre-allocate the underlying slices.
-func NewCachingScheduleTracker(blockCount int) CachingScheduleTracker {
+// Passed in maxMemory is used to set the maximum deletions the tracker will cache.
+func NewCachingScheduleTracker(blockCount, maxMemory int) CachingScheduleTracker {
 	return CachingScheduleTracker{
-		deletions: make([][]uint64, 0, blockCount),
-		numAdds:   make([]uint16, 0, blockCount),
-		numLeaves: make([]uint64, 0, blockCount),
-		roots:     make([][]rootInfo, 0, blockCount),
-		toDestroy: make([][]uint64, 0, blockCount),
+		deletions:  make([][]uint64, 0, blockCount),
+		numAdds:    make([]uint16, 0, blockCount),
+		ttls:       make([][]ttlInfo, 0, blockCount),
+		cacheCount: make([]int, 0, blockCount),
+		numLeaves:  make([]uint64, 0, blockCount),
+		roots:      make([][]rootInfo, 0, blockCount),
+		toDestroy:  make([][][]uint64, 0, blockCount),
+		maxMemory:  maxMemory,
 	}
 }
+
+//type indexedValue struct {
+//	index int
+//	value uint64
+//}
+//
+//func getChildren(totalRows uint8, positions []uint64) []uint64 {
+//	children := make([]uint64, 0, len(positions)*2)
+//	for _, pos := range positions {
+//		children = append(children, LeftChild(pos, totalRows), RightChild(pos, totalRows))
+//	}
+//
+//	return children
+//}
+//
+//func moveDownRow(totalRows uint8, delPos uint64, operate []uint64, positions []uint64) []uint64 {
+//	for _, pos := range operate {
+//		for i, val := range positions {
+//			if val == pos {
+//				positions[i] = calcPrevPosition(
+//					val, delPos, totalRows)
+//			}
+//		}
+//	}
+//
+//	return positions
+//}
+//
+//func moveDownDescendants(totalRows uint8, deleted uint64, positions []uint64) []uint64 {
+//	sibPos := Parent(deleted, totalRows)
+//
+//	operate := []uint64{sibPos}
+//	row := DetectRow(sibPos, totalRows)
+//	for h := int(row); h >= 0; h-- {
+//		positions = moveDownRow(totalRows, deleted, operate, positions)
+//		for _, op := range operate {
+//			fmt.Println("op", op, translatePos(op, 63, 3))
+//			idx := slices.Index(positions, op)
+//			if idx != -1 {
+//				positions[idx] = calcPrevPosition(positions[idx], deleted, totalRows)
+//			}
+//		}
+//		operate = getChildren(totalRows, operate)
+//	}
+//
+//	return positions
+//}
+
+//// undoDel returns the previous positions of the passed in origPositions.
+////
+//// NOTE: the returned origPositions keeps the original ordering.
+//func undoDel(totalRows uint8, positions, deleted []uint64, numLeaves uint64) []uint64 {
+//	// Nothing to do if there's no deletions.
+//	if len(deleted) == 0 || len(positions) == 0 {
+//		return positions
+//	}
+//
+//	// Copy, sort, and detwin.
+//	deTwinedPositions := copySortedFunc(deleted, uint64Cmp)
+//	deTwinedPositions = deTwin(deTwinedPositions, totalRows)
+//
+//	//indexedValues := make([]indexedValue, len(positions))
+//	//for i, pos := range positions {
+//	//	indexedValues[i] = indexedValue{i, pos}
+//	//}
+//	//sort.Slice(indexedValues, func(i, j int) bool {
+//	//	return indexedValues[i].value > indexedValues[j].value
+//	//})
+//	//fmt.Println(indexedValues)
+//
+//	// Loop through all the targets and look for the previous sibling.
+//	// If that sibling is included in the proof, include the target into
+//	// the proof and remap the positions accordingly.
+//	for i := len(deTwinedPositions) - 1; i >= 0; i-- {
+//		deTwinedPos := deTwinedPositions[i]
+//		if isRootPositionTotalRows(deTwinedPos, numLeaves, totalRows) {
+//			continue
+//		}
+//
+//		fmt.Println("deleted", deTwinedPos, translatePos(deTwinedPos, 63, TreeRows(numLeaves)))
+//		positions = moveDownDescendants(totalRows, deTwinedPos, positions)
+//	}
+//
+//	//for _, val := range indexedValues {
+//	//	positions[val.index] = val.value
+//	//}
+//
+//	return positions
+//}
 
 // undoDel returns the previous positions of the passed in origPositions.
 //
 // NOTE: the returned origPositions keeps the original ordering.
-func undoDel(totalRows uint8, positions, deleted []uint64, numLeaves uint64) []uint64 {
+func undoDel(totalRows uint8, positions, detwinedDeletions []uint64, numLeaves uint64) []uint64 {
 	// Nothing to do if there's no deletions.
-	if len(deleted) == 0 || len(positions) == 0 {
+	if len(detwinedDeletions) == 0 || len(positions) == 0 {
 		return positions
 	}
 
-	// Copy, sort, and detwin.
-	deTwinedPositions := copySortedFunc(deleted, uint64Cmp)
-	deTwinedPositions = deTwin(deTwinedPositions, totalRows)
+	forestRows := TreeRows(numLeaves)
 
 	// Loop through all the targets and look for the previous sibling.
 	// If that sibling is included in the proof, include the target into
 	// the proof and remap the positions accordingly.
-	for i := len(deTwinedPositions) - 1; i >= 0; i-- {
-		deTwinedPos := deTwinedPositions[i]
+	for i := len(detwinedDeletions) - 1; i >= 0; i-- {
+		deTwinedPos := detwinedDeletions[i]
 
 		// When a target is deleted, its sibling moves up to the parent
 		// position. Therefore the current sibling will be in the parent
 		// position of the deleted target if it exists.
 		sibPos := Parent(deTwinedPos, totalRows)
+		higherRow := DetectRow(sibPos, totalRows)
+
+		//for j := idx; j >= 0; j-- {
+		//	pos := positions[j]
+		//	lowerRow := DetectRow(pos, totalRows)
+
+		//	if sibPos == pos {
+		//		positions[j] = calcPrevPosition(pos, deTwinedPos, totalRows)
+		//		continue
+		//	}
+
+		//	if lowerRow >= higherRow {
+		//		idx = j
+		//		continue
+		//	}
+
+		//	parentMask := (uint64(2) << uint64(forestRows-higherRow)) - 1
+		//	parentBits := (parentMask & sibPos) << uint64(higherRow)
+
+		//	bitsToCheck := (uint64(2) << uint64(forestRows-higherRow)) - 1
+		//	bitsToCheck <<= higherRow
+
+		//	descendantBits := (bitsToCheck & pos)
+		//	if descendantBits == parentBits {
+		//		positions[j] = calcPrevPosition(pos, deTwinedPos, totalRows)
+		//	}
+		//}
+
+		//slices.Sort(positions)
 
 		for j, pos := range positions {
-			// If these positions are in different subtrees, continue.
-			subtree, _, _, _ := DetectOffset(translatePos(deTwinedPos, totalRows, TreeRows(numLeaves)), numLeaves)
-			subtree1, _, _, _ := DetectOffset(translatePos(pos, totalRows, TreeRows(numLeaves)), numLeaves)
-			if subtree != subtree1 {
+			if sibPos == pos {
+				positions[j] = calcPrevPosition(pos, deTwinedPos, totalRows)
 				continue
 			}
 
-			if isAncestor(sibPos, pos, totalRows) || sibPos == pos {
+			lowerRow := DetectRow(pos, totalRows)
+			if higherRow < lowerRow {
+				continue
+			}
+
+			parentMask := (uint64(2) << uint64(forestRows-higherRow)) - 1
+			parentBits := (parentMask & sibPos) << uint64(higherRow)
+
+			bitsToCheck := (uint64(2) << uint64(forestRows-higherRow)) - 1
+			bitsToCheck <<= higherRow
+
+			descendantBits := (bitsToCheck & pos)
+			if descendantBits == parentBits {
 				positions[j] = calcPrevPosition(pos, deTwinedPos, totalRows)
 			}
+
+			//if doesDelAffectPosition(sibPos, pos, numLeaves, totalRows) {
+			//	positions[j] = calcPrevPosition(pos, deTwinedPos, totalRows)
+			//}
 		}
 	}
 
@@ -1662,77 +2290,142 @@ func undoDel(totalRows uint8, positions, deleted []uint64, numLeaves uint64) []u
 // before the delPos was removed.
 //
 // NOTE: the returned positions keeps the original ordering.
-func moveDownPositions(totalRows uint8, position, delPos uint64, cached []uint64) []uint64 {
+func moveDownPositions(totalRows uint8, position, delPos, numLeaves uint64, cached []uint64) []uint64 {
 	for i, pos := range cached {
-		cached[i] = moveDownPosition(totalRows, position, delPos, pos)
+		if doesDelAffectPosition(position, pos, numLeaves, totalRows) {
+			cached[i] = calcPrevPosition(pos, delPos, totalRows)
+		}
 	}
 
 	return cached
 }
 
-// moveDownPosition moves a single position down.
-func moveDownPosition(totalRows uint8, position, delPos uint64, pos uint64) uint64 {
-	if pos == position || isAncestor(position, pos, totalRows) {
-		return calcPrevPosition(pos, delPos, totalRows)
-	}
+func undoSingleAdd(totalRows uint8, positions []uint64, toDestroy []uint64, numLeaves uint64) (
+	[]uint64, int) {
 
-	return pos
-}
-
-// undoSingleAdd undoes a single addition. The returned values are the positions reverted
-// back before the leaf was added, the toDestroy minus the roots that were place back in,
-// and the index of the leaf in positions if it exists.
-//
-// NOTE: the returned positions keeps the original ordering.
-func undoSingleAdd(totalRows uint8, positions, toDestroy []uint64, numLeaves uint64) (
-	[]uint64, []uint64, int) {
 	removedPosIdx := -1
-
-	// We work our way down from the root that's being removed.
-	pos := numLeaves - 1
-	subtree, _, _, _ := DetectOffset(pos, numLeaves)
-	subtreeRows := subtreeRow(numLeaves, subtree)
-	pos = rootPosition(numLeaves, subtreeRows, totalRows)
-
-	for row := int(subtreeRows); row >= 0; row-- {
-		// Check if we have an empty root to place back in.
-		possibleRoot := LeftChild(pos, totalRows)
-		index := slices.Index(toDestroy, possibleRoot)
-		if index != -1 {
-			toDestroy = slices.Delete(toDestroy, index, index+1)
-			positions = moveDownPositions(totalRows, pos, possibleRoot, positions)
-		}
-
-		// Check if this leaf is in the positions.
-		if row == 0 {
-			index = slices.Index(positions, pos)
-			if index != -1 {
-				removedPosIdx = index
-			}
-		}
-
-		pos = RightChild(pos, totalRows)
+	for _, destroy := range toDestroy {
+		positions = moveDownPositions(totalRows, Parent(destroy, totalRows), destroy, numLeaves, positions)
 	}
 
-	return positions, toDestroy, removedPosIdx
+	index := slices.Index(positions, numLeaves-1)
+	if index != -1 {
+		removedPosIdx = index
+	}
+
+	return positions, removedPosIdx
 }
+
+//// undoSingleAdd undoes a single addition. The returned values are the positions reverted
+//// back before the leaf was added, the toDestroy minus the roots that were place back in,
+//// and the index of the leaf in positions if it exists.
+////
+//// NOTE: the returned positions keeps the original ordering.
+//func undoSingleAdd(totalRows uint8, positions, toDestroy []uint64, numLeaves uint64) (
+//	[]uint64, []uint64, int) {
+//
+//	pos := numLeaves - 1
+//	removedPosIdx := -1
+//	if len(toDestroy) == 0 {
+//		index := slices.Index(positions, pos)
+//		if index != -1 {
+//			removedPosIdx = index
+//		}
+//		return positions, toDestroy, removedPosIdx
+//	}
+//
+//	// We work our way down from the root that's being removed.
+//	subtree := detectSubtree(pos, numLeaves, totalRows)
+//	subtreeRows := subtreeRow(numLeaves, uint8(subtree))
+//	pos = rootPosition(numLeaves, subtreeRows, totalRows)
+//
+//	for row := int(subtreeRows); row >= 0; row-- {
+//		// Check if we have an empty root to place back in.
+//		possibleRoot := LeftChild(pos, totalRows)
+//		index := slices.Index(toDestroy, possibleRoot)
+//		if index != -1 {
+//			toDestroy = slices.Delete(toDestroy, index, index+1)
+//			positions = moveDownPositions(totalRows, pos, possibleRoot, numLeaves, positions)
+//
+//			if len(toDestroy) == 0 {
+//				row = 0
+//				pos = numLeaves - 1
+//			}
+//		}
+//
+//		// Check if this leaf is in the positions.
+//		if row == 0 {
+//			index = slices.Index(positions, pos)
+//			if index != -1 {
+//				removedPosIdx = index
+//			}
+//		}
+//
+//		pos = RightChild(pos, totalRows)
+//	}
+//
+//	return positions, toDestroy, removedPosIdx
+//}
+
+//// undoAdd reverts the numAdds amount of additions. The returned values are the positions reverted
+//// back before the leaves were added, all the indexes of the positions that were created.
+////
+//// NOTE: the returned positions keeps the original ordering.
+//func undoAdd(totalRows uint8, positions, origToDestroy []uint64, numAdds uint16, numLeaves uint64) ([]uint64, []int) {
+//	// Don't modify the passed in toDestroy.
+//	toDestroy := copySortedFunc(origToDestroy, uint64Cmp)
+//
+//	created := make([]int, 0, len(positions))
+//	for i := 0; i < int(numAdds); i++ {
+//		var idx int
+//		positions, toDestroy, idx = undoSingleAdd(totalRows, positions, toDestroy, numLeaves)
+//		if idx != -1 {
+//			created = append(created, idx)
+//		}
+//		numLeaves--
+//	}
+//
+//	return positions, created
+//}
 
 // undoAdd reverts the numAdds amount of additions. The returned values are the positions reverted
 // back before the leaves were added, all the indexes of the positions that were created.
 //
 // NOTE: the returned positions keeps the original ordering.
-func undoAdd(totalRows uint8, positions, origToDestroy []uint64, numAdds uint16, numLeaves uint64) ([]uint64, []int) {
-	// Don't modify the passed in toDestroy.
-	toDestroy := copySortedFunc(origToDestroy, uint64Cmp)
+func undoAdd(totalRows uint8, positions []uint64, origToDestroy [][]uint64, numAdds uint16, numLeaves uint64) ([]uint64, []uint64) {
+	created := make([]uint64, 0, len(positions))
 
-	created := make([]int, 0, len(positions))
-	for i := 0; i < int(numAdds); i++ {
-		var idx int
-		positions, toDestroy, idx = undoSingleAdd(totalRows, positions, toDestroy, numLeaves)
-		if idx != -1 {
-			created = append(created, idx)
+	if len(origToDestroy) == 0 {
+		for i := 0; i < int(numAdds); i++ {
+			numLeaves--
+			idx := slices.Index(positions, numLeaves)
+			if idx != -1 {
+				created = append(created, positions[idx])
+				positions = slices.Delete(positions, idx, idx+1)
+			}
 		}
+
+		return positions, created
+	}
+
+	for i := int(numAdds) - 1; i >= 0; i-- {
+		for _, destroy := range origToDestroy[i] {
+			positions = moveDownPositions(totalRows, Parent(destroy, totalRows), destroy, numLeaves, positions)
+			slices.Sort(positions)
+		}
+
 		numLeaves--
+		for i, pos := range positions {
+			if pos == numLeaves {
+				created = append(created, positions[i])
+				positions = slices.Delete(positions, i, i+1)
+				break
+			}
+
+			if pos > numLeaves-1 {
+				break
+			}
+		}
 	}
 
 	return positions, created
@@ -1743,24 +2436,79 @@ func undoAdd(totalRows uint8, positions, origToDestroy []uint64, numAdds uint16,
 // positions that were created in the block.
 //
 // NOTE: the returned positions keeps the original ordering.
-func getPrevPos(totalRows uint8, cached, deleted, toDestroy []uint64, numAdds uint16, numLeaves uint64) ([]uint64, []int) {
-	var created []int
+func getPrevPos(totalRows uint8, cached, deleted []uint64, toDestroy [][]uint64, numAdds uint16, numLeaves uint64) ([]uint64, []uint64) {
+	var created []uint64
 	cached, created = undoAdd(totalRows, cached, toDestroy, numAdds, numLeaves)
 	cached = undoDel(totalRows, cached, deleted, numLeaves-uint64(numAdds))
 	return cached, created
 }
 
-// genTTLs creates the ttl values for the deletions. Only the numAdds that we know is spent
-// will have ttls.
-func (cs *CachingScheduleTracker) genTTLs() {
-	// Init ttls.
-	cs.ttls = make([][]ttlInfo, len(cs.numAdds))
+//func (cs *CachingScheduleTracker) genTTLsForDels(dels []uint64, index int) {
+//	cached := make([]uint64, len(dels))
+//	copy(cached, dels)
+//
+//	xy := make([][2]int, 0, len(cached))
+//	for i := range cached {
+//		xy = append(xy, [2]int{index, i})
+//	}
+//
+//	for i := len(cs.deletions) - 1; i >= 0; i-- {
+//		deletions := cs.deletions[i]
+//		numAdds := cs.numAdds[i]
+//		numLeaves := cs.numLeaves[i]
+//		toDestroy := cs.toDestroy[i]
+//
+//		// Revert the cached positions by a block.
+//		var created []uint64
+//		cached, created = getPrevPos(
+//			CSTTotalRows, cached, deletions, toDestroy, numAdds, numLeaves)
+//
+//		// Set ttls. We go backwards since the undo undoes the bigger positions first.
+//		for j := len(createdIdxs) - 1; j >= 0; j-- {
+//			idx := createdIdxs[j]
+//
+//			cords := xy[idx]
+//
+//			deletedAt := cords[0]
+//			createdAt := i
+//			ttl := deletedAt - createdAt
+//
+//			//fmt.Printf("created %v at %v\n", cached[idx], i)
+//
+//			cs.ttls[i] = append(cs.ttls[i], ttlInfo{
+//				pos: cached[idx],
+//				ttl: ttl,
+//			})
+//
+//			sort.Slice(cs.ttls[i], func(a, b int) bool {
+//				return cs.ttls[i][a].pos < cs.ttls[i][b].pos
+//			})
+//		}
+//
+//		// Remove the created positions from the cache.
+//		slices.Sort(createdIdxs)
+//		for i, idx := range createdIdxs {
+//			useIdx := idx - i
+//			cached = slices.Delete(cached, useIdx, useIdx+1)
+//			xy = slices.Delete(xy, useIdx, useIdx+1)
+//		}
+//
+//		if len(cached) == 0 {
+//			break
+//		}
+//	}
+//}
 
-	// cached contains the deletions that we'll be reverting each block until
-	// we get to the position that it started off as. xy cointains the corresponding
-	// xy values for each of the position in the cached slice.
-	cached := make([]uint64, 0, len(cs.deletions))
-	xy := make([][2]int, 0, len(cs.deletions))
+func (cs *CachingScheduleTracker) incrementalGenTTLsForDels(dels []uint64, index int) []ttlInfo {
+	// Copy to avoid modifying the original.
+	cached := make([]uint64, len(dels))
+	copy(cached, dels)
+
+	// For the deletions that wasn't cached. If we don't do better than
+	// these, we can give up figuring out the ttls.
+	sawNotCachedTTLs := make([]ttlInfo, 0, len(dels))
+
+	ttls := make([]ttlInfo, 0, len(dels))
 
 	for i := len(cs.deletions) - 1; i >= 0; i-- {
 		deletions := cs.deletions[i]
@@ -1768,41 +2516,246 @@ func (cs *CachingScheduleTracker) genTTLs() {
 		numLeaves := cs.numLeaves[i]
 		toDestroy := cs.toDestroy[i]
 
+		currentTTL := index - i
+
+		// Range through the currently saved not cached ttls.
+		for _, notCachedTTL := range sawNotCachedTTLs {
+			// If something wasn't cached and it has a lower or equal TTL, then
+			// none of the current dels are gonna be cached. Quit now to save
+			// on compute.
+			if notCachedTTL.ttl <= currentTTL {
+				return ttls
+			}
+		}
+
+		// Range through the ttls for the deletions that happened here.
+		for _, notCachedTTL := range cs.ttls[i] {
+			// If something wasn't cached and it has a lower or equal TTL, then
+			// none of the current dels are gonna be cached. Quit now to save
+			// on compute.
+			if notCachedTTL.ttl <= currentTTL {
+				return ttls
+			}
+
+			sawNotCachedTTLs = append(sawNotCachedTTLs, notCachedTTL)
+		}
+
+		if i < cs.cachedCountFilled {
+			return ttls
+		}
+
+		// Give up if this can't be cached because the cache is already full.
+		if cs.cacheCount[i] >= cs.maxMemory {
+			cs.cachedCountFilled = i
+			return ttls
+		}
+
 		// Revert the cached positions by a block.
-		var createdIdxs []int
-		cached, createdIdxs = getPrevPos(
+		var created []uint64
+		cached, created = getPrevPos(
 			CSTTotalRows, cached, deletions, toDestroy, numAdds, numLeaves)
 
-		// Set ttls. We go backwards since the undo undoes the bigger positions first.
-		for j := len(createdIdxs) - 1; j >= 0; j-- {
-			idx := createdIdxs[j]
-
-			cords := xy[idx]
-
-			deletedAt := cords[0]
+		// Set ttls.
+		for _, create := range created {
+			deletedAt := index
 			createdAt := i
 			ttl := deletedAt - createdAt
 
-			cs.ttls[i] = append(cs.ttls[i], ttlInfo{
-				pos: cached[idx],
+			ttls = append(ttls, ttlInfo{
+				pos: create,
 				ttl: ttl,
 			})
 		}
 
-		// Remove the created positions from the cache.
-		slices.Sort(createdIdxs)
-		for i, idx := range createdIdxs {
-			useIdx := idx - i
-			cached = slices.Delete(cached, useIdx, useIdx+1)
-			xy = slices.Delete(xy, useIdx, useIdx+1)
-		}
-
-		// Append new deletions.
-		cached = append(cached, deletions...)
-		for j := range deletions {
-			xy = append(xy, [2]int{i, j})
+		if len(cached) == 0 {
+			break
 		}
 	}
+
+	sort.Slice(ttls, func(a, b int) bool {
+		return ttls[a].pos < ttls[b].pos
+	})
+	return ttls
+}
+
+func (cs *CachingScheduleTracker) cacheCountOk(start, end int) bool {
+	if end < cs.cachedCountFilled {
+		return false
+	}
+
+	for i := start; i < end; i++ {
+		if cs.cacheCount[i] >= cs.maxMemory {
+			cs.cachedCountFilled = i
+			return false
+		}
+	}
+
+	return true
+}
+
+func (cs *CachingScheduleTracker) incrementalCachingSchedule(index int, ttls []ttlInfo) {
+	sort.Slice(ttls, func(i, j int) bool {
+		return ttls[i].ttl < ttls[j].ttl
+	})
+
+	for i := 0; i < len(ttls); i++ {
+		ttl := ttls[i]
+
+		createBlock := index - ttl.ttl
+		if cs.cacheCountOk(createBlock, index) {
+			cs.schedule[createBlock] = append(cs.schedule[createBlock], ttl)
+			sort.Slice(cs.schedule[createBlock], func(i, j int) bool {
+				return cs.schedule[createBlock][i].pos < cs.schedule[createBlock][j].pos
+			})
+
+			for j := createBlock; j < index; j++ {
+				cs.cacheCount[j] += 1
+				if cs.cacheCount[j] >= cs.maxMemory {
+					cs.cachedCountFilled = j
+				}
+			}
+
+			ttls = slices.Delete(ttls, i, i+1)
+			i--
+		} else {
+			cs.ttls[index] = append(cs.ttls[index], ttl)
+			sort.Slice(cs.ttls[index], func(a, b int) bool {
+				return cs.ttls[index][a].pos < cs.ttls[index][b].pos
+			})
+		}
+	}
+}
+
+//func (cs *CachingScheduleTracker) genTTLsForDels(dels []uint64, index int) {
+//	cached := make([]uint64, len(dels))
+//	copy(cached, dels)
+//
+//	xy := make([][2]int, 0, len(cached))
+//	for i := range cached {
+//		xy = append(xy, [2]int{index, i})
+//	}
+//
+//	for i := len(cs.deletions) - 1; i >= 0; i-- {
+//		deletions := cs.deletions[i]
+//		numAdds := cs.numAdds[i]
+//		numLeaves := cs.numLeaves[i]
+//		toDestroy := cs.toDestroy[i]
+//
+//		// Revert the cached positions by a block.
+//		var createdIdxs []int
+//		cached, createdIdxs = getPrevPos(
+//			CSTTotalRows, cached, deletions, toDestroy, numAdds, numLeaves)
+//
+//		// Set ttls. We go backwards since the undo undoes the bigger positions first.
+//		for j := len(createdIdxs) - 1; j >= 0; j-- {
+//			idx := createdIdxs[j]
+//
+//			cords := xy[idx]
+//
+//			deletedAt := cords[0]
+//			createdAt := i
+//			ttl := deletedAt - createdAt
+//
+//			//fmt.Printf("created %v at %v\n", cached[idx], i)
+//
+//			cs.ttls[i] = append(cs.ttls[i], ttlInfo{
+//				pos: cached[idx],
+//				ttl: ttl,
+//			})
+//
+//			sort.Slice(cs.ttls[i], func(a, b int) bool {
+//				return cs.ttls[i][a].pos < cs.ttls[i][b].pos
+//			})
+//		}
+//
+//		// Remove the created positions from the cache.
+//		slices.Sort(createdIdxs)
+//		for i, idx := range createdIdxs {
+//			useIdx := idx - i
+//			cached = slices.Delete(cached, useIdx, useIdx+1)
+//			xy = slices.Delete(xy, useIdx, useIdx+1)
+//		}
+//
+//		if len(cached) == 0 {
+//			break
+//		}
+//	}
+//}
+
+//// genTTLs creates the ttl values for the deletions. Only the numAdds that we know is spent
+//// will have ttls.
+//func (cs *CachingScheduleTracker) genTTLs() {
+//	// Init ttls.
+//	cs.ttls = make([][]ttlInfo, len(cs.numAdds))
+//
+//	// cached contains the deletions that we'll be reverting each block until
+//	// we get to the position that it started off as. xy cointains the corresponding
+//	// xy values for each of the position in the cached slice.
+//	cached := make([]uint64, 0, len(cs.deletions))
+//	xy := make([][2]int, 0, len(cs.deletions))
+//
+//	for i := len(cs.deletions) - 1; i >= 0; i-- {
+//		//fmt.Println("genttl on block", i)
+//		deletions := cs.deletions[i]
+//		numAdds := cs.numAdds[i]
+//		numLeaves := cs.numLeaves[i]
+//		toDestroy := cs.toDestroy[i]
+//
+//		// Revert the cached positions by a block.
+//		var createdIdxs []int
+//		cached, createdIdxs = getPrevPos(
+//			CSTTotalRows, cached, deletions, toDestroy, numAdds, numLeaves)
+//
+//		// Set ttls. We go backwards since the undo undoes the bigger positions first.
+//		for j := len(createdIdxs) - 1; j >= 0; j-- {
+//			idx := createdIdxs[j]
+//
+//			cords := xy[idx]
+//
+//			deletedAt := cords[0]
+//			createdAt := i
+//			ttl := deletedAt - createdAt
+//
+//			cs.ttls[i] = append(cs.ttls[i], ttlInfo{
+//				pos: cached[idx],
+//				ttl: ttl,
+//			})
+//		}
+//
+//		// Remove the created positions from the cache.
+//		slices.Sort(createdIdxs)
+//		for i, idx := range createdIdxs {
+//			useIdx := idx - i
+//			cached = slices.Delete(cached, useIdx, useIdx+1)
+//			xy = slices.Delete(xy, useIdx, useIdx+1)
+//		}
+//
+//		// Append new deletions.
+//		cached = append(cached, deletions...)
+//		for j := range deletions {
+//			xy = append(xy, [2]int{i, j})
+//		}
+//	}
+//}
+
+func (c *CachingScheduleTracker) TTLString() string {
+	var sb strings.Builder
+	sb.WriteString("CachingScheduleTracker:\n")
+
+	// Write ttls
+	sb.WriteString("  ttls:\n")
+	for i, ttl := range c.ttls {
+		sb.WriteString(fmt.Sprintf("    [%d]: %v\n",
+			i, ttl))
+	}
+
+	sb.WriteString("  cache schedules:\n")
+	for i, sch := range c.schedule {
+		sb.WriteString(fmt.Sprintf("    [%d]: %v\n",
+			i, sch))
+	}
+
+	return sb.String()
 }
 
 // String returns the CachingScheduleTracker as a formatting string.
@@ -1825,6 +2778,12 @@ func (c *CachingScheduleTracker) String() string {
 			i, ttl))
 	}
 
+	sb.WriteString("  cache schedules:\n")
+	for i, sch := range c.schedule {
+		sb.WriteString(fmt.Sprintf("    [%d]: %v\n",
+			i, sch))
+	}
+
 	// Write numAdds
 	sb.WriteString(fmt.Sprintf("  numAdds: %v\n", c.numAdds))
 
@@ -1833,9 +2792,19 @@ func (c *CachingScheduleTracker) String() string {
 
 	// Write toDestroy
 	sb.WriteString("  toDestroy:\n")
-	for i, td := range c.toDestroy {
-		sb.WriteString(fmt.Sprintf("    [%d]: %v (translated %v)\n",
-			i, td, translatePositions(td, CSTTotalRows, TreeRows(c.numLeaves[i]))))
+	//for i, td := range c.toDestroy {
+	//	sb.WriteString(fmt.Sprintf("    [%d]: %v (translated %v)\n",
+	//		i, td, translatePositions(td, CSTTotalRows, TreeRows(c.numLeaves[i]))))
+	//}
+
+	for i, tds := range c.toDestroy {
+		sb.WriteString(fmt.Sprintf("    %d:\n", i))
+		for _, td := range tds {
+			sb.WriteString(fmt.Sprintf("    [%d]: %v (translated %v)\n",
+				i, td, translatePositions(td, CSTTotalRows, TreeRows(c.numLeaves[i]))))
+			sb.WriteString("]\n")
+		}
+		sb.WriteString("\n")
 	}
 
 	// Write roots
@@ -1856,19 +2825,30 @@ func (c *CachingScheduleTracker) String() string {
 	return sb.String()
 }
 
+func (cs *CachingScheduleTracker) GetCachingSchedule() [][]uint64 {
+	schedule := make([][]uint64, len(cs.schedule))
+	for i, s := range cs.schedule {
+		uint64S := make([]uint64, 0, len(s))
+		for _, elem := range s {
+			uint64S = append(uint64S, elem.pos)
+		}
+		schedule[i] = uint64S
+	}
+
+	return schedule
+}
+
 // GenerateCachingSchedule returns the positions that the client should cache to have an optimal
 // caching for the passed in maxMemory.
 //
 // NOTE: maxMemory represents how many targets that the user would like to cache.
 func (cs *CachingScheduleTracker) GenerateCachingSchedule(maxMemory int) [][]uint64 {
-	// Generate the ttls first.
-	cs.genTTLs()
-
-	cachingSch := make([][]uint64, len(cs.numAdds))
+	cachingSch := make([][]ttlInfo, len(cs.numAdds))
 
 	cache := make([]ttlInfo, 0, maxMemory)
 	createHeights := make(map[uint64]int, maxMemory)
 	for i, ttls := range cs.ttls {
+		//fmt.Println("gencaching schedule on block", i)
 
 		// Check the cache for spent positions.
 		for j := 0; j < len(cache); j++ {
@@ -1880,8 +2860,8 @@ func (cs *CachingScheduleTracker) GenerateCachingSchedule(maxMemory int) [][]uin
 			if cache[j].ttl == 0 {
 				height := createHeights[cache[j].pos]
 				delete(createHeights, cache[j].pos)
-				cachingSch[height] = append(cachingSch[height], cache[j].pos)
-				slices.Sort(cachingSch[height])
+				cachingSch[height] = append(cachingSch[height], cache[j])
+				//slices.Sort(cachingSch[height])
 
 				cache = slices.Delete(cache, j, j+1)
 				j--
@@ -1915,5 +2895,6 @@ func (cs *CachingScheduleTracker) GenerateCachingSchedule(maxMemory int) [][]uin
 		}
 	}
 
-	return cachingSch
+	//return cachingSch
+	return nil
 }

@@ -206,6 +206,16 @@ func isAncestor(higherPos, lowerPos uint64, forestRows uint8) bool {
 		return false
 	}
 
+	//ancestor := lowerPos
+	//for i := lowerRow; i < higherRow; i++ {
+	//	ancestor = Parent(ancestor, forestRows)
+	//	if isRootPositionTotalRows(ancestor, numLeaves, forestRows) {
+	//		return false
+	//	}
+	//}
+
+	//return ancestor == higherPos
+
 	// Return false if we error out or the calculated ancestor doesn't
 	// match the higherPos.
 	ancestor, err := ParentMany(lowerPos, higherRow-lowerRow, forestRows)
@@ -320,6 +330,42 @@ func calcPrevPosition(position, delPos uint64, forestRows uint8) uint64 {
 	return lowerBits
 }
 
+func doesDelAffectPosition(del, position, numLeaves uint64, totalRows uint8) bool {
+	if del == position {
+		return true
+	}
+
+	lowerRow := DetectRow(position, totalRows)
+	higherRow := DetectRow(del, totalRows)
+
+	// Prevent underflows by checking that the higherRow is not less
+	// than the lowerRow.
+	if higherRow < lowerRow {
+		return false
+	}
+
+	forestRows := TreeRows(numLeaves)
+
+	parentMask := (uint64(2) << uint64(forestRows-higherRow)) - 1
+	parentBits := (parentMask & del) << uint64(higherRow)
+
+	//fmt.Printf("del %v\n", del)
+	//fmt.Printf("parentMask %b\n", parentMask)
+	//fmt.Printf("parentBits %b\n", parentBits)
+
+	//descendentMask := (uint64(2) << uint64(forestRows)) - 1
+	//fmt.Printf("descendentMask %b\n", descendentMask)
+
+	bitsToCheck := (uint64(2) << uint64(forestRows-higherRow)) - 1
+	bitsToCheck <<= higherRow
+
+	descendantBits := (bitsToCheck & position)
+	//fmt.Printf("bitsToCheck %b\n", bitsToCheck)
+	//fmt.Printf("descendantBits %b\n", descendantBits)
+
+	return descendantBits == parentBits
+}
+
 // DetectRow finds the current row of your node given the position
 // and the total forest rows.
 func DetectRow(position uint64, forestRows uint8) uint8 {
@@ -343,6 +389,44 @@ func getLowestRoot(numLeaves uint64, totalRows uint8) uint8 {
 		}
 	}
 	return row
+}
+
+//func detectSubtree(position uint64, numLeaves uint64, totalRows uint8) int {
+//	for h := uint8(0); ; h++ {
+//		(numLeaves>>h)&1 == 1
+//	}
+//}
+
+func detectSubtree(position uint64, numLeaves uint64, totalRows uint8) int {
+	row := DetectRow(position, totalRows)
+	startPos := startPositionAtRow(row, totalRows)
+	//fmt.Println("startPos", startPos)
+
+	subtree := 0
+	for h := int(totalRows); h >= int(row); h-- {
+		// Pass if there's no subtree here.
+		if (numLeaves>>h)&1 == 0 {
+			continue
+		}
+
+		//if int(row) > h {
+		//	subtree = -1
+		//	break
+		//}
+
+		startPos += 1 << (h - int(row))
+		if position < startPos {
+			break
+		}
+
+		//fmt.Println("startPos", startPos)
+		//fmt.Printf("subtree %v can hold %v leaves\n", subtree, 1<<h)
+		//fmt.Printf("subtree %v can hold %v nodes at row %v\n", subtree, 1<<(h-int(row)), row)
+
+		subtree++
+	}
+
+	return subtree
 }
 
 // DetectOffset takes a node position and number of leaves in forest, and
@@ -637,7 +721,7 @@ func String(ts ToString) string {
 	fh := ts.GetTreeRows()
 
 	// The accumulator should be less than 6 rows.
-	if fh > 6 {
+	if fh > 7 {
 		s := fmt.Sprintf("Can't print %d leaves. roots:\n", ts.GetNumLeaves())
 		roots := ts.GetRoots()
 		for i, r := range roots {
