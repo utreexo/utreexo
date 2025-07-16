@@ -338,11 +338,11 @@ func (p *Pollard) deleteFromMap(delHashes []Hash) {
 //
 // Ex: If the caller is trying to go back to block 9, the numAdds, dels, and delHashes should be
 // the adds and dels that happened to get to block 10. prevRoots should be the roots at block 9.
-func (p *Pollard) Undo(numAdds uint64, proof Proof, delHashes []Hash, prevRoots []Hash) error {
-	for i := 0; i < int(numAdds); i++ {
+func (p *Pollard) Undo(prevAdds []Hash, proof Proof, delHashes []Hash, prevRoots []Hash) error {
+	for i := 0; i < len(prevAdds); i++ {
 		p.undoSingleAdd()
 	}
-	err := p.undoEmptyRoots(numAdds, proof.Targets, prevRoots)
+	err := p.undoEmptyRoots(uint64(len(prevAdds)), proof.Targets, prevRoots)
 	if err != nil {
 		return err
 	}

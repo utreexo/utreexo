@@ -231,7 +231,7 @@ func testUndo(t *testing.T, utreexo UtreexoTest) {
 		}
 
 		// Perform the undo.
-		err = utreexo.Undo(uint64(len(test.modifyAdds)), modifyProof, test.modifyDels, beforeRoots)
+		err = utreexo.Undo(test.modifyAdds, modifyProof, test.modifyDels, beforeRoots)
 		if err != nil {
 			err := fmt.Errorf("TestUndo failed %d: error %v"+
 				"\nbefore:\n\n%s"+
@@ -915,7 +915,11 @@ func fuzzUndo(t *testing.T, p UtreexoTest, startLeaves uint8, modifyAdds uint8, 
 	afterStr := p.String()
 	afterMap := p.nodeMapToString()
 
-	err = p.Undo(uint64(modifyAdds), bp, dels, beforeRoots)
+	modifyAddHashes := make([]Hash, len(modifyLeaves))
+	for i, modifyAdd := range modifyLeaves {
+		modifyAddHashes[i] = modifyAdd.Hash
+	}
+	err = p.Undo(modifyAddHashes, bp, dels, beforeRoots)
 	if err != nil {
 		startHashes := make([]Hash, len(leaves))
 		for i, leaf := range leaves {
@@ -1182,7 +1186,11 @@ func fuzzUndoChain(t *testing.T, p UtreexoTest, blockCount, numAdds, duration ui
 				copy(copyProof.Targets, undoData[i].proof.Targets)
 				copy(copyProof.Proof, undoData[i].proof.Proof)
 
-				err := p.Undo(uint64(len(undoData[i].adds)), copyProof, undoData[i].hashes, undoData[i].prevRoots)
+				addHashes := make([]Hash, len(undoData[i].adds))
+				for j, add := range undoData[i].adds {
+					addHashes[j] = add.Hash
+				}
+				err := p.Undo(addHashes, copyProof, undoData[i].hashes, undoData[i].prevRoots)
 				if err != nil {
 					t.Fatal(err)
 				}
