@@ -992,11 +992,11 @@ func (m *MapPollard) UndoWithTTLs(numAdds uint64, createIndex []uint32,
 
 // Undo will undo the last modify. The numAdds, proof, hashes, MUST be the data from the previous modify.
 // The origPrevRoots MUST be the roots that this Undo will go back to.
-func (m *MapPollard) Undo(numAdds uint64, proof Proof, hashes, origPrevRoots []Hash) error {
+func (m *MapPollard) Undo(adds []Hash, proof Proof, hashes, origPrevRoots []Hash) error {
 	m.rwLock.Lock()
 	defer m.rwLock.Unlock()
 
-	err := m.undoAdd(numAdds, proof.Targets, origPrevRoots)
+	err := m.undoAdd(uint64(len(adds)), proof.Targets, origPrevRoots)
 	if err != nil {
 		return fmt.Errorf("Undo errored while undoing added leaves. %v", err)
 	}

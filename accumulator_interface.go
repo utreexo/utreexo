@@ -16,7 +16,7 @@ type Utreexo interface {
 	Verify(delHashes []Hash, proof Proof, remember bool) error
 
 	// Undo reverts a modification done by Modify.
-	Undo(numAdds uint64, proof Proof, delHashes, prevRoots []Hash) error
+	Undo(prevAdds []Hash, proof Proof, delHashes, prevRoots []Hash) error
 
 	// GetRoots returns the current roots of the accumulator.
 	GetRoots() []Hash
