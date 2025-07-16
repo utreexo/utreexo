@@ -164,6 +164,13 @@ func testUndo(t *testing.T, utreexo UtreexoTest) {
 			[]Hash{{8}},
 			nil,
 		},
+		{
+			[]Hash{{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}, {9}, {10}, {11}, {12}, {13}, {14}, {15}},
+			[]Hash{{9}, {10}, {11}, {12}},
+
+			[]Hash{{16}},
+			[]Hash{},
+		},
 	}
 
 	for i, test := range tests {
