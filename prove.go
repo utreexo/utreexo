@@ -653,6 +653,284 @@ func generateModifyIns(numLeaves uint64, delHashes []Hash, proof Proof) (
 	return m, nil
 }
 
+// insertDelInfo includes all the information to re-insert a leaf that was deleted.
+type insertDelInfo struct {
+	pHash    Hash
+	sibHash  Hash
+	prevHash Hash
+	isLeft   bool
+}
+
+// updateHashInfo includes all the information to revert a hash that was updated due
+// to a leaf being deleted.
+type updateHashInfo struct {
+	curHash  Hash
+	origHash Hash
+	isRoot   bool
+	rootPos  uint64
+}
+
+// undoInfo includes information to undo the deletion that took place during an accumulator
+// modification.
+type undoInfo struct {
+	insertDelInfos  []*insertDelInfo
+	updateHashInfos []*updateHashInfo
+}
+
+// appendUpdateHashInfo appends the passed in updateHashInfo.
+func (u *undoInfo) appendUpdateHashInfo(info updateHashInfo) {
+	u.updateHashInfos = append(u.updateHashInfos, &info)
+	u.insertDelInfos = append(u.insertDelInfos, nil)
+}
+
+// appendInsertDelInfo appends the passed in insertDelInfo.
+func (u *undoInfo) appendInsertDelInfo(info insertDelInfo) {
+	u.insertDelInfos = append(u.insertDelInfos, &info)
+	u.updateHashInfos = append(u.updateHashInfos, nil)
+}
+
+// pop pops the last elements of the undoInfo.
+func (u *undoInfo) pop() (*updateHashInfo, *insertDelInfo) {
+	var uhInfo *updateHashInfo
+	var idInfo *insertDelInfo
+
+	uhInfo, u.updateHashInfos = u.updateHashInfos[len(u.updateHashInfos)-1], u.updateHashInfos[:len(u.updateHashInfos)-1]
+	idInfo, u.insertDelInfos = u.insertDelInfos[len(u.insertDelInfos)-1], u.insertDelInfos[:len(u.insertDelInfos)-1]
+	return uhInfo, idInfo
+}
+
+// length returns the total length fo the undoInfo.
+func (u *undoInfo) length() int {
+	return len(u.insertDelInfos)
+}
+
+// String returns the undoInfo as a human-readable string.
+func (u *undoInfo) String() string {
+	str := ""
+	for i, uhInfo := range u.updateHashInfos {
+		if uhInfo != nil {
+			str += fmt.Sprintf("%v -> %v\n", uhInfo.origHash, uhInfo.curHash)
+		} else {
+			idInfo := u.insertDelInfos[i]
+			str += fmt.Sprintf("%v(isLeft: %v), %v, %v\n",
+				idInfo.prevHash, idInfo.isLeft, idInfo.sibHash, idInfo.pHash)
+		}
+	}
+
+	return str
+}
+
+// initUndoInfo returns an initialized undoInfo that has the insertDel and updateHash informations
+// pre-allocated.
+func initUndoInfo(count int) undoInfo {
+	u := undoInfo{}
+	u.insertDelInfos = make([]*insertDelInfo, 0, count)
+	u.updateHashInfos = make([]*updateHashInfo, 0, count)
+
+	return u
+}
+
+// ingestInstruction is a series of hashes that are ordered by [leftSib, rightSib, Aunt]. The slice
+// of hashes in the ingestInstruction is always len(Hashes)%3 == 0 and the last element is always a root.
+type ingestInstruction struct {
+	Hashes []Hash
+	isLeaf []bool
+}
+
+// String returns the ingestInstruction as a human-readable string.
+func (ins *ingestInstruction) String() string {
+	str := ""
+	for i, hash := range ins.Hashes {
+		str += fmt.Sprintf("%v (%v)\n", hash, ins.isLeaf[i])
+	}
+
+	return str
+}
+
+// generateIngestAndUndoInfo utilizes the same algorithm as calculateHashes but it returns ingestInstruction,
+// undoInfo, and the roots calculated from the proof.
+func generateIngestAndUndoInfo(numLeaves uint64, delHashes []Hash, proof Proof) (
+	ingestInstruction, undoInfo, []Hash, error) {
+
+	totalRows := TreeRows(numLeaves)
+
+	ingestIns := ingestInstruction{Hashes: make([]Hash, 0, len(delHashes)*2)}
+
+	// Where all the parent hashes we've calculated in a given row will go to.
+	nextProves := hashAndPos{make([]uint64, 0, len(proof.Targets)), make([]Hash, 0, len(proof.Targets))}
+	nextProvesIdx := 0
+
+	// Where all the parent hashes we've calculated in a given row will go to.
+	nextHashes := hashAndPos{make([]uint64, 0, len(proof.Targets)), make([]Hash, 0, len(proof.Targets))}
+
+	undoInf := initUndoInfo(len(proof.Proof))
+
+	toProve := toHashAndPos(proof.Targets, delHashes)
+	toProveIdx := 0
+	// Where all the root hashes that we've calculated will go to.
+	calculatedRootHashes := make([]Hash, 0, numRoots(numLeaves))
+
+	ingestInsParentToIndexMap := make(map[Hash]int, len(delHashes))
+
+	// Separate index for the hashes in the passed in proof.
+	proofHashIdx := 0
+	for row := uint8(0); row <= totalRows; {
+		// Grab the next position and hash to process.
+		var proveHash Hash
+		var modifyHash Hash
+		provePos, idx, sibIdx := getNextPos(toProve.positions, nextProves.positions, toProveIdx, nextProvesIdx)
+		if idx == -1 {
+			break
+		}
+		if idx == 0 {
+			proveHash = toProve.hashes[toProveIdx]
+			modifyHash = empty
+			toProveIdx++
+		} else {
+			proveHash = nextProves.hashes[nextProvesIdx]
+			modifyHash = nextHashes.hashes[nextProvesIdx]
+			nextProvesIdx++
+		}
+
+		// Keep incrementing the row if the current position is greater
+		// than the max position on this row.
+		//
+		// Cannot error out here because this loop already checks that
+		// row is lower than totalRows.
+		maxPos, _ := maxPositionAtRow(row, totalRows, numLeaves)
+		for provePos > maxPos {
+			row++
+			maxPos, _ = maxPositionAtRow(row, totalRows, numLeaves)
+		}
+
+		// This means we hashed all the way to the top of this subtree.
+		if isRootPositionOnRow(provePos, numLeaves, row) {
+			calculatedRootHashes = append(calculatedRootHashes, proveHash)
+
+			if modifyHash == empty {
+				undoInf.appendUpdateHashInfo(
+					updateHashInfo{
+						origHash: proveHash,
+						curHash:  modifyHash,
+						isRoot:   true,
+						rootPos:  provePos,
+					})
+			}
+			continue
+		}
+
+		var sibHash Hash
+		var modifySibHash Hash
+		sibPresent := sibIdx != -1
+		if sibPresent {
+			if sibIdx == 0 {
+				sibHash = toProve.hashes[toProveIdx]
+				modifySibHash = empty
+				toProveIdx++
+			} else {
+				sibHash = nextProves.hashes[nextProvesIdx]
+				modifySibHash = nextHashes.hashes[nextProvesIdx]
+				nextProvesIdx++
+			}
+		} else {
+			if len(proof.Proof) <= proofHashIdx {
+				return ingestInstruction{}, undoInfo{}, nil,
+					fmt.Errorf("invalid proof. Proof too short.")
+			}
+
+			// If the next prove isn't the sibling of this prove, we fetch
+			// the next proof hash to calculate the parent.
+			sibHash = proof.Proof[proofHashIdx]
+			modifySibHash = sibHash
+			proofHashIdx++
+		}
+
+		// Calculate the next hash.
+		nextHash := getNextHash(provePos, proveHash, sibHash)
+		nextProves.Append(Parent(provePos, totalRows), nextHash)
+
+		// Look for the hash in the map. If it exists, we'll replace it with its
+		// sibling as the ingest function expects the aunt hash, not the parent hash.
+		insI, IFound := ingestInsParentToIndexMap[proveHash]
+		insJ, JFound := ingestInsParentToIndexMap[sibHash]
+		if IFound {
+			ingestIns.Hashes[insI] = sibHash
+			delete(ingestInsParentToIndexMap, proveHash)
+		}
+		if JFound {
+			ingestIns.Hashes[insJ] = proveHash
+			delete(ingestInsParentToIndexMap, sibHash)
+		}
+
+		// Add to the ingest instructions
+		if isLeftNiece(provePos) {
+			ingestIns.isLeaf = append(ingestIns.isLeaf, idx == 0, sibIdx == 0, false)
+			ingestIns.Hashes = append(ingestIns.Hashes, proveHash, sibHash, nextHash)
+
+			// The nextHash we just appended in the parent of proveHash and sibHash.
+			// But since the leaves point to their aunts instead, ingest function needs
+			// to know the hash of the aunt not the parent.
+			//
+			// By holding onto the parent hash and the index in the ingest info, we can
+			// later fetch for the parent and replace it with the aunt when we're calculating
+			// hashes for the next row.
+			ingestInsParentToIndexMap[nextHash] = len(ingestIns.Hashes) - 1
+		} else {
+			ingestIns.isLeaf = append(ingestIns.isLeaf, sibIdx == 0, idx == 0, false)
+			ingestIns.Hashes = append(ingestIns.Hashes, sibHash, proveHash, nextHash)
+
+			// The nextHash we just appended in the parent of sibHash and proveHash.
+			// But since the leaves point to their aunts instead, ingest function needs
+			// to know the hash of the aunt not the parent.
+			//
+			// By holding onto the parent hash and the index in the ingest info, we can
+			// later fetch for the parent and replace it with the aunt when we're calculating
+			// hashes for the next row.
+			ingestInsParentToIndexMap[nextHash] = len(ingestIns.Hashes) - 1
+		}
+
+		modifyNextHash := getNextHash(provePos, modifyHash, modifySibHash)
+		nextHashes.Append(Parent(provePos, totalRows), modifyNextHash)
+
+		// Write undo info data.  If only one of the child is empty, this means its sibling
+		// is moving up.
+		if (modifyHash == empty) != (modifySibHash == empty) {
+			if modifyHash == empty {
+				undoInf.appendInsertDelInfo(
+					insertDelInfo{
+						pHash:    nextHash,
+						sibHash:  modifySibHash,
+						prevHash: proveHash,
+						isLeft:   isLeftNiece(provePos),
+					})
+			} else {
+				undoInf.appendInsertDelInfo(
+					insertDelInfo{
+						pHash:    nextHash,
+						sibHash:  modifyHash,
+						prevHash: sibHash,
+						isLeft:   isLeftNiece(sibling(provePos)),
+					})
+			}
+		} else if (modifyHash != empty) && (modifySibHash != empty) {
+			// If neither are empty, then it's an existing node getting its hash updated.
+			undoInf.appendUpdateHashInfo(
+				updateHashInfo{
+					origHash: nextHash,
+					curHash:  modifyNextHash,
+				})
+		}
+	}
+
+	nextProves = mergeSortedHashAndPos(nextProves, toProve)
+	for i := range toProve.hashes {
+		toProve.hashes[i] = empty
+	}
+	nextHashes = mergeSortedHashAndPos(nextHashes, toProve)
+
+	return ingestIns, undoInf, calculatedRootHashes, nil
+}
+
 // calculateHashes returns the hashes of the roots and all the nodes that
 // were used to calculate the roots. Passing nil delHashes will return the
 // hashes of the roots and the nodes used to calculate the roots after the
