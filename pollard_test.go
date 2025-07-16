@@ -8,6 +8,8 @@ import (
 	"math/rand"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // Assert that Pollard implements the UtreexoTest interface.
@@ -710,7 +712,14 @@ func fuzzModify(t *testing.T, p UtreexoTest, startLeaves, modifyAdds, delCount u
 	beforeCached := p.cachedMapToString()
 
 	modifyLeaves, _, _ := getAddsAndDels(uint32(p.GetNumLeaves()), modifyAdds, 0)
-	err = p.Modify(modifyLeaves, delHashes, Proof{Targets: delTargets})
+	proof, err := p.Prove(delHashes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	require.Equal(t, delTargets, proof.Targets)
+
+	err = p.Modify(modifyLeaves, delHashes, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
