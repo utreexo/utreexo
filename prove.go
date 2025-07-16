@@ -536,6 +536,123 @@ func getNextPos(slice1, slice2 []uint64, slice1Idx, slice2Idx int) (uint64, int,
 	return pos, idx, sibIdx
 }
 
+// modifyInstruction is just two slice of hashes. One for before and one for after.
+// If the hash was a leaf and is removed from the accumulator, the after hash will
+// be empty.
+type modifyInstruction struct {
+	before []Hash
+	after  []Hash
+}
+
+// String returns the modifyInstruction as a human readable string.
+func (m *modifyInstruction) String() string {
+	str := ""
+	for i, beforeHash := range m.before {
+		str += fmt.Sprintf("%v -> %v\n", beforeHash, m.after[i])
+	}
+
+	return str
+}
+
+// generateModifyIns utilizes the same algorithm as calculateHashes but it returns a modifyInstruction.
+func generateModifyIns(numLeaves uint64, delHashes []Hash, proof Proof) (
+	modifyInstruction, error) {
+
+	totalRows := TreeRows(numLeaves)
+
+	// Where all the parent hashes we've calculated in a given row will go to.
+	nextProves := hashAndPos{make([]uint64, 0, len(proof.Targets)), make([]Hash, 0, len(proof.Targets))}
+	nextProvesIdx := 0
+
+	// Where all the parent hashes we've calculated in a given row will go to.
+	nextHashes := hashAndPos{make([]uint64, 0, len(proof.Targets)), make([]Hash, 0, len(proof.Targets))}
+
+	toProve := toHashAndPos(proof.Targets, delHashes)
+	toProveIdx := 0
+
+	// Separate index for the hashes in the passed in proof.
+	proofHashIdx := 0
+	for row := uint8(0); row <= totalRows; {
+		// Grab the next position and hash to process.
+		var proveHash Hash
+		var modifyHash Hash
+		provePos, idx, sibIdx := getNextPos(toProve.positions, nextProves.positions, toProveIdx, nextProvesIdx)
+		if idx == -1 {
+			break
+		}
+		if idx == 0 {
+			proveHash = toProve.hashes[toProveIdx]
+			modifyHash = empty
+			toProveIdx++
+		} else {
+			proveHash = nextProves.hashes[nextProvesIdx]
+			modifyHash = nextHashes.hashes[nextProvesIdx]
+			nextProvesIdx++
+		}
+
+		// Keep incrementing the row if the current position is greater
+		// than the max position on this row.
+		//
+		// Cannot error out here because this loop already checks that
+		// row is lower than totalRows.
+		maxPos, _ := maxPositionAtRow(row, totalRows, numLeaves)
+		for provePos > maxPos {
+			row++
+			maxPos, _ = maxPositionAtRow(row, totalRows, numLeaves)
+		}
+
+		// This means we hashed all the way to the top of this subtree.
+		if isRootPositionOnRow(provePos, numLeaves, row) {
+			continue
+		}
+
+		var sibHash Hash
+		var modifySibHash Hash
+		sibPresent := sibIdx != -1
+		if sibPresent {
+			if sibIdx == 0 {
+				sibHash = toProve.hashes[toProveIdx]
+				modifySibHash = empty
+				toProveIdx++
+			} else {
+				sibHash = nextProves.hashes[nextProvesIdx]
+				modifySibHash = nextHashes.hashes[nextProvesIdx]
+				nextProvesIdx++
+			}
+		} else {
+			if len(proof.Proof) <= proofHashIdx {
+				return modifyInstruction{},
+					fmt.Errorf("invalid proof. Proof too short.")
+			}
+
+			// If the next prove isn't the sibling of this prove, we fetch
+			// the next proof hash to calculate the parent.
+			sibHash = proof.Proof[proofHashIdx]
+			modifySibHash = sibHash
+			proofHashIdx++
+		}
+
+		// Calculate the next hash.
+		nextHash := getNextHash(provePos, proveHash, sibHash)
+		nextProves.Append(Parent(provePos, totalRows), nextHash)
+
+		modifyNextHash := getNextHash(provePos, modifyHash, modifySibHash)
+		nextHashes.Append(Parent(provePos, totalRows), modifyNextHash)
+	}
+
+	nextProves = mergeSortedHashAndPos(nextProves, toProve)
+	for i := range toProve.hashes {
+		toProve.hashes[i] = empty
+	}
+	nextHashes = mergeSortedHashAndPos(nextHashes, toProve)
+	m := modifyInstruction{
+		before: nextProves.hashes,
+		after:  nextHashes.hashes,
+	}
+
+	return m, nil
+}
+
 // calculateHashes returns the hashes of the roots and all the nodes that
 // were used to calculate the roots. Passing nil delHashes will return the
 // hashes of the roots and the nodes used to calculate the roots after the
