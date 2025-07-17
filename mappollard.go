@@ -14,6 +14,63 @@ import (
 // Assert that MapPollard implements the Utreexo interface.
 var _ Utreexo = (*MapPollard)(nil)
 
+// Node is the data for an element in the utreexo accumulator. It can be either a leaf or a node.
+type Node struct {
+	// Remember indicates if this node should be remembered.
+	Remember bool
+
+	// The left and right child of this node.
+	LBelow, RBelow, Above Hash
+
+	// AddIndex indicates which leaf it was at the height the leaf was added.
+	// -1 if it's not available either because the node is not a leaf or if
+	// the mappollard doesn't know because it's not full.
+	AddIndex int32
+}
+
+// deadEnd indicates that the node doesn't have any nieces.
+func (n *Node) deadEnd() bool {
+	return n.LBelow == empty && n.RBelow == empty
+}
+
+// pruneable returns true if the node and the sibling doesn't need to be cached.
+func (n *Node) pruneable(sib Node) (bool, error) {
+	if sib.Above != n.Above {
+		return false, fmt.Errorf("given sib points to %v while I point to %v",
+			sib.Above, n.Above)
+	}
+
+	if sib.Remember || n.Remember {
+		return false, nil
+	}
+
+	return n.deadEnd() && sib.deadEnd(), nil
+}
+
+// getSibHash takes in a below node's hash and returns its sibhash.
+func (n *Node) getSibHash(hash Hash) (Hash, bool, error) {
+	// Grab sibling.
+	if hash == n.LBelow {
+		return n.RBelow, false, nil
+	} else if hash == n.RBelow {
+		return n.LBelow, true, nil
+	} else {
+		return empty, false, fmt.Errorf("above node for hash %v points to left %v and right %v",
+			hash, n.LBelow, n.RBelow)
+	}
+}
+
+// isRoot returns true if the node doesn't point to any above nodes.
+func (n *Node) isRoot() bool {
+	return n.Above == empty
+}
+
+// String returns a human-readable string of the node.
+func (n *Node) String() string {
+	return fmt.Sprintf("rememeber %v, above %v, l %v, r %v, addIndex %v",
+		n.Remember, n.Above, n.LBelow, n.RBelow, n.AddIndex)
+}
+
 // LeafInfo is the position with extra information to pinpoint where the leaf was
 // created.
 type LeafInfo struct {
