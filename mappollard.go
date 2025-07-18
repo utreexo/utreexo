@@ -597,6 +597,227 @@ func (v *view) addSingle(add Leaf, index int) error {
 	return nil
 }
 
+// undoDeletion undo-es all the deletions that are passed in. The deletions that happened
+// should be done in a single modify.
+func (v *view) undoDeletion(createIndex []uint32, undoInfo undoInfo, ingestIns ingestInstruction, delHashes []Hash) error {
+	for undoInfo.length() > 0 {
+		updateHashInfo, insertDelInfo := undoInfo.pop()
+		if updateHashInfo != nil {
+			if updateHashInfo.isRoot {
+				tree, _, _, err := DetectOffset(updateHashInfo.rootPos, v.numLeaves)
+				if err != nil {
+					return err
+				}
+
+				if v.roots[tree] != empty {
+					return fmt.Errorf("expected to find empty root at pos %v but got %v",
+						updateHashInfo.rootPos, v.roots[tree])
+				}
+				v.roots[tree] = updateHashInfo.origHash
+				rootNode := Node{Remember: v.full, AddIndex: -1}
+				v.nodes[updateHashInfo.origHash] = rootNode
+			} else {
+				err := v.updateHash(updateHashInfo.curHash, updateHashInfo.origHash)
+				if err != nil {
+					return err
+				}
+			}
+		} else {
+			prevSibNode, curSib, aNode, curSibHash, found, err := v.fetchNodeForDel(insertDelInfo.sibHash)
+			if err != nil {
+				return err
+			}
+			if !found {
+				continue
+			}
+
+			pNode := Node{Remember: v.full, Above: prevSibNode.Above, AddIndex: -1}
+
+			if prevSibNode.isRoot() {
+				idx := slices.Index(v.roots, insertDelInfo.sibHash)
+				if idx == -1 {
+					return fmt.Errorf("prevSib of %v is a root but is not found in roots",
+						insertDelInfo.sibHash)
+				}
+
+				v.roots[idx] = insertDelInfo.pHash
+
+				prevHashNode := Node{Remember: v.full, Above: insertDelInfo.pHash}
+				prevSibNode, prevHashNode, err = v.giveBelow(prevSibNode, prevHashNode, insertDelInfo.prevHash)
+				if err != nil {
+					return err
+				}
+				prevSibNode.Above = insertDelInfo.pHash
+
+				if insertDelInfo.isLeft {
+					pNode.LBelow = insertDelInfo.prevHash
+					pNode.RBelow = insertDelInfo.sibHash
+				} else {
+					pNode.LBelow = insertDelInfo.sibHash
+					pNode.RBelow = insertDelInfo.prevHash
+				}
+
+				v.nodes[insertDelInfo.pHash] = pNode
+				v.nodes[insertDelInfo.sibHash] = prevSibNode
+				v.nodes[insertDelInfo.prevHash] = prevHashNode
+				continue
+			}
+
+			// Move the prevSibNode down.
+			prevSibNode, pNode, err = v.giveBelow(prevSibNode, pNode, insertDelInfo.pHash)
+			if err != nil {
+				return err
+			}
+			prevSibNode.Above = curSibHash
+
+			if aNode.LBelow == insertDelInfo.sibHash {
+				aNode.LBelow = insertDelInfo.pHash
+			} else if aNode.RBelow == insertDelInfo.sibHash {
+				aNode.RBelow = insertDelInfo.pHash
+			} else {
+				return fmt.Errorf("%v not found. aNode %v points to l %v, r %v",
+					insertDelInfo.sibHash, curSib.Above, aNode.LBelow, aNode.RBelow)
+			}
+
+			prevHashNode := Node{
+				Remember: v.full,
+				Above:    curSibHash,
+			}
+			curSib, prevHashNode, err = v.giveBelow(curSib, prevHashNode, insertDelInfo.prevHash)
+			if err != nil {
+				return err
+			}
+
+			if insertDelInfo.isLeft {
+				curSib.LBelow = insertDelInfo.prevHash
+				curSib.RBelow = insertDelInfo.sibHash
+			} else {
+				curSib.LBelow = insertDelInfo.sibHash
+				curSib.RBelow = insertDelInfo.prevHash
+			}
+
+			v.nodes[pNode.Above] = aNode
+			v.nodes[curSibHash] = curSib
+			v.nodes[insertDelInfo.pHash] = pNode
+			v.nodes[insertDelInfo.sibHash] = prevSibNode
+			v.nodes[insertDelInfo.prevHash] = prevHashNode
+		}
+	}
+
+	err := v.ingest(ingestIns)
+	if err != nil {
+		return err
+	}
+
+	for i, index := range createIndex {
+		hash := delHashes[i]
+		node, found := v.nodes[hash]
+		if !found {
+			return fmt.Errorf("expected to find %v but didn't", hash)
+		}
+
+		node.AddIndex = int32(index)
+		node.Remember = true // We probably want to hold onto these if we're adding the index.
+		v.nodes[hash] = node
+	}
+
+	for hash, n := range v.nodes {
+		if n.isRoot() {
+			continue
+		}
+
+		aNode, found := v.nodes[n.Above]
+		if !found {
+			return fmt.Errorf("%v's above of %v not found", hash, n.Above)
+		}
+
+		sibHash, _, err := aNode.getSibHash(hash)
+		if err != nil {
+			return err
+		}
+
+		sibNode, found := v.nodes[sibHash]
+		if !found {
+			return fmt.Errorf("%v's belows are l %v, and r %v but %v not found",
+				n.Above, aNode.LBelow, aNode.RBelow, sibHash)
+		}
+
+		// Check if the sibling is prunable.
+		canPrune, err := sibNode.pruneable(n)
+		if err != nil {
+			return err
+		}
+
+		if canPrune {
+			v.del(hash)
+			v.del(sibHash)
+
+			aNode.LBelow = empty
+			aNode.RBelow = empty
+			v.nodes[n.Above] = aNode
+
+			if !aNode.isRoot() {
+				err = v.maybeForget(n.Above)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// ingest places the proof in the view.
+func (v *view) ingest(ins ingestInstruction) error {
+	if len(ins.Hashes)%3 != 0 {
+		return fmt.Errorf("ingest hash length of %v is malformed as "+
+			"it's not divisible by 3", len(ins.Hashes))
+	}
+
+	for i := len(ins.Hashes) - 1; i >= 0; i-- {
+		hash := ins.Hashes[i]
+		rBelow := ins.Hashes[i-1]
+		lBelow := ins.Hashes[i-2]
+		rRem := ins.isLeaf[i-1]
+		lRem := ins.isLeaf[i-2]
+
+		node, found := v.nodes[hash]
+		if !found {
+			return fmt.Errorf("node hash %v not found", hash)
+		}
+
+		if node.RBelow != empty {
+			i--
+			i--
+			continue
+		}
+
+		node.LBelow = lBelow
+		node.RBelow = rBelow
+		v.nodes[hash] = node
+
+		rNode := Node{
+			Remember: rRem || v.full,
+			Above:    hash,
+			AddIndex: -1,
+		}
+		v.nodes[rBelow] = rNode
+
+		lNode := Node{
+			Remember: lRem || v.full,
+			Above:    hash,
+			AddIndex: -1,
+		}
+		v.nodes[lBelow] = lNode
+
+		i--
+		i--
+	}
+
+	return nil
+}
+
 // LeafInfo is the position with extra information to pinpoint where the leaf was
 // created.
 type LeafInfo struct {
