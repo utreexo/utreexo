@@ -820,44 +820,44 @@ func (v *view) ingest(ins ingestInstruction) error {
 
 // NodesInterface models the interface for the data storage for the map pollard.
 type NodesInterface interface {
-	// Get returns the position and a boolean to indicate if it was found or not.
-	Get(uint64) (Leaf, bool)
+	// Get returns the Node and a boolean to indicate if it was found or not.
+	Get(Hash) (Node, bool)
 
-	// Put puts the given hash and position.
-	Put(uint64, Leaf)
+	// Put puts the given hash and Node.
+	Put(Hash, Node)
 
 	// Delete removes the given hash.
-	Delete(uint64)
+	Delete(Hash)
 
 	// Length returns the count of all the elements.
 	Length() int
 
 	// ForEach iterates through all the elements saved and calls the passed in
 	// function for each one of them.
-	ForEach(func(uint64, Leaf) error) error
+	ForEach(func(Hash, Node) error) error
 }
 
 var _ NodesInterface = (*NodesMap)(nil)
 
 // NodesMap implements the NodesInterface interface. It's really just a map.
 type NodesMap struct {
-	m map[uint64]Leaf
+	m map[Hash]Node
 }
 
 // Get returns the data from the underlying map.
-func (m *NodesMap) Get(k uint64) (Leaf, bool) {
+func (m *NodesMap) Get(k Hash) (Node, bool) {
 	val, found := m.m[k]
 	return val, found
 }
 
 // Put puts the given data to the underlying map.
-func (m *NodesMap) Put(k uint64, v Leaf) {
+func (m *NodesMap) Put(k Hash, v Node) {
 	m.m[k] = v
 }
 
 // Delete removes the given key from the underlying map. No-op if the key
 // doesn't exist.
-func (m *NodesMap) Delete(k uint64) {
+func (m *NodesMap) Delete(k Hash) {
 	delete(m.m, k)
 }
 
@@ -867,7 +867,7 @@ func (m *NodesMap) Length() int {
 }
 
 // ForEach calls the given function for each of the elements in the underlying map.
-func (m *NodesMap) ForEach(fn func(uint64, Leaf) error) error {
+func (m *NodesMap) ForEach(fn func(Hash, Node) error) error {
 	for k, v := range m.m {
 		err := fn(k, v)
 		if err != nil {
@@ -879,8 +879,8 @@ func (m *NodesMap) ForEach(fn func(uint64, Leaf) error) error {
 }
 
 // newNodesMap returns a pointer to a initialized map.
-func newNodesMap() *NodesMap {
-	return &NodesMap{m: make(map[uint64]Leaf)}
+func newNodesMap(prealloc int) *NodesMap {
+	return &NodesMap{m: make(map[Hash]Node, prealloc)}
 }
 
 // MapPollard is an implementation of the utreexo accumulators that supports pollard
@@ -889,8 +889,7 @@ type MapPollard struct {
 	// rwLock protects the below maps from concurrent accesses.
 	rwLock *sync.RWMutex
 
-	// Nodes are the leaves in the accumulator. The hashes are mapped to their
-	// position in the accumulator.
+	// Nodes are all the elements in the utreexo accumulator.
 	Nodes NodesInterface
 
 	// NumLeaves are the number of total additions that have happened in the
@@ -912,10 +911,9 @@ type MapPollard struct {
 // pretty printing.
 func NewMapPollard(full bool) MapPollard {
 	return MapPollard{
-		rwLock:    new(sync.RWMutex),
-		Nodes:     newNodesMap(),
-		TotalRows: 63,
-		Full:      full,
+		rwLock: new(sync.RWMutex),
+		Nodes:  newNodesMap(0),
+		Full:   full,
 	}
 }
 

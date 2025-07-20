@@ -16,9 +16,17 @@ import (
 // Assert that MapPollard implements the UtreexoTest interface.
 var _ UtreexoTest = (*MapPollard)(nil)
 
-// nodeMapToString returns "n/a" as map pollard doesn't have a node map.
+// nodeMapToString returns the entire nodes of the mappollard as a human-readable string.
 func (m *MapPollard) nodeMapToString() string {
-	return "n/a"
+	str := ""
+	m.Nodes.ForEach(func(h Hash, n Node) error {
+		keyStr := fmt.Sprintf("key:%s, node:%s",
+			hex.EncodeToString(h[:]), n.String())
+		str += "\n" + keyStr
+		return nil
+	})
+
+	return str
 }
 
 // rootToString returns the roots as a string.
