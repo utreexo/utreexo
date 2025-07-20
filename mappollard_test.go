@@ -16,13 +16,6 @@ import (
 // Assert that MapPollard implements the UtreexoTest interface.
 var _ UtreexoTest = (*MapPollard)(nil)
 
-// cachedMapToString returns the cached map as a string.
-//
-// Implements the UtreexoTest interface.
-func (p *MapPollard) cachedMapToString() string {
-	return fmt.Sprintf("%v", p.CachedLeaves)
-}
-
 // nodeMapToString returns "n/a" as map pollard doesn't have a node map.
 func (m *MapPollard) nodeMapToString() string {
 	return "n/a"

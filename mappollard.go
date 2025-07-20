@@ -818,94 +818,6 @@ func (v *view) ingest(ins ingestInstruction) error {
 	return nil
 }
 
-// LeafInfo is the position with extra information to pinpoint where the leaf was
-// created.
-type LeafInfo struct {
-	// Position is the current position in the accumulator for this leaf.
-	Position uint64
-
-	// AddIndex indicates which leaf it was at the height the leaf was added.
-	AddIndex uint32
-}
-
-// CachedLeavesInterface models the interface for the data storage for the map pollard.
-type CachedLeavesInterface interface {
-	// Get returns the LeafInfo and a boolean to indicate if it was found or not.
-	Get(Hash) (LeafInfo, bool)
-
-	// Add adds a hash with the given position and the created index.
-	Add(Hash, uint64, uint32)
-
-	// Update updates the position of the given hash with the passed in position.
-	Update(Hash, uint64)
-
-	// Delete removes the given hash.
-	Delete(Hash)
-
-	// Length returns the count of all the elements.
-	Length() int
-
-	// ForEach iterates through all the elements saved and calls the passed in
-	// function for each one of them.
-	ForEach(func(Hash, LeafInfo) error) error
-}
-
-var _ CachedLeavesInterface = (*cachedLeavesMap)(nil)
-
-// cachedLeavesMap implements the CachedLeavesInterface interface. It's really just a map.
-type cachedLeavesMap struct {
-	m map[Hash]LeafInfo
-}
-
-// Get returns the data from the underlying map.
-func (m *cachedLeavesMap) Get(k Hash) (LeafInfo, bool) {
-	val, found := m.m[k]
-	return val, found
-}
-
-// Add adds the given hash with the passed in information.
-func (m *cachedLeavesMap) Add(k Hash, v uint64, i uint32) {
-	m.m[k] = LeafInfo{v, i}
-}
-
-// Update updates the hash with the new position.
-func (m *cachedLeavesMap) Update(k Hash, v uint64) {
-	val, found := m.m[k]
-	if !found {
-		return
-	}
-	val.Position = v
-	m.m[k] = val
-}
-
-// Delete removes the given key from the underlying map. No-op if the key
-// doesn't exist.
-func (m *cachedLeavesMap) Delete(k Hash) {
-	delete(m.m, k)
-}
-
-// Length returns the amount of items in the underlying map.
-func (m *cachedLeavesMap) Length() int {
-	return len(m.m)
-}
-
-// ForEach calls the given function for each of the elements in the underlying map.
-func (m *cachedLeavesMap) ForEach(fn func(Hash, LeafInfo) error) error {
-	for k, v := range m.m {
-		err := fn(k, v)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// newCachedLeavesMap returns a pointer to a initialized map.
-func newCachedLeavesMap() *cachedLeavesMap {
-	return &cachedLeavesMap{m: make(map[Hash]LeafInfo)}
-}
-
 // NodesInterface models the interface for the data storage for the map pollard.
 type NodesInterface interface {
 	// Get returns the position and a boolean to indicate if it was found or not.
@@ -977,9 +889,6 @@ type MapPollard struct {
 	// rwLock protects the below maps from concurrent accesses.
 	rwLock *sync.RWMutex
 
-	// CachedLeaves are the positions of the leaves that we always have cached.
-	CachedLeaves CachedLeavesInterface
-
 	// Nodes are the leaves in the accumulator. The hashes are mapped to their
 	// position in the accumulator.
 	Nodes NodesInterface
@@ -1003,11 +912,10 @@ type MapPollard struct {
 // pretty printing.
 func NewMapPollard(full bool) MapPollard {
 	return MapPollard{
-		rwLock:       new(sync.RWMutex),
-		CachedLeaves: newCachedLeavesMap(),
-		Nodes:        newNodesMap(),
-		TotalRows:    63,
-		Full:         full,
+		rwLock:    new(sync.RWMutex),
+		Nodes:     newNodesMap(),
+		TotalRows: 63,
+		Full:      full,
 	}
 }
 
