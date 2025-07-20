@@ -14,6 +14,810 @@ import (
 // Assert that MapPollard implements the Utreexo interface.
 var _ Utreexo = (*MapPollard)(nil)
 
+// Node is the data for an element in the utreexo accumulator. It can be either a leaf or a node.
+type Node struct {
+	// Remember indicates if this node should be remembered.
+	Remember bool
+
+	// The left and right child of this node.
+	LBelow, RBelow, Above Hash
+
+	// AddIndex indicates which leaf it was at the height the leaf was added.
+	// -1 if it's not available either because the node is not a leaf or if
+	// the mappollard doesn't know because it's not full.
+	AddIndex int32
+}
+
+// deadEnd indicates that the node doesn't have any nieces.
+func (n *Node) deadEnd() bool {
+	return n.LBelow == empty && n.RBelow == empty
+}
+
+// pruneable returns true if the node and the sibling doesn't need to be cached.
+func (n *Node) pruneable(sib Node) (bool, error) {
+	if sib.Above != n.Above {
+		return false, fmt.Errorf("given sib points to %v while I point to %v",
+			sib.Above, n.Above)
+	}
+
+	if sib.Remember || n.Remember {
+		return false, nil
+	}
+
+	return n.deadEnd() && sib.deadEnd(), nil
+}
+
+// getSibHash takes in a below node's hash and returns its sibhash.
+func (n *Node) getSibHash(hash Hash) (Hash, bool, error) {
+	// Grab sibling.
+	if hash == n.LBelow {
+		return n.RBelow, false, nil
+	} else if hash == n.RBelow {
+		return n.LBelow, true, nil
+	} else {
+		return empty, false, fmt.Errorf("above node for hash %v points to left %v and right %v",
+			hash, n.LBelow, n.RBelow)
+	}
+}
+
+// isRoot returns true if the node doesn't point to any above nodes.
+func (n *Node) isRoot() bool {
+	return n.Above == empty
+}
+
+// String returns a human-readable string of the node.
+func (n *Node) String() string {
+	return fmt.Sprintf("rememeber %v, above %v, l %v, r %v, addIndex %v",
+		n.Remember, n.Above, n.LBelow, n.RBelow, n.AddIndex)
+}
+
+// view is a view of the mappollard. After the deletion, the nodes and roots will be modified and the
+// deleted nodes' keys will be included in the removed slice.
+type view struct {
+	// Shared data.
+	roots []Hash
+	nodes map[Hash]Node
+
+	// Data for removing.
+	removed []Hash
+
+	// Data for adding.
+	numLeaves uint64
+	totalRows uint8
+	full      bool
+}
+
+// initView returns an initialized view.
+func initView(rs []Hash, count int) *view {
+	r := make([]Hash, len(rs))
+	copy(r, rs)
+	return &view{
+		roots:   r,
+		nodes:   make(map[Hash]Node),
+		removed: make([]Hash, 0, count),
+	}
+}
+
+// del removes the key from the nodes map and adds that hash to the removed slice.
+func (v *view) del(hash Hash) {
+	delete(v.nodes, hash)
+	v.removed = append(v.removed, hash)
+}
+
+// fetchNodeForDel fetches all the nodes that are needed to remove the given hash.
+func (v *view) fetchNodeForDel(hash Hash) (
+	node, sibNode, aNode Node, sibHash Hash, foundNode bool, err error) {
+
+	node, foundNode = v.nodes[hash]
+	if !foundNode {
+		return
+	}
+
+	if node.isRoot() {
+		return
+	}
+
+	var found bool
+	aNode, found = v.nodes[node.Above]
+	if !found {
+		err = fmt.Errorf("fetchNodeForDel err: node %v points to above of %v but wasn't found",
+			hash, node.Above)
+		return
+	}
+
+	sibHash, _, err = aNode.getSibHash(hash)
+	if err != nil {
+		return
+	}
+
+	sibNode, found = v.nodes[sibHash]
+	if !found {
+		err = fmt.Errorf("node %v has l %v, r %v but %v wasn't found",
+			node.Above, node.LBelow, node.RBelow, sibHash)
+		return
+	}
+
+	return
+}
+
+// removeNode deletes the hash and all its below nodes.
+func (v *view) removeNode(hash Hash, node Node) error {
+	v.del(hash)
+
+	if node.isRoot() {
+		// write the zombie root in the roots slice.
+		idx := slices.Index(v.roots, hash)
+		if idx == -1 {
+			return fmt.Errorf("couldn't find root of %v in the roots slice", hash)
+		}
+		v.roots[idx] = empty
+	}
+
+	if node.LBelow != empty {
+		lNode, found := v.nodes[node.LBelow]
+		if !found {
+			return nil
+		}
+
+		v.removeNode(node.LBelow, lNode)
+	}
+
+	if node.RBelow != empty {
+		rNode, found := v.nodes[node.RBelow]
+		if !found {
+			return nil
+		}
+
+		v.removeNode(node.RBelow, rNode)
+	}
+
+	return nil
+}
+
+// updateAbove updates n's belows to point above to the newHash.
+func (v *view) updateAbove(n Node, newHash Hash) error {
+	if n.LBelow == empty {
+		return nil
+	}
+
+	lBelow, lfound := v.nodes[n.LBelow]
+	rBelow, rfound := v.nodes[n.RBelow]
+	if !lfound && !rfound {
+		return nil
+	}
+
+	if !lfound || !rfound {
+		return fmt.Errorf("n points to lBelow of %v and rBelow of %v "+
+			"but only one of them exists", n.LBelow, n.RBelow)
+	}
+
+	lBelow.Above = newHash
+	rBelow.Above = newHash
+
+	v.nodes[n.LBelow] = lBelow
+	v.nodes[n.RBelow] = rBelow
+
+	return nil
+}
+
+// swapBelow swaps the below nodes of a and b.
+func (v *view) swapBelow(a, b Node, aHash, bHash Hash) (Node, Node, error) {
+	err := v.updateAbove(a, bHash)
+	if err != nil {
+		return a, b, err
+	}
+	err = v.updateAbove(b, aHash)
+	if err != nil {
+		return a, b, err
+	}
+
+	// Swap below nodes.
+	a.LBelow, a.RBelow, b.LBelow, b.RBelow =
+		b.LBelow, b.RBelow, a.LBelow, a.RBelow
+
+	return a, b, err
+}
+
+// a gives its below nodes to b.
+func (v *view) giveBelow(a, b Node, bHash Hash) (Node, Node, error) {
+	err := v.updateAbove(a, bHash)
+	if err != nil {
+		return a, b, err
+	}
+
+	b.LBelow, b.RBelow = a.LBelow, a.RBelow
+	a.LBelow, a.RBelow = empty, empty
+	return a, b, nil
+}
+
+// setAsSib sets the newSib as the node's sibling.
+func (v *view) setAsSib(node, newSib Node, nodeHash, newSibHash Hash) (Node, Node, error) {
+	// Get above node.
+	aNode, found := v.nodes[node.Above]
+	if !found {
+		return node, newSib, fmt.Errorf("setAsSib err: node %v points to above of %v but wasn't found",
+			nodeHash, node.Above)
+	}
+
+	// Get the current sib of node.
+	curSibHash, isLeft, err := aNode.getSibHash(nodeHash)
+	if err != nil {
+		return node, newSib, err
+	}
+	curSib, found := v.nodes[curSibHash]
+	if !found {
+		return node, newSib, fmt.Errorf("node %v has l %v, r %v but %v wasn't found",
+			node.Above, aNode.LBelow, aNode.RBelow, curSibHash)
+	}
+
+	// Node needs to point to the newSib's nieces.
+	newSib, node, err = v.giveBelow(newSib, node, nodeHash)
+	if err != nil {
+		return node, newSib, err
+	}
+
+	// Get belows from the current sib.
+	_, newSib, err = v.giveBelow(curSib, newSib, newSibHash)
+	if err != nil {
+		return node, newSib, err
+	}
+
+	// Set aNode to point to the new sib.
+	if isLeft {
+		aNode.LBelow = newSibHash
+	} else {
+		aNode.RBelow = newSibHash
+	}
+
+	// The new sib also need to point to the above node.
+	newSib.Above = node.Above
+
+	// Update all the nodes.
+	v.del(curSibHash)
+	v.nodes[nodeHash] = node
+	v.nodes[newSibHash] = newSib
+	v.nodes[node.Above] = aNode
+
+	return node, newSib, nil
+}
+
+// maybeForget checks to see if the hash can be pruned from the accumulator. If it can, it prunes
+// it and recursively calls itself again to see if the above node can be forgotten as well.
+func (v *view) maybeForget(hash Hash) error {
+	n, found := v.nodes[hash]
+	if !found {
+		return nil
+	}
+
+	var canPrune bool
+	if n.LBelow == empty && n.RBelow == empty {
+		canPrune = true
+	} else {
+		l, found := v.nodes[n.LBelow]
+		if !found {
+			return fmt.Errorf("%v points to %v but not found", hash, n.LBelow)
+		}
+		r, found := v.nodes[n.RBelow]
+		if !found {
+			return fmt.Errorf("%v points to %v but not found", hash, n.RBelow)
+		}
+
+		var err error
+		canPrune, err = l.pruneable(r)
+		if err != nil {
+			return err
+		}
+	}
+
+	if canPrune {
+		v.del(n.LBelow)
+		v.del(n.RBelow)
+
+		n.LBelow = empty
+		n.RBelow = empty
+		v.nodes[hash] = n
+
+		if n.Above != empty {
+			err := v.maybeForget(n.Above)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// deleteNode removes the given hash and all its children and moves its sibling up.
+func (v *view) deleteNode(hash Hash) error {
+	node, sibNode, aNode, sibHash, found, err := v.fetchNodeForDel(hash)
+	if err != nil {
+		return err
+	}
+
+	if !found {
+		// It may not be cached. Nothing to do then.
+		return nil
+	}
+
+	if node.isRoot() {
+		return v.removeNode(hash, node)
+	}
+
+	// Swap below nodes.
+	node, sibNode, err = v.swapBelow(node, sibNode, hash, sibHash)
+	if err != nil {
+		return err
+	}
+	v.removeNode(hash, node)
+
+	// Sib becomes the root.
+	if aNode.isRoot() {
+		v.del(node.Above)
+
+		idx := slices.Index(v.roots, node.Above)
+		if idx == -1 {
+			return fmt.Errorf("couldn't find root of %v in the roots slice", hash)
+		}
+
+		// Set sibling as the root.
+		v.roots[idx] = sibHash
+		sibNode.Above = empty
+		v.nodes[sibHash] = sibNode
+
+		return nil
+	}
+
+	// Move up the sibling.
+	aNode, sibNode, err = v.setAsSib(aNode, sibNode, node.Above, sibHash)
+	if err != nil {
+		return err
+	}
+
+	// Check if the sibling is prunable.
+	canPrune, err := sibNode.pruneable(aNode)
+	if err != nil {
+		return err
+	}
+
+	if canPrune {
+		gpNode, found := v.nodes[aNode.Above]
+		if !found {
+			return fmt.Errorf("above node of %v not found for %v", aNode.Above, node.Above)
+		}
+
+		v.del(node.Above)
+		v.del(sibHash)
+
+		gpNode.LBelow = empty
+		gpNode.RBelow = empty
+		v.nodes[aNode.Above] = gpNode
+
+		if gpNode.Above != empty {
+			err = v.maybeForget(gpNode.Above)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// updateHash updates the below and above nodes to point to the new hash and re-inserts
+// the node with the new hash.
+func (v *view) updateHash(before, after Hash) error {
+	node, found := v.nodes[before]
+	if !found {
+		return nil
+	}
+
+	// Check if it's a root.
+	if node.Above == empty {
+		idx := slices.Index(v.roots, before)
+		if idx == -1 {
+			return fmt.Errorf("node %v doesn't have above but is "+
+				"not in roots: %v", node, v.roots)
+		}
+		v.roots[idx] = after
+	}
+
+	v.del(before)
+	v.nodes[after] = node
+
+	if node.Above != empty {
+		above, found := v.nodes[node.Above]
+		if !found {
+			return fmt.Errorf("node %v points to %v but is "+
+				"not found", before, node.Above)
+		}
+
+		if above.LBelow == before {
+			above.LBelow = after
+		} else if above.RBelow == before {
+			above.RBelow = after
+		} else {
+			return fmt.Errorf("updateHash above node for hash %v points to left %v and right %v",
+				before, above.LBelow, above.RBelow)
+		}
+
+		v.nodes[node.Above] = above
+	}
+
+	if node.LBelow != empty {
+		lBelow, found := v.nodes[node.LBelow]
+		if !found {
+			return fmt.Errorf("node %v points to %v but is "+
+				"not found", before, node.LBelow)
+		}
+		lBelow.Above = after
+
+		v.nodes[node.LBelow] = lBelow
+	}
+
+	if node.RBelow != empty {
+		rBelow, found := v.nodes[node.RBelow]
+		if !found {
+			return fmt.Errorf("node %v points to %v but is "+
+				"not found", before, node.RBelow)
+		}
+		rBelow.Above = after
+
+		v.nodes[node.RBelow] = rBelow
+	}
+
+	return nil
+}
+
+// remove removes deleted leaves and updates the nodes to their new hashes after the deletion of
+// the leaves.
+func (v *view) remove(ins modifyInstruction) error {
+	for i, afterHash := range ins.after {
+		beforeHash := ins.before[i]
+
+		if afterHash == empty {
+			err := v.deleteNode(beforeHash)
+			if err != nil {
+				return err
+			}
+		} else {
+			err := v.updateHash(beforeHash, afterHash)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// add adds all the passed in leaves to the view.
+func (v *view) add(adds []Leaf) error {
+	for i, add := range adds {
+		// Add to the accumulator.
+		err := v.addSingle(add, i)
+		if err != nil {
+			return err
+		}
+
+		v.numLeaves++
+	}
+
+	return nil
+}
+
+// addSingle adds one leaf to the accumulator view.  If the remember field is set to true, the leaf
+// will be cached.
+func (v *view) addSingle(add Leaf, index int) error {
+	if TreeRows(v.numLeaves+1) > v.totalRows {
+		v.totalRows++
+	}
+
+	// If the map pollard is configured to be full, override the remember value in the leaf.
+	if v.full {
+		add.Remember = true
+	}
+
+	addHash := add.Hash
+	addNode := Node{Remember: add.Remember, AddIndex: int32(index)}
+	v.nodes[add.Hash] = addNode
+
+	for h := uint8(0); (v.numLeaves>>h)&1 == 1; h++ {
+		// Grab and pop off the root that will become a node.
+		var root Hash
+		root, v.roots = v.roots[len(v.roots)-1], v.roots[:len(v.roots)-1]
+
+		// If the root that we're gonna hash with is empty, move the current
+		// node up to the position of the parent.
+		//
+		// Example:
+		//
+		// 12
+		// |-------\
+		// 08      09
+		// |---\   |---\
+		// 00  01  02  03  --
+		//
+		// When we add 05 to this tree, 04 is empty so we move 05 to 10.
+		// The resulting tree looks like below. The hash at position 10
+		// is not hash(04 || 05) but just the hash of 05.
+		//
+		// 12
+		// |-------\
+		// 08      09      10
+		// |---\   |---\   |---\
+		// 00  01  02  03  --  --
+		if root == empty {
+			continue
+		}
+
+		// Get the root we're destroying.
+		curRootNode, found := v.nodes[root]
+		if !found {
+			return fmt.Errorf("root node %v not found", root)
+		}
+
+		// Make parent node.
+		pNode := Node{LBelow: root, RBelow: addHash, AddIndex: -1, Remember: v.full}
+		parentHash := parentHash(root, addHash)
+
+		var err error
+		curRootNode, addNode, err = v.swapBelow(curRootNode, addNode, root, addHash)
+		if err != nil {
+			return err
+		}
+
+		// Point to aunt or parent.
+		addNode.Above = parentHash
+		curRootNode.Above = parentHash
+
+		// Update the nodes.
+		v.nodes[addHash] = addNode
+		v.nodes[root] = curRootNode
+
+		// Prune if we can. The error only happens when both of the nodes do not point
+		// to the same parent.
+		canPrune, _ := addNode.pruneable(curRootNode)
+		if canPrune {
+			v.del(addHash)
+			v.del(root)
+
+			pNode.LBelow = empty
+			pNode.RBelow = empty
+		}
+		v.nodes[parentHash] = pNode
+
+		// Set the parent as the root being added for the next potential loop.
+		addHash = parentHash
+		addNode = pNode
+	}
+
+	v.roots = append(v.roots, addHash)
+
+	return nil
+}
+
+// undoDeletion undo-es all the deletions that are passed in. The deletions that happened
+// should be done in a single modify.
+func (v *view) undoDeletion(createIndex []uint32, undoInfo undoInfo, ingestIns ingestInstruction, delHashes []Hash) error {
+	for undoInfo.length() > 0 {
+		updateHashInfo, insertDelInfo := undoInfo.pop()
+		if updateHashInfo != nil {
+			if updateHashInfo.isRoot {
+				tree, _, _, err := DetectOffset(updateHashInfo.rootPos, v.numLeaves)
+				if err != nil {
+					return err
+				}
+
+				if v.roots[tree] != empty {
+					return fmt.Errorf("expected to find empty root at pos %v but got %v",
+						updateHashInfo.rootPos, v.roots[tree])
+				}
+				v.roots[tree] = updateHashInfo.origHash
+				rootNode := Node{Remember: v.full, AddIndex: -1}
+				v.nodes[updateHashInfo.origHash] = rootNode
+			} else {
+				err := v.updateHash(updateHashInfo.curHash, updateHashInfo.origHash)
+				if err != nil {
+					return err
+				}
+			}
+		} else {
+			prevSibNode, curSib, aNode, curSibHash, found, err := v.fetchNodeForDel(insertDelInfo.sibHash)
+			if err != nil {
+				return err
+			}
+			if !found {
+				continue
+			}
+
+			pNode := Node{Remember: v.full, Above: prevSibNode.Above, AddIndex: -1}
+
+			if prevSibNode.isRoot() {
+				idx := slices.Index(v.roots, insertDelInfo.sibHash)
+				if idx == -1 {
+					return fmt.Errorf("prevSib of %v is a root but is not found in roots",
+						insertDelInfo.sibHash)
+				}
+
+				v.roots[idx] = insertDelInfo.pHash
+
+				prevHashNode := Node{Remember: v.full, Above: insertDelInfo.pHash}
+				prevSibNode, prevHashNode, err = v.giveBelow(prevSibNode, prevHashNode, insertDelInfo.prevHash)
+				if err != nil {
+					return err
+				}
+				prevSibNode.Above = insertDelInfo.pHash
+
+				if insertDelInfo.isLeft {
+					pNode.LBelow = insertDelInfo.prevHash
+					pNode.RBelow = insertDelInfo.sibHash
+				} else {
+					pNode.LBelow = insertDelInfo.sibHash
+					pNode.RBelow = insertDelInfo.prevHash
+				}
+
+				v.nodes[insertDelInfo.pHash] = pNode
+				v.nodes[insertDelInfo.sibHash] = prevSibNode
+				v.nodes[insertDelInfo.prevHash] = prevHashNode
+				continue
+			}
+
+			// Move the prevSibNode down.
+			prevSibNode, pNode, err = v.giveBelow(prevSibNode, pNode, insertDelInfo.pHash)
+			if err != nil {
+				return err
+			}
+			prevSibNode.Above = curSibHash
+
+			if aNode.LBelow == insertDelInfo.sibHash {
+				aNode.LBelow = insertDelInfo.pHash
+			} else if aNode.RBelow == insertDelInfo.sibHash {
+				aNode.RBelow = insertDelInfo.pHash
+			} else {
+				return fmt.Errorf("%v not found. aNode %v points to l %v, r %v",
+					insertDelInfo.sibHash, curSib.Above, aNode.LBelow, aNode.RBelow)
+			}
+
+			prevHashNode := Node{
+				Remember: v.full,
+				Above:    curSibHash,
+			}
+			curSib, prevHashNode, err = v.giveBelow(curSib, prevHashNode, insertDelInfo.prevHash)
+			if err != nil {
+				return err
+			}
+
+			if insertDelInfo.isLeft {
+				curSib.LBelow = insertDelInfo.prevHash
+				curSib.RBelow = insertDelInfo.sibHash
+			} else {
+				curSib.LBelow = insertDelInfo.sibHash
+				curSib.RBelow = insertDelInfo.prevHash
+			}
+
+			v.nodes[pNode.Above] = aNode
+			v.nodes[curSibHash] = curSib
+			v.nodes[insertDelInfo.pHash] = pNode
+			v.nodes[insertDelInfo.sibHash] = prevSibNode
+			v.nodes[insertDelInfo.prevHash] = prevHashNode
+		}
+	}
+
+	err := v.ingest(ingestIns)
+	if err != nil {
+		return err
+	}
+
+	for i, index := range createIndex {
+		hash := delHashes[i]
+		node, found := v.nodes[hash]
+		if !found {
+			return fmt.Errorf("expected to find %v but didn't", hash)
+		}
+
+		node.AddIndex = int32(index)
+		node.Remember = true // We probably want to hold onto these if we're adding the index.
+		v.nodes[hash] = node
+	}
+
+	for hash, n := range v.nodes {
+		if n.isRoot() {
+			continue
+		}
+
+		aNode, found := v.nodes[n.Above]
+		if !found {
+			return fmt.Errorf("%v's above of %v not found", hash, n.Above)
+		}
+
+		sibHash, _, err := aNode.getSibHash(hash)
+		if err != nil {
+			return err
+		}
+
+		sibNode, found := v.nodes[sibHash]
+		if !found {
+			return fmt.Errorf("%v's belows are l %v, and r %v but %v not found",
+				n.Above, aNode.LBelow, aNode.RBelow, sibHash)
+		}
+
+		// Check if the sibling is prunable.
+		canPrune, err := sibNode.pruneable(n)
+		if err != nil {
+			return err
+		}
+
+		if canPrune {
+			v.del(hash)
+			v.del(sibHash)
+
+			aNode.LBelow = empty
+			aNode.RBelow = empty
+			v.nodes[n.Above] = aNode
+
+			if !aNode.isRoot() {
+				err = v.maybeForget(n.Above)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// ingest places the proof in the view.
+func (v *view) ingest(ins ingestInstruction) error {
+	if len(ins.Hashes)%3 != 0 {
+		return fmt.Errorf("ingest hash length of %v is malformed as "+
+			"it's not divisible by 3", len(ins.Hashes))
+	}
+
+	for i := len(ins.Hashes) - 1; i >= 0; i-- {
+		hash := ins.Hashes[i]
+		rBelow := ins.Hashes[i-1]
+		lBelow := ins.Hashes[i-2]
+		rRem := ins.isLeaf[i-1]
+		lRem := ins.isLeaf[i-2]
+
+		node, found := v.nodes[hash]
+		if !found {
+			return fmt.Errorf("node hash %v not found", hash)
+		}
+
+		if node.RBelow != empty {
+			i--
+			i--
+			continue
+		}
+
+		node.LBelow = lBelow
+		node.RBelow = rBelow
+		v.nodes[hash] = node
+
+		rNode := Node{
+			Remember: rRem || v.full,
+			Above:    hash,
+			AddIndex: -1,
+		}
+		v.nodes[rBelow] = rNode
+
+		lNode := Node{
+			Remember: lRem || v.full,
+			Above:    hash,
+			AddIndex: -1,
+		}
+		v.nodes[lBelow] = lNode
+
+		i--
+		i--
+	}
+
+	return nil
+}
+
 // LeafInfo is the position with extra information to pinpoint where the leaf was
 // created.
 type LeafInfo struct {
