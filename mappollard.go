@@ -817,6 +817,303 @@ func (v *view) ingest(ins ingestInstruction) error {
 	return nil
 }
 
+// fetchNodesNeededForUndoDel fetches all the nodes that would need to be accessed to perform an
+// undo of a deletion.
+func (v *view) fetchNodesNeededForUndoDel(m *MapPollard, uInfo undoInfo) error {
+	for i, updateHashInfo := range uInfo.updateHashInfos {
+		insertDelInfo := uInfo.insertDelInfos[i]
+
+		if updateHashInfo != nil {
+			if updateHashInfo.curHash == empty {
+				continue
+			}
+			node, found := v.fetchAndCacheNode(m, updateHashInfo.curHash)
+			if !found {
+				continue
+			}
+			if !node.isRoot() {
+				aNode, found := v.fetchAndCacheNode(m, node.Above)
+				if !found {
+					return fmt.Errorf("getView err: node %v points to "+
+						"above of %v but wasn't found",
+						updateHashInfo.curHash, node.Above)
+				}
+				sibHash, _, err := aNode.getSibHash(updateHashInfo.curHash)
+				if err != nil {
+					return err
+				}
+
+				sibNode, found := v.fetchAndCacheNode(m, sibHash)
+				if !found {
+					return fmt.Errorf("node %v has l %v, r %v but %v wasn't found",
+						node.Above, node.LBelow, node.RBelow, sibHash)
+				}
+
+				err = v.cacheBelows(m, sibNode)
+				if err != nil {
+					return err
+				}
+			}
+
+			err := v.cacheBelows(m, node)
+			if err != nil {
+				return err
+			}
+
+			continue
+		}
+
+		node, found := v.fetchAndCacheNode(m, insertDelInfo.sibHash)
+		if !found {
+			continue
+		}
+		err := v.cacheBelows(m, node)
+		if err != nil {
+			return err
+		}
+
+		if node.isRoot() {
+			continue
+		}
+
+		aNode, found := v.fetchAndCacheNode(m, node.Above)
+		if !found {
+			return fmt.Errorf("getView err: node %v points to above of %v but wasn't found",
+				insertDelInfo.sibHash, node.Above)
+		}
+
+		sibHash, _, err := aNode.getSibHash(insertDelInfo.sibHash)
+		if err != nil {
+			return err
+		}
+
+		sibNode, found := v.fetchAndCacheNode(m, sibHash)
+		if !found {
+			return fmt.Errorf("node %v has l %v, r %v but %v wasn't found",
+				node.Above, node.LBelow, node.RBelow, sibHash)
+		}
+
+		err = v.cacheBelows(m, sibNode)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// fetchNodesNeededForAdd fetches all the nodes that would be accessed during an addition.
+// This is all the root nodes & their belows.
+func (v *view) fetchNodesNeededForAdd(m *MapPollard) error {
+	for _, root := range m.Roots {
+		if root == empty {
+			continue
+		}
+
+		node, found := v.fetchAndCacheNode(m, root)
+		if !found {
+			return fmt.Errorf("root node of %v not found", root)
+		}
+
+		err := v.cacheBelows(m, node)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// fetchNodesNeededForDels fetches all the nodes that would be accessed during the deletion
+// based on the modifyInstruction.
+func (v *view) fetchNodesNeededForDels(m *MapPollard, ins modifyInstruction) error {
+	for i, beforeHash := range ins.before {
+		afterHash := ins.after[i]
+
+		if afterHash == empty {
+			node, found := v.fetchAndCacheNode(m, beforeHash)
+			if !found {
+				continue
+			}
+			err := v.cacheBelows(m, node)
+			if err != nil {
+				return err
+			}
+
+			if node.isRoot() {
+				continue
+			}
+
+			aNode, found := v.fetchAndCacheNode(m, node.Above)
+			if !found {
+				return fmt.Errorf("getView err: node %v points to above of %v but wasn't found",
+					beforeHash, node.Above)
+			}
+
+			sibHash, _, err := aNode.getSibHash(beforeHash)
+			if err != nil {
+				return err
+			}
+
+			_, found = v.fetchAndCacheNode(m, sibHash)
+			if !found {
+				return fmt.Errorf("node %v has l %v, r %v but %v wasn't found",
+					node.Above, node.LBelow, node.RBelow, sibHash)
+			}
+
+			if aNode.isRoot() {
+				continue
+			}
+
+			gpNode, found := v.fetchAndCacheNode(m, aNode.Above)
+			if !found {
+				return fmt.Errorf("getView err: node %v points to above of %v but wasn't found",
+					node.Above, aNode.Above)
+			}
+
+			aNodeSibHash, _, err := gpNode.getSibHash(node.Above)
+			if err != nil {
+				return err
+			}
+
+			_, found = v.fetchAndCacheNode(m, aNodeSibHash)
+			if !found {
+				return fmt.Errorf("node %v has l %v, r %v but %v wasn't found",
+					aNode.Above, aNode.LBelow, aNode.RBelow, aNodeSibHash)
+			}
+
+			if m.Full {
+				continue
+			}
+
+			// Fetch til we hit the root.
+			n := gpNode
+			for !n.isRoot() {
+				nHash := n.Above
+				n, found = v.fetchAndCacheNode(m, n.Above)
+				if !found {
+					return fmt.Errorf("above node of %v not found for %v", aNode.Above, nHash)
+				}
+			}
+		} else {
+			node, found := v.fetchAndCacheNode(m, beforeHash)
+			if !found {
+				continue
+			}
+
+			if !node.isRoot() {
+				_, found := v.fetchAndCacheNode(m, node.Above)
+				if !found {
+					return fmt.Errorf("getView err: node %v points to "+
+						"above of %v but wasn't found",
+						beforeHash, node.Above)
+				}
+			}
+
+			err := v.cacheBelows(m, node)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// fetchAndCacheNode fetches and caches the node for the given hash. Caller should check that
+// the given hash isn't empty as it'll just return as not found.
+func (v *view) fetchAndCacheNode(m *MapPollard, hash Hash) (Node, bool) {
+	node, found := m.Nodes.Get(hash)
+	if !found {
+		return Node{}, found
+	}
+	v.nodes[hash] = node
+
+	return node, found
+}
+
+// cacheNieces will get and cache the belows of the node from the map.
+func (v *view) cacheBelows(m *MapPollard, node Node) error {
+	if (node.LBelow != empty) != (node.RBelow != empty) {
+		return fmt.Errorf("lBelow %v rBelow %v. They should both be empty or not empty",
+			node.LBelow, node.RBelow)
+	}
+
+	if node.LBelow != empty {
+		lBelow, found := m.Nodes.Get(node.LBelow)
+		if !found {
+			return fmt.Errorf("node %v points to %v but is "+
+				"not found", node, node.LBelow)
+		}
+
+		v.nodes[node.LBelow] = lBelow
+	}
+
+	if node.RBelow != empty {
+		rBelow, found := m.Nodes.Get(node.RBelow)
+		if !found {
+			return fmt.Errorf("node %v points to %v but is "+
+				"not found", node, node.RBelow)
+		}
+
+		v.nodes[node.RBelow] = rBelow
+	}
+
+	return nil
+}
+
+// getViewForUndo returns a view that is able to perform undos.
+//
+// NOTE: it's only capable of undoing deletions for now.
+func (m *MapPollard) getViewForUndo(undoIns undoInfo) (*view, error) {
+	view := initView(m.Roots, undoIns.length())
+	view.numLeaves = m.NumLeaves
+	view.totalRows = m.TotalRows
+	view.full = m.Full
+
+	err := view.fetchNodesNeededForUndoDel(m, undoIns)
+	if err != nil {
+		return nil, err
+	}
+
+	return view, nil
+}
+
+// getView returns a view that has all the necesssary information to perform a modification.
+func (m *MapPollard) getView(ins modifyInstruction) (*view, error) {
+	view := initView(m.Roots, len(ins.after))
+	view.numLeaves = m.NumLeaves
+	view.totalRows = m.TotalRows
+	view.full = m.Full
+
+	err := view.fetchNodesNeededForDels(m, ins)
+	if err != nil {
+		return nil, err
+	}
+
+	err = view.fetchNodesNeededForAdd(m)
+	if err != nil {
+		return nil, err
+	}
+
+	return view, nil
+}
+
+// commitView commits the view to the map pollard.
+func (m *MapPollard) commitView(v *view) {
+	for _, delHash := range v.removed {
+		m.Nodes.Delete(delHash)
+	}
+
+	for k, v := range v.nodes {
+		m.Nodes.Put(k, v)
+	}
+
+	m.Roots = v.roots
+	m.NumLeaves = v.numLeaves
+	m.TotalRows = v.totalRows
+}
+
 // NodesInterface models the interface for the data storage for the map pollard.
 type NodesInterface interface {
 	// Get returns the Node and a boolean to indicate if it was found or not.
