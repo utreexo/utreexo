@@ -505,34 +505,47 @@ func FuzzMapPollardPrune(f *testing.F) {
 			t.Fatal(err)
 		}
 
+		// Collect cached leaves.
+		cachedLeaves := make([]Hash, 0, acc.Nodes.Length())
+		acc.Nodes.ForEach(func(k Hash, v Node) error {
+			if v.Remember {
+				cachedLeaves = append(cachedLeaves, k)
+			}
+			return nil
+		})
+
 		// Return now since we don't have anything to prune.
-		if acc.CachedLeaves.Length() == 0 {
+		if len(cachedLeaves) == 0 {
 			return
 		}
 
 		// Randomly choose targets to prune.
-		count := rand.Intn(acc.CachedLeaves.Length())
+		count := rand.Intn(len(cachedLeaves))
 		prunedPositions := make([]uint64, 0, count)
-		targets := make([]uint64, 0, acc.CachedLeaves.Length())
+		targets := make([]uint64, 0, len(cachedLeaves))
 
 		toPrune := make([]Hash, 0, count)
-		notPruned := make([]Hash, 0, acc.CachedLeaves.Length()-count)
-		acc.CachedLeaves.ForEach(func(k Hash, v LeafInfo) error {
-			if len(toPrune) >= count {
-				targets = append(targets, v.Position)
-				notPruned = append(notPruned, k)
-				return nil
-			}
-			if rand.Int()%2 == 0 {
-				toPrune = append(toPrune, k)
-				prunedPositions = append(prunedPositions, v.Position)
-			} else {
-				targets = append(targets, v.Position)
-				notPruned = append(notPruned, k)
+		notPruned := make([]Hash, 0, len(cachedLeaves)-count)
+
+		for _, leafHash := range cachedLeaves {
+			node, _ := acc.Nodes.Get(leafHash)
+			pos, err := acc.calculatePosition(leafHash, node)
+			if err != nil {
+				t.Fatal(err)
 			}
 
-			return nil
-		})
+			if len(toPrune) >= count {
+				targets = append(targets, pos)
+				notPruned = append(notPruned, leafHash)
+			}
+			if rand.Int()%2 == 0 {
+				toPrune = append(toPrune, leafHash)
+				prunedPositions = append(prunedPositions, pos)
+			} else {
+				targets = append(targets, pos)
+				notPruned = append(notPruned, leafHash)
+			}
+		}
 		slices.Sort(targets)
 		slices.Sort(prunedPositions)
 
@@ -559,8 +572,8 @@ func FuzzMapPollardPrune(f *testing.F) {
 
 		// Check that the positions that should not exist actually don't exist.
 		for _, pos := range shouldNotExist {
-			_, found := acc.Nodes.Get(pos)
-			if found {
+			hash := acc.GetHash(pos)
+			if hash != empty {
 				t.Fatalf("position %d shouldn't exist", pos)
 			}
 		}
