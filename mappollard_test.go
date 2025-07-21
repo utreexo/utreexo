@@ -49,6 +49,81 @@ func (m *MapPollard) sanityCheck() error {
 		return err
 	}
 
+	return m.checkPointers()
+}
+
+// checkNodePointer recursively checks that the belows are also pointing to the parent and checks to make sure
+// prunable nodes do not exist.
+func (m *MapPollard) checkNodePointer(node Node, hash Hash) error {
+	if (node.LBelow != empty) != (node.RBelow != empty) {
+		return fmt.Errorf("belows should both be not empty or empty but for %v, "+
+			"have l %v, r %v",
+			hash, node.LBelow, node.RBelow)
+	}
+	if node.LBelow == empty {
+		return nil
+	}
+
+	lNode, found := m.Nodes.Get(node.LBelow)
+	if !found {
+		return fmt.Errorf("node for %v has lbelow of %v but not found",
+			hash, node.LBelow)
+	}
+	if lNode.Above != hash {
+		return fmt.Errorf("node %v points to lbelow of %v but lbelow has above of %v",
+			hash, node.LBelow, lNode.Above)
+	}
+
+	rNode, found := m.Nodes.Get(node.RBelow)
+	if !found {
+		return fmt.Errorf("node for %v has rbelow of %v but not found",
+			hash, node.RBelow)
+	}
+	if rNode.Above != hash {
+		return fmt.Errorf("node %v points to rbelow of %v but rbelow has above of %v",
+			hash, node.RBelow, rNode.Above)
+	}
+
+	isPruneable, err := lNode.pruneable(rNode)
+	if err != nil {
+		return err
+	}
+	if isPruneable {
+		return fmt.Errorf("nodes:\nl (%v) %v\nr (%v) %v\nis pruneable but is present",
+			node.LBelow, lNode.String(), node.RBelow, rNode.String())
+	}
+
+	err = m.checkNodePointer(lNode, node.LBelow)
+	if err != nil {
+		return err
+	}
+
+	err = m.checkNodePointer(rNode, node.RBelow)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// checkPointers checks that all the belows of the nodes are also pointing up and
+// also checks that all prunable nodes are not cached.
+func (m *MapPollard) checkPointers() error {
+	for _, root := range m.Roots {
+		if root == empty {
+			continue
+		}
+		node, found := m.Nodes.Get(root)
+		if !found {
+			return fmt.Errorf("root hash of %v not found", root)
+		}
+
+		err := m.checkNodePointer(node, root)
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
