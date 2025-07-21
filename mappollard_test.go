@@ -89,13 +89,20 @@ func (m *MapPollard) checkProofNodes() error {
 // checkHashes checks that the leaves correctly hash up to the roots. Returns an error if
 // any of the roots or the intermediate nodes don't match up with the calculated hashes.
 func (m *MapPollard) checkHashes() error {
-	if m.CachedLeaves.Length() == 0 {
+	if m.Nodes.Length() == 0 {
 		return nil
 	}
 
-	leafHashes := make([]Hash, 0, m.CachedLeaves.Length())
-	m.CachedLeaves.ForEach(func(k Hash, _ LeafInfo) error {
-		leafHashes = append(leafHashes, k)
+	leafHashes := make([]Hash, 0, m.Nodes.Length())
+	m.Nodes.ForEach(func(hash Hash, node Node) error {
+		if m.Full && node.AddIndex == -1 {
+			return nil
+		}
+		if !node.Remember {
+			return nil
+		}
+
+		leafHashes = append(leafHashes, hash)
 		return nil
 	})
 
@@ -110,7 +117,7 @@ func (m *MapPollard) checkHashes() error {
 		}
 	}
 
-	haveRoots, rootPositions := m.getRoots()
+	haveRoots := m.getRoots()
 	rootIndexes, err := Verify(Stump{Roots: haveRoots, NumLeaves: m.NumLeaves}, leafHashes, proof)
 	if err != nil {
 		return fmt.Errorf("Failed to verify proof:\n%s\ndelHashes:\n%s\nerr: %v\n", proof.String(), printHashes(leafHashes), err)
@@ -127,23 +134,23 @@ func (m *MapPollard) checkHashes() error {
 
 	for i, rootIdx := range rootIndexes {
 		if haveRoots[rootIdx] != gotRoots[i] {
-			return fmt.Errorf("For root position %d, calculated %s but have %s",
-				rootPositions[i], hex.EncodeToString(gotRoots[i][:]),
+			return fmt.Errorf("calculated %s but have %s",
+				hex.EncodeToString(gotRoots[i][:]),
 				hex.EncodeToString(haveRoots[rootIdx][:]))
 		}
 	}
 
 	// Check all intermediate nodes.
 	for i, pos := range intermediate.positions {
-		haveNode, found := m.Nodes.Get(pos)
-		if !found {
+		hash := m.GetHash(pos)
+		if hash == empty {
 			continue
 		}
 		gotHash := intermediate.hashes[i]
 
-		if haveNode.Hash != gotHash {
+		if hash != gotHash {
 			return fmt.Errorf("For position %d, calculated %s but have %s",
-				pos, hex.EncodeToString(gotHash[:]), hex.EncodeToString(haveNode.Hash[:]))
+				pos, hex.EncodeToString(gotHash[:]), hex.EncodeToString(hash[:]))
 		}
 	}
 
