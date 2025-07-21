@@ -1816,6 +1816,8 @@ func (m *MapPollard) GetMissingPositions(origTargets []uint64) []uint64 {
 
 // Verify returns an error if the given proof and the delHashes do not hash up to the stored roots.
 // Passing the remember flag as true will cause the proof to be cached.
+//
+// This function is safe for concurrent access.
 func (m *MapPollard) Verify(delHashes []Hash, proof Proof, remember bool) error {
 	m.rwLock.Lock()
 	defer m.rwLock.Unlock()
@@ -1828,18 +1830,30 @@ func (m *MapPollard) Verify(delHashes []Hash, proof Proof, remember bool) error 
 //
 // This function is different from Verify() in that it's not safe for concurrent access.
 func (m *MapPollard) verify(delHashes []Hash, proof Proof, remember bool) error {
-	if TreeRows(m.NumLeaves) != m.TotalRows {
-		proof.Targets = translatePositions(proof.Targets, m.TotalRows, TreeRows(m.NumLeaves))
-	}
-
-	s := m.getStump()
-	_, err := Verify(s, delHashes, proof)
+	ingestIns, _, rootCandidates, err := generateIngestAndUndoInfo(m.NumLeaves, delHashes, proof)
 	if err != nil {
 		return err
 	}
 
+	rootIndexes := make([]int, 0, len(rootCandidates))
+	for i := range m.Roots {
+		if len(rootCandidates) > len(rootIndexes) &&
+			m.Roots[len(m.Roots)-(i+1)] == rootCandidates[len(rootIndexes)] {
+
+			rootIndexes = append(rootIndexes, len(m.Roots)-(i+1))
+		}
+	}
+
+	if len(rootCandidates) != len(rootIndexes) {
+		// The proof is invalid because some root candidates were not
+		// included in `roots`.
+		err := fmt.Errorf("MapPollard Verify fail. Invalid proof. Have %d roots but only "+
+			"matched %d roots", len(rootCandidates), len(rootIndexes))
+		return err
+	}
+
 	if remember {
-		m.ingest(delHashes, proof)
+		return m.ingest(ingestIns)
 	}
 
 	return nil
