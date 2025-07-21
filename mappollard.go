@@ -1221,62 +1221,68 @@ func (m *MapPollard) Modify(adds []Leaf, delHashes []Hash, proof Proof) error {
 	m.rwLock.Lock()
 	defer m.rwLock.Unlock()
 
-	// Check first that we have all the necessary nodes for deletion.
-	if !m.cached(delHashes) {
-		return fmt.Errorf("Cannot delete:\n%s\nas not all of them are cached",
-			printHashes(delHashes))
-	}
-
-	err := m.remove(proof)
+	ins, err := generateModifyIns(m.NumLeaves, delHashes, proof)
 	if err != nil {
 		return err
 	}
 
-	// Remove dels from the cached leaves.
-	m.uncacheLeaves(delHashes)
-
-	err = m.add(adds)
+	view, err := m.getView(ins)
 	if err != nil {
 		return err
 	}
+	err = view.remove(ins)
+	if err != nil {
+		return err
+	}
+
+	err = view.add(adds)
+	if err != nil {
+		return err
+	}
+
+	m.commitView(view)
 
 	return nil
 }
 
-// Modify takes in the additions and deletions and updates the accumulator accordingly.
-// It returns the created heights and the indexes of the deleted leaves. The height and the index
-// returns as math.MaxUint32 if the leaves were added with ingest or if they were a result of
-// and Undo with the ttls being provided.
+// ModifyAndReturnTTLs takes in the additions and deletions and updates the accumulator accordingly.
+// It returns the created indexes of the deleted leaves. The the index returns as -1 if the leaves
+// were added with ingest or if they were a result of and Undo without the ttls being provided.
 func (m *MapPollard) ModifyAndReturnTTLs(adds []Leaf, delHashes []Hash, proof Proof) (
-	[]uint32, error) {
+	[]int32, error) {
 
 	m.rwLock.Lock()
 	defer m.rwLock.Unlock()
 
-	// Check first that we have all the necessary nodes for deletion.
-	if !m.cached(delHashes) {
-		return nil, fmt.Errorf("Cannot delete:\n%s\nas not all of them are cached",
-			printHashes(delHashes))
-	}
-
-	createIndexes := make([]uint32, 0, len(delHashes))
+	createIndexes := make([]int32, 0, len(delHashes))
 	for _, delHash := range delHashes {
-		leafInfo, _ := m.CachedLeaves.Get(delHash)
+		leafInfo, found := m.Nodes.Get(delHash)
+		if !found {
+			return nil, fmt.Errorf("missing %v in the nodes. Cannot return ttls", delHash)
+		}
 		createIndexes = append(createIndexes, leafInfo.AddIndex)
 	}
 
-	err := m.remove(proof)
+	ins, err := generateModifyIns(m.NumLeaves, delHashes, proof)
 	if err != nil {
 		return nil, err
 	}
 
-	// Remove dels from the cached leaves.
-	m.uncacheLeaves(delHashes)
-
-	err = m.add(adds)
+	view, err := m.getView(ins)
 	if err != nil {
 		return nil, err
 	}
+	err = view.remove(ins)
+	if err != nil {
+		return nil, err
+	}
+
+	err = view.add(adds)
+	if err != nil {
+		return nil, err
+	}
+
+	m.commitView(view)
 
 	return createIndexes, nil
 }
