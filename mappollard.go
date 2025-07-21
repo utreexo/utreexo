@@ -1756,8 +1756,7 @@ func (m *MapPollard) VerifyPartialProof(origTargets []uint64, delHashes, proofHa
 
 	proofHashIdx := 0
 	for _, pos := range proofPositions {
-		leaf, _ := m.Nodes.Get(pos)
-		hash := leaf.Hash
+		hash := m.GetHash(pos)
 		if hash == empty {
 			// We couldn't fetch the hash from the accumulator so it should
 			// be provided in the proofHashes.
