@@ -2149,15 +2149,15 @@ func (m *MapPollard) getRoots() []Hash {
 
 // GetHash returns the hash for the given position. Empty hash (all values are 0) is returned
 // if the given position is not cached.
+//
+// This function is NOT safe for concurrent access.
 func (m *MapPollard) GetHash(pos uint64) Hash {
-	m.rwLock.RLock()
-	defer m.rwLock.RUnlock()
-
 	if m.TotalRows != TreeRows(m.NumLeaves) {
 		pos = translatePos(pos, TreeRows(m.NumLeaves), m.TotalRows)
 	}
-	leaf, _ := m.Nodes.Get(pos)
-	return leaf.Hash
+
+	hash, _, _, _, _ := m.getNodeByPos(pos)
+	return hash
 }
 
 // getLeafPosition returns the position of the leaf for the given hash and returns false
