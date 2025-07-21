@@ -1725,7 +1725,66 @@ func (m *MapPollard) Ingest(delHashes []Hash, proof Proof) error {
 	m.rwLock.Lock()
 	defer m.rwLock.Unlock()
 
-	return m.ingest(delHashes, proof)
+	ingestIns, _, _, err := generateIngestAndUndoInfo(m.NumLeaves, delHashes, proof)
+	if err != nil {
+		return err
+	}
+
+	return m.ingest(ingestIns)
+}
+
+// ingest places the proof in the tree and remembers them.
+//
+// NOTE: there's no verification done that the passed in proof is valid. It's the
+// caller's responsibility to verify that the given proof is valid.
+//
+// This function is different from Ingest() in that it's not safe for concurrent access.
+func (m *MapPollard) ingest(ins ingestInstruction) error {
+	if len(ins.Hashes)%3 != 0 {
+		return fmt.Errorf("ingest hash length of %v is malformed as "+
+			"it's not divisible by 3", len(ins.Hashes))
+	}
+
+	for i := len(ins.Hashes) - 1; i >= 0; i-- {
+		hash := ins.Hashes[i]
+		rBelow := ins.Hashes[i-1]
+		lBelow := ins.Hashes[i-2]
+		rRem := ins.isLeaf[i-1]
+		lRem := ins.isLeaf[i-2]
+
+		node, found := m.Nodes.Get(hash)
+		if !found {
+			return fmt.Errorf("node hash %v not found", hash)
+		}
+		if node.RBelow != empty {
+			i--
+			i--
+			continue
+		}
+
+		node.LBelow = lBelow
+		node.RBelow = rBelow
+		m.Nodes.Put(hash, node)
+
+		rNode := Node{
+			Remember: rRem || m.Full,
+			Above:    hash,
+			AddIndex: -1,
+		}
+		m.Nodes.Put(rBelow, rNode)
+
+		lNode := Node{
+			Remember: lRem || m.Full,
+			Above:    hash,
+			AddIndex: -1,
+		}
+		m.Nodes.Put(lBelow, lNode)
+
+		i--
+		i--
+	}
+
+	return nil
 }
 
 // Prune prunes the passed in hashes and the proofs for them. Will not prune the proof if it's
