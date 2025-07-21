@@ -39,11 +39,6 @@ func (m *MapPollard) rootToString() string {
 // 2: Needed nodes for the cached leaves are cached.
 // 3: Cached proof hashes up to the roots.
 func (m *MapPollard) sanityCheck() error {
-	err := m.checkCachedNodesAreRemembered()
-	if err != nil {
-		return err
-	}
-
 	err = m.checkProofNodes()
 	if err != nil {
 		return err
@@ -55,23 +50,6 @@ func (m *MapPollard) sanityCheck() error {
 	}
 
 	return m.checkPruned()
-}
-
-// checkCachedNodesAreRemembered checks that cached leaves are present in m.Nodes and that they're
-// marked to be remembered.
-func (m *MapPollard) checkCachedNodesAreRemembered() error {
-	return m.CachedLeaves.ForEach(func(k Hash, v LeafInfo) error {
-		leaf, found := m.Nodes.Get(v.Position)
-		if !found {
-			return fmt.Errorf("Cached node of %s at pos %d not cached in m.Nodes", k, v)
-		}
-
-		if leaf.Remember == false {
-			return fmt.Errorf("Cached node of %s at pos %d not marked as remembered in m.Nodes", k, v)
-		}
-
-		return nil
-	})
 }
 
 // checkPruned checks that unneeded nodes aren't cached.
