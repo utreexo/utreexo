@@ -2182,19 +2182,24 @@ func (m *MapPollard) GetHash(pos uint64) Hash {
 	return hash
 }
 
-// getLeafPosition returns the position of the leaf for the given hash and returns false
-// if the leaf hash doesn't exist.
+// getLeafHashPosition calculates and returns the position of the given hash. The boolean
+// indicates if the hash was found in the accumulator. It'll try to filter out non-leaves
+// but it may not be able to if the mappollard is not full.
 //
-// MUST be called with the lock held.
+// This function is NOT safe for concurrent access.
 func (m *MapPollard) getLeafHashPosition(hash Hash) (uint64, bool) {
-	cachedLeaf, found := m.CachedLeaves.Get(hash)
+	node, found := m.Nodes.Get(hash)
 	if !found {
 		return 0, false
 	}
-	pos := cachedLeaf.Position
 
-	if m.TotalRows != TreeRows(m.NumLeaves) {
-		pos = translatePos(pos, m.TotalRows, TreeRows(m.NumLeaves))
+	if node.AddIndex == -1 || !node.Remember {
+		return 0, false
+	}
+
+	pos, err := m.calculatePosition(hash, node)
+	if err != nil {
+		return 0, false
 	}
 
 	return pos, true
@@ -2202,6 +2207,8 @@ func (m *MapPollard) getLeafHashPosition(hash Hash) (uint64, bool) {
 
 // GetLeafPosition returns the position of the leaf for the given hash. Returns false if
 // the hash is not the hash of a leaf or if the hash wasn't found in the accumulator.
+//
+// This function is safe for concurrent access.
 func (m *MapPollard) GetLeafPosition(hash Hash) (uint64, bool) {
 	m.rwLock.RLock()
 	defer m.rwLock.RUnlock()
