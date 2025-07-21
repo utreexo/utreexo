@@ -15,13 +15,6 @@ import (
 // Assert that Pollard implements the UtreexoTest interface.
 var _ UtreexoTest = (*Pollard)(nil)
 
-// cachedMapToString returns "n/a" as it's not present in Pollard
-//
-// Implements the UtreexoTest interface.
-func (p *Pollard) cachedMapToString() string {
-	return "n/a"
-}
-
 // nodeMapToString returns the node map as a string.
 //
 // Implements the UtreexoTest interface.
@@ -716,7 +709,6 @@ func fuzzModify(t *testing.T, p UtreexoTest, startLeaves, modifyAdds, delCount u
 	}
 	beforeStr := p.String()
 	beforeMap := p.nodeMapToString()
-	beforeCached := p.cachedMapToString()
 
 	modifyLeaves, _, _ := getAddsAndDels(uint32(p.GetNumLeaves()), modifyAdds, 0)
 	proof, err := p.Prove(delHashes)
@@ -732,7 +724,6 @@ func fuzzModify(t *testing.T, p UtreexoTest, startLeaves, modifyAdds, delCount u
 	}
 	afterStr := p.String()
 	afterMap := p.nodeMapToString()
-	afterCached := p.cachedMapToString()
 
 	err = p.sanityCheck()
 	if err != nil {
@@ -754,9 +745,7 @@ func fuzzModify(t *testing.T, p UtreexoTest, startLeaves, modifyAdds, delCount u
 			"\nmodifyDels:\n%s"+
 			"\ndel targets:\n %v"+
 			"\nnodemap before modify:\n %s"+
-			"\nnodemap after modify:\n %s"+
-			"\ncachedmap before modify:\n %s"+
-			"\ncachedmap after modify:\n %s",
+			"\nnodemap after modify:\n %s",
 			err,
 			beforeStr,
 			afterStr,
@@ -766,9 +755,7 @@ func fuzzModify(t *testing.T, p UtreexoTest, startLeaves, modifyAdds, delCount u
 			printHashes(delHashes),
 			delTargets,
 			beforeMap,
-			afterMap,
-			beforeCached,
-			afterCached)
+			afterMap)
 		t.Fatal(err)
 	}
 }
