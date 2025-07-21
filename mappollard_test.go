@@ -39,7 +39,7 @@ func (m *MapPollard) rootToString() string {
 // 2: Needed nodes for the cached leaves are cached.
 // 3: Cached proof hashes up to the roots.
 func (m *MapPollard) sanityCheck() error {
-	err = m.checkProofNodes()
+	err := m.checkProofNodes()
 	if err != nil {
 		return err
 	}
@@ -56,23 +56,29 @@ func (m *MapPollard) sanityCheck() error {
 // of nodes.
 func (m *MapPollard) checkProofNodes() error {
 	// Sanity check.
-	return m.CachedLeaves.ForEach(func(k Hash, v LeafInfo) error {
-		leaf, found := m.Nodes.Get(v.Position)
-		if !found {
-			return fmt.Errorf("Corrupted pollard. Missing cached leaf %s at %d", k, v)
+	return m.Nodes.ForEach(func(k Hash, v Node) error {
+		if m.Full && v.AddIndex == -1 {
+			return nil
+		}
+		if !v.Remember {
+			return nil
 		}
 
-		if k != leaf.Hash {
-			return fmt.Errorf("Corrupted pollard. Pos %d cached hash: %s, but have %s",
-				v, k, leaf.Hash)
+		position, err := m.calculatePosition(k, v)
+		if err != nil {
+			return err
 		}
-
-		proofPos := proofPosition(v.Position, m.NumLeaves, m.TotalRows)
+		proofPos := proofPosition(position, m.NumLeaves, m.TotalRows)
 		for _, pos := range proofPos {
-			_, found := m.Nodes.Get(pos)
-			if !found {
+			hash, _, _, _, err := m.getNodeByPos(pos)
+			if err != nil {
 				return fmt.Errorf("Corrupted pollard. Missing pos %d "+
-					"needed for proving %d", pos, v)
+					"needed for proving %d", pos, position)
+			}
+
+			if hash == empty {
+				return fmt.Errorf("Corrupted pollard. Missing pos %d "+
+					"needed for proving %d", pos, position)
 			}
 		}
 
