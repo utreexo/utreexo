@@ -2208,8 +2208,7 @@ func (m *MapPollard) GetStump() Stump {
 //
 // This function is different from GetStump() in that it's not safe for concurrent access.
 func (m *MapPollard) getStump() Stump {
-	roots, _ := m.getRoots()
-	return Stump{Roots: roots, NumLeaves: m.NumLeaves}
+	return Stump{Roots: m.getRoots(), NumLeaves: m.NumLeaves}
 }
 
 // GetLeafHashPositions returns the positions for the given leaf hashes.
