@@ -1297,6 +1297,145 @@ func (m *MapPollard) AllSubTreesToString() string {
 	return AllSubTreesToString(m)
 }
 
+// undoSingleAdd undo-s the last single addition and will put back empty roots that were
+// written over.
+func (m *MapPollard) undoSingleAdd(prevRoots []Hash) error {
+	startIdx := 0
+	for i, root := range m.Roots {
+		if i > len(prevRoots)-1 {
+			break
+		}
+
+		if root != prevRoots[i] {
+			break
+		}
+
+		startIdx++
+	}
+
+	// Pop from the root hashes and remove node.
+	var rootHash Hash
+	rootHash, m.Roots = m.Roots[len(m.Roots)-1], m.Roots[:len(m.Roots)-1]
+	node, found := m.Nodes.Get(rootHash)
+	if !found {
+		return fmt.Errorf("roothash of %v not found in nodes", rootHash)
+	}
+	m.Nodes.Delete(rootHash)
+
+	for i := startIdx; i < len(prevRoots); i++ {
+		if prevRoots[i] == empty {
+			m.Roots = append(m.Roots, prevRoots[i])
+			m.Nodes.Put(prevRoots[i], Node{AddIndex: -1})
+
+			continue
+		}
+
+		// We have nothing cached.
+		if node.RBelow == empty && node.LBelow == empty {
+			m.Roots = append(m.Roots, prevRoots[i])
+			m.Nodes.Put(prevRoots[i], Node{AddIndex: -1})
+
+			node = Node{AddIndex: -1}
+			rootHash = empty
+			continue
+		}
+
+		rNode, found := m.Nodes.Get(node.RBelow)
+		if !found {
+			return fmt.Errorf("rBelow of %v for %v not found in nodes",
+				node.RBelow, rootHash)
+		}
+		lNode, found := m.Nodes.Get(node.LBelow)
+		if !found {
+			return fmt.Errorf("lBelow of %v for %v not found in nodes",
+				node.LBelow, rootHash)
+		}
+
+		// Swap and point to children.
+		var err error
+		rNode, lNode, err = m.swapBelow(rNode, lNode, node.RBelow, node.LBelow)
+		if err != nil {
+			return err
+		}
+
+		// Make lnode the root.
+		lNode.Above = empty
+		m.Nodes.Put(node.LBelow, lNode)
+		m.Roots = append(m.Roots, node.LBelow)
+
+		// Remove rnode.
+		m.Nodes.Delete(node.RBelow)
+
+		// Set rNode as next node to be removed.
+		rootHash = node.RBelow
+		node = rNode
+	}
+
+	m.NumLeaves--
+	m.TotalRows = TreeRows(m.NumLeaves)
+
+	return nil
+}
+
+// updateAbove makes n's belows point to newHash.
+func (m *MapPollard) updateAbove(n Node, newHash Hash) error {
+	if n.LBelow == empty {
+		return nil
+	}
+
+	lBelow, lfound := m.Nodes.Get(n.LBelow)
+	rBelow, rfound := m.Nodes.Get(n.RBelow)
+	if !lfound && !rfound {
+		return nil
+	}
+
+	if !lfound || !rfound {
+		return fmt.Errorf("n points to lBelow of %v and rBelow of %v "+
+			"but only one of them exists", n.LBelow, n.RBelow)
+	}
+
+	lBelow.Above = newHash
+	rBelow.Above = newHash
+
+	m.Nodes.Put(n.LBelow, lBelow)
+	m.Nodes.Put(n.RBelow, rBelow)
+
+	return nil
+}
+
+func (m *MapPollard) swapBelow(a, b Node, aHash, bHash Hash) (Node, Node, error) {
+	err := m.updateAbove(a, bHash)
+	if err != nil {
+		return a, b, err
+	}
+	err = m.updateAbove(b, aHash)
+	if err != nil {
+		return a, b, err
+	}
+
+	// Swap below nodes.
+	a.LBelow, a.RBelow, b.LBelow, b.RBelow =
+		b.LBelow, b.RBelow, a.LBelow, a.RBelow
+
+	return a, b, err
+}
+
+// getSingleRoots returns the roots after each single addition.
+func getSingleRoots(s Stump, adds []Hash) ([][]Hash, error) {
+	roots := make([][]Hash, len(adds))
+	for i, add := range adds {
+		roots[i] = make([]Hash, len(s.Roots))
+		copy(roots[i], s.Roots)
+
+		_, err := s.Update(nil, []Hash{add}, Proof{})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return roots, nil
+}
+
 // undoAdd will remove the additions that had happened and will place empty roots back to where they were.
 func (m *MapPollard) undoAdd(numAdds uint64, origTargets []uint64, origPrevRoots []Hash) error {
 	// Get the previously empty roots positions that have been written over by the add.
