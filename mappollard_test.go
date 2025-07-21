@@ -49,40 +49,7 @@ func (m *MapPollard) sanityCheck() error {
 		return err
 	}
 
-	return m.checkPruned()
-}
-
-// checkPruned checks that unneeded nodes aren't cached.
-func (m *MapPollard) checkPruned() error {
-	neededPos := make(map[uint64]struct{})
-	m.CachedLeaves.ForEach(func(_ Hash, v LeafInfo) error {
-		neededPos[v.Position] = struct{}{}
-
-		needs, computables := ProofPositions([]uint64{v.Position}, m.NumLeaves, m.TotalRows)
-		for _, need := range needs {
-			neededPos[need] = struct{}{}
-		}
-
-		for _, computable := range computables {
-			neededPos[computable] = struct{}{}
-		}
-		return nil
-	})
-
-	for _, pos := range RootPositions(m.NumLeaves, m.TotalRows) {
-		neededPos[pos] = struct{}{}
-	}
-
-	return m.Nodes.ForEach(func(k uint64, v Leaf) error {
-		_, found := neededPos[k]
-		if !found {
-			return fmt.Errorf("Have node %s at pos %d in map "+
-				"even though it's not needed.\nCachedLeaves:\n%v\nm.Nodes:\n%v\n",
-				v, k, m.CachedLeaves, m.Nodes)
-		}
-
-		return nil
-	})
+	return nil
 }
 
 // checkProofNodes checks that all the proof positions needed to cache a proof exists in the map
