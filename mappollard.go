@@ -2235,9 +2235,9 @@ func NewMapPollardFromRoots(rootHashes []Hash, numLeaves uint64) MapPollard {
 	m := NewMapPollard(false)
 	m.NumLeaves = numLeaves
 
-	rootPositions := RootPositions(m.NumLeaves, m.TotalRows)
-	for i, rootPosition := range rootPositions {
-		m.Nodes.Put(rootPosition, Leaf{Hash: rootHashes[i]})
+	for _, rootHash := range rootHashes {
+		m.Nodes.Put(rootHash, Node{AddIndex: -1})
+		m.Roots = append(m.Roots, rootHash)
 	}
 
 	return m
