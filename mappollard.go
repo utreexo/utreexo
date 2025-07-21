@@ -2128,29 +2128,23 @@ func (m *MapPollard) Prune(hashes []Hash) error {
 	return nil
 }
 
-// getRoots returns the hashes of the roots.
+// GetRoots returns the hashes of the roots.
+//
+// This function is safe for concurrent access.
 func (m *MapPollard) GetRoots() []Hash {
 	m.rwLock.RLock()
 	defer m.rwLock.RUnlock()
 
-	roots, _ := m.getRoots()
-	return roots
+	return m.getRoots()
 }
 
-// getRoots returns the root hashes and their positions.
+// getRoots returns the root hashes.
 //
 // This function is different from GetRoots() in that it's not safe for concurrent access.
-func (m *MapPollard) getRoots() ([]Hash, []uint64) {
-	nRoots := numRoots(m.NumLeaves)
-
-	roots := make([]Hash, 0, nRoots)
-	rootPositions := RootPositions(m.NumLeaves, m.TotalRows)
-	for _, rootPosition := range rootPositions {
-		node, _ := m.Nodes.Get(rootPosition)
-		roots = append(roots, node.Hash)
-	}
-
-	return roots, rootPositions
+func (m *MapPollard) getRoots() []Hash {
+	roots := make([]Hash, len(m.Roots))
+	copy(roots, m.Roots)
+	return roots
 }
 
 // GetHash returns the hash for the given position. Empty hash (all values are 0) is returned
