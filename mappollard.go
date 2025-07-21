@@ -2127,6 +2127,29 @@ func (m *MapPollard) Prune(hashes []Hash) error {
 	return nil
 }
 
+// GetRootNodes returns the nodes of the roots of the accumulator.
+//
+// This function is safe for concurrent access.
+func (m *MapPollard) GetRootNodes() []Node {
+	m.rwLock.RLock()
+	defer m.rwLock.RUnlock()
+
+	roots := make([]Hash, len(m.Roots))
+	copy(roots, m.Roots)
+
+	nodes := make([]Node, 0, len(m.Roots))
+	for _, root := range roots {
+		node, found := m.Nodes.Get(root)
+		if found {
+			nodes = append(nodes, node)
+		} else {
+			nodes = append(nodes, Node{AddIndex: -1})
+		}
+	}
+
+	return nodes
+}
+
 // GetRoots returns the hashes of the roots.
 //
 // This function is safe for concurrent access.
