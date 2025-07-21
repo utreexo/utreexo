@@ -720,7 +720,7 @@ func (v *view) undoDeletion(createIndex []int32, undoInfo undoInfo, ingestIns in
 			return fmt.Errorf("expected to find %v but didn't", hash)
 		}
 
-		node.AddIndex = int32(index)
+		node.AddIndex = index
 		node.Remember = true // We probably want to hold onto these if we're adding the index.
 		v.nodes[hash] = node
 	}
