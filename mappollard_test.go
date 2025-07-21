@@ -1014,7 +1014,7 @@ func FuzzMapPollardTTLs(f *testing.F) {
 
 		m := NewMapPollard(true)
 
-		leafMap := make(map[Hash]uint32, 50*numAdds)
+		leafMap := make(map[Hash]int32, 50*numAdds)
 
 		var totalAdds, totalDels int
 		for b := 1; b <= 50; b++ {
@@ -1023,12 +1023,12 @@ func FuzzMapPollardTTLs(f *testing.F) {
 			totalDels += len(delHashes)
 
 			for i, add := range adds {
-				leafMap[add.Hash] = uint32(i)
+				leafMap[add.Hash] = int32(i)
 			}
 
 			proof, err := m.Prove(delHashes)
 			if err != nil {
-				t.Fatalf("FuzzTTLs fail at block %d. Couldn't prove\n%s\nError: %v",
+				t.Fatalf("FuzzMapPollardTTLs fail at block %d. Couldn't prove\n%s\nError: %v",
 					b, printHashes(delHashes), err)
 			}
 
@@ -1036,30 +1036,35 @@ func FuzzMapPollardTTLs(f *testing.F) {
 
 			createIndex, err := m.ModifyAndReturnTTLs(adds, delHashes, proof)
 			if err != nil {
-				t.Fatalf("FuzzTTLs fail at block %d. Error: %v", b, err)
+				t.Fatalf("FuzzMapPollardTTLs fail at block %d. Error: %v", b, err)
 			}
 
 			for i, delHash := range delHashes {
 				ttlInfo, found := leafMap[delHash]
 				if !found {
-					t.Fatalf("FuzzTTLs fail at block %d. Expected to find delhash %v but didn't",
+					t.Fatalf("FuzzMapPollardTTLs fail at block %d. Expected to find delhash %v but didn't",
 						b, delHash)
 				}
 
 				if createIndex[i] != ttlInfo {
-					t.Fatalf("FuzzTTLs fail at block %d. For %v, expected create index %v got %v",
+					t.Fatalf("FuzzMapPollardTTLs fail at block %d. For %v, expected create index %v got %v",
 						b, delHash, ttlInfo, createIndex[i])
 				}
 			}
 
-			err = m.UndoWithTTLs(uint64(len(adds)), createIndex, proof, delHashes, origRoots)
+			addHashes := make([]Hash, len(adds))
+			for i, add := range adds {
+				addHashes[i] = add.Hash
+			}
+
+			err = m.UndoWithTTLs(addHashes, createIndex, proof, delHashes, origRoots)
 			if err != nil {
-				t.Fatalf("FuzzTTLs fail at block %d. Error: %v", b, err)
+				t.Fatalf("FuzzMapPollardTTLs fail at block %d. Error: %v", b, err)
 			}
 
 			gotIndex, err := m.ModifyAndReturnTTLs(adds, delHashes, proof)
 			if err != nil {
-				t.Fatalf("FuzzTTLs fail at block %d. Error: %v", b, err)
+				t.Fatalf("FuzzMapPollardTTLs fail at block %d. Error: %v", b, err)
 			}
 
 			require.Equal(t, createIndex, gotIndex)
