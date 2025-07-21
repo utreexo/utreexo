@@ -2022,32 +2022,38 @@ func (m *MapPollard) Prune(hashes []Hash) error {
 	defer m.rwLock.Unlock()
 
 	for _, hash := range hashes {
-		cachedLeaf, found := m.CachedLeaves.Get(hash)
+		node, sibNode, aNode, sibHash, found, err := m.fetchNodeForDel(hash)
+		if err != nil {
+			return err
+		}
 		if !found {
 			continue
 		}
-		pos := cachedLeaf.Position
 
-		m.CachedLeaves.Delete(hash)
-
-		leaf, found := m.Nodes.Get(pos)
-		if !found {
-			return fmt.Errorf("node map inconsistent as the hash %s was found"+
-				"in the cache but not the node map", leaf.Hash)
+		if node.isRoot() {
+			continue
 		}
 
-		// Mark the remember field as false and put that leaf in the map.
-		leaf.Remember = false
-		m.Nodes.Put(pos, leaf)
+		node.Remember = false
+		canPrune, err := node.pruneable(sibNode)
+		if err != nil {
+			return err
+		}
 
-		// Call prune positions until the root.
-		for row := DetectRow(pos, m.TotalRows); row <= TreeRows(m.NumLeaves); row++ {
-			// Break if we're on a root.
-			if isRootPositionTotalRows(pos, m.NumLeaves, m.TotalRows) {
-				break
-			}
-			m.prunePosition(pos)
-			pos = Parent(pos, m.TotalRows)
+		if !canPrune {
+			continue
+		}
+
+		m.Nodes.Delete(sibHash)
+		m.Nodes.Delete(hash)
+
+		aNode.RBelow = empty
+		aNode.LBelow = empty
+		m.Nodes.Put(node.Above, aNode)
+
+		err = m.maybeForget(node.Above)
+		if err != nil {
+			return err
 		}
 	}
 
