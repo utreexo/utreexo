@@ -1548,6 +1548,83 @@ func (m *MapPollard) Undo(adds []Hash, proof Proof, hashes, origPrevRoots []Hash
 	return nil
 }
 
+// calculatePosition returns the position of the given hash and node.
+func (m *MapPollard) calculatePosition(hash Hash, node Node) (uint64, error) {
+	// Tells whether to follow the left child or the right child when going
+	// down the tree. 0 means left, 1 means right.
+	leftRightIndicator := uint64(0)
+
+	rowsToTop := 0
+	for node.Above != empty {
+		aboveNode, found := m.Nodes.Get(node.Above)
+		if !found {
+			return 0, fmt.Errorf("calculatePosition err: node %v points to above node of %v "+
+				"but it's not found", hash, node.Above)
+		}
+
+		if aboveNode.LBelow == hash {
+			// Left
+			leftRightIndicator <<= 1
+		} else {
+			// Right
+			leftRightIndicator <<= 1
+			leftRightIndicator |= 1
+		}
+
+		hash = node.Above
+		node = aboveNode
+
+		// Ugly but need to flip the bit that we set in this loop as the roots
+		// don't point their children instead of their nieces.
+		if rowsToTop == 0 {
+			leftRightIndicator ^= 1
+		}
+		rowsToTop++
+	}
+	forestRows := TreeRows(m.NumLeaves)
+
+	// Calculate which row the root is on.
+	rootRow := -1
+	// Start from the lowest root.
+	rootIdx := len(m.Roots) - 1
+	for h := 0; h <= int(forestRows); h++ {
+		// Because every root represents a perfect tree of every leaf
+		// we ever added, each root position will be a power of 2.
+		//
+		// Go through the bits of NumLeaves. Every bit that is on
+		// represents a root.
+		if (m.NumLeaves>>h)&1 == 1 {
+			// If we found the root, save the row to rootRow
+			// and return.
+			if m.Roots[rootIdx] == hash {
+				rootRow = h
+				break
+			}
+
+			// Check the next higher root.
+			rootIdx--
+		}
+	}
+
+	// Start from the root and work our way down the position that we want.
+	retPos := rootPosition(m.NumLeaves, uint8(rootRow), forestRows)
+
+	for i := 0; i < rowsToTop; i++ {
+		isRight := uint64(1) << i
+		if leftRightIndicator&isRight == isRight {
+			// Grab the sibling since the pollard nodes point to their
+			// niece. My sibling's nieces are my children.
+			retPos = sibling(RightChild(retPos, forestRows))
+		} else {
+			// Grab the sibling since the pollard nodes point to their
+			// niece. My sibling's nieces are my children.
+			retPos = sibling(LeftChild(retPos, forestRows))
+		}
+	}
+
+	return retPos, nil
+}
+
 // Prove returns a proof of all the targets that are passed in.
 // TODO: right now it refuses to prove anything but the explicitly cached leaves.
 // There may be some leaves that it could prove that's not cached due to the proofs
