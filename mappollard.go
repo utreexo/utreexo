@@ -1185,6 +1185,9 @@ type MapPollard struct {
 	// rwLock protects the below maps from concurrent accesses.
 	rwLock *sync.RWMutex
 
+	// Roots are the tops of each of the merkle trees.
+	Roots []Hash
+
 	// Nodes are all the elements in the utreexo accumulator.
 	Nodes NodesInterface
 
