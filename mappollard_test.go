@@ -280,9 +280,6 @@ func FuzzMapPollardChain(f *testing.F) {
 		sc := newSimChainWithSeed(duration, seed)
 
 		m := NewMapPollard(false)
-		if numAdds&1 == 1 {
-			m.TotalRows = 50
-		}
 		full := NewAccumulator()
 
 		var totalAdds, totalDels int
@@ -339,18 +336,20 @@ func FuzzMapPollardChain(f *testing.F) {
 				t.Fatal(err)
 			}
 
-			cachedHashes := make([]Hash, 0, m.CachedLeaves.Length())
-			leafHashes := make([]Hash, 0, m.CachedLeaves.Length())
-			m.CachedLeaves.ForEach(func(k Hash, _ LeafInfo) error {
-				cachedHashes = append(cachedHashes, k)
-				leafHashes = append(leafHashes, k)
+			cachedHashes := make([]Hash, 0, m.Nodes.Length())
+			leafHashes := make([]Hash, 0, m.Nodes.Length())
+			m.Nodes.ForEach(func(k Hash, v Node) error {
+				if v.Remember {
+					cachedHashes = append(cachedHashes, k)
+					leafHashes = append(leafHashes, k)
+				}
 				return nil
 			})
 
 			if !reflect.DeepEqual(cachedHashes, leafHashes) {
-				err := fmt.Errorf("Fail at block %d. For cachedLeaves of %v\ngot cachedHashes:\n%s\n"+
+				err := fmt.Errorf("Fail at block %d\ngot cachedHashes:\n%s\n"+
 					"leafHashes:\n%s\nmaptreexo:\n%s\nfull:\n%s\n",
-					b, m.CachedLeaves, printHashes(cachedHashes), printHashes(leafHashes),
+					b, printHashes(cachedHashes), printHashes(leafHashes),
 					m.String(), full.String())
 				t.Fatal(err)
 			}
