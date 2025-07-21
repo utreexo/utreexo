@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"sync"
 
 	"golang.org/x/exp/slices"
@@ -1625,6 +1626,18 @@ func (m *MapPollard) calculatePosition(hash Hash, node Node) (uint64, error) {
 	return retPos, nil
 }
 
+// cached checks if the given hashes are cached.
+func (m *MapPollard) cached(hashes []Hash) bool {
+	for _, hash := range hashes {
+		_, found := m.Nodes.Get(hash)
+		if !found {
+			return found
+		}
+	}
+
+	return true
+}
+
 // Prove returns a proof of all the targets that are passed in.
 // TODO: right now it refuses to prove anything but the explicitly cached leaves.
 // There may be some leaves that it could prove that's not cached due to the proofs
@@ -1639,46 +1652,84 @@ func (m *MapPollard) Prove(proveHashes []Hash) (Proof, error) {
 			printHashes(proveHashes))
 	}
 
+	hashMap := make(map[Hash]uint64, len(proveHashes)*2)
+	canCalcMap := make(map[uint64]Hash, len(proveHashes)*2)
+
+	var err error
 	origTargets := make([]uint64, len(proveHashes))
 	for i := range origTargets {
-		v, _ := m.CachedLeaves.Get(proveHashes[i])
-		origTargets[i] = v.Position
-	}
-
-	// Sort targets first. Copy to avoid mutating the original.
-	targets := copySortedFunc(origTargets, uint64Cmp)
-
-	// The positions of the hashes we need to prove the passed in targets.
-	proofPos, _ := ProofPositions(targets, m.NumLeaves, m.TotalRows)
-
-	// Go through all the needed positions and grab the hashes for them.
-	// If the node doesn't exist, check that it's calculateable. If it is,
-	// calculate it. If it isn't, return an error.
-	hashes := make([]Hash, 0, len(proofPos))
-	for i := range proofPos {
-		pos := proofPos[i]
-		node, ok := m.Nodes.Get(pos)
-		if !ok {
-			// Should never happen. This means that there's something wrong with the
-			// implementation since we've already checked that the proof for the leaf
-			// exists.
-			return Proof{}, fmt.Errorf("Proof position %v not cached for the requested "+
-				"target slice of: %v\nproveHashes:\n%s\nneededPositions:%v\n",
-				pos, origTargets, printHashes(proveHashes), proofPos)
+		n, _ := m.Nodes.Get(proveHashes[i])
+		origTargets[i], err = m.calculatePosition(proveHashes[i], n)
+		if err != nil {
+			return Proof{}, err
 		}
 
-		hashes = append(hashes, node.Hash)
-	}
+		// Nothing more to do if I'm a root.
+		if n.isRoot() {
+			continue
+		}
 
-	// If the map pollard is set with higher rows than what's actually needed,
-	// translate the positions.
-	if m.TotalRows != TreeRows(m.NumLeaves) {
-		for i := range origTargets {
-			origTargets[i] = translatePos(origTargets[i], m.TotalRows, TreeRows(m.NumLeaves))
+		// Add myself.
+		hashMap[proveHashes[i]] = origTargets[i]
+
+		// Get sibhash.
+		aNode, found := m.Nodes.Get(n.Above)
+		if !found {
+			return Proof{}, fmt.Errorf("%v's above of %v not found",
+				proveHashes[i], n.Above)
+		}
+		sibHash, _, err := aNode.getSibHash(proveHashes[i])
+		if err != nil {
+			return Proof{}, err
+		}
+
+		// Add the sibhash to the hashMap.
+		hashMap[sibHash] = sibling(origTargets[i])
+
+		hash := n.Above
+		n = aNode
+		parentPos := Parent(origTargets[i], m.TotalRows)
+		pos := sibling(parentPos)
+
+		for !n.isRoot() {
+			// Add sibling as calculatable.
+			hashMap[hash] = pos
+
+			aNode, found = m.Nodes.Get(n.Above)
+			if !found {
+				return Proof{}, fmt.Errorf("%v's above of %v not found",
+					hash, n.Above)
+			}
+
+			canCalcMap[sibling(pos)], _, err = aNode.getSibHash(hash)
+			if err != nil {
+				return Proof{}, err
+			}
+
+			hash = n.Above
+			pos = sibling(Parent(pos, m.TotalRows))
+			n = aNode
 		}
 	}
 
-	return Proof{Targets: origTargets, Proof: hashes}, nil
+	for _, hash := range proveHashes {
+		delete(hashMap, hash)
+	}
+
+	for _, hash := range canCalcMap {
+		delete(hashMap, hash)
+	}
+
+	hnp := hashAndPos{
+		positions: make([]uint64, 0, len(hashMap)),
+		hashes:    make([]Hash, 0, len(hashMap)),
+	}
+	for k, v := range hashMap {
+		hnp.Append(v, k)
+	}
+
+	sort.Sort(hnp)
+	return Proof{Targets: origTargets, Proof: hnp.hashes}, nil
 }
 
 // VerifyPartialProof takes partial proof of the targets and attempts to prove their existence.
