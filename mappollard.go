@@ -2095,6 +2095,164 @@ func NewMapPollardFromRoots(rootHashes []Hash, numLeaves uint64) MapPollard {
 	return m
 }
 
+// writeOne writes the given node to the writer. It's recursive and calls itself if
+// the passed in Node has below nodes.
+func (m *MapPollard) writeOne(hash Hash, n Node, w io.Writer) (int, error) {
+	totalBytes := 0
+
+	// Write hash.
+	wroteBytes, err := w.Write(hash[:])
+	if err != nil {
+		return totalBytes, err
+	}
+	totalBytes += wroteBytes
+
+	if hash == empty {
+		return totalBytes, nil
+	}
+
+	// Write remember.
+	if n.Remember {
+		wroteBytes, err = w.Write([]byte{1})
+		if err != nil {
+			return totalBytes, err
+		}
+	} else {
+		wroteBytes, err = w.Write([]byte{0})
+		if err != nil {
+			return totalBytes, err
+		}
+	}
+	totalBytes += wroteBytes
+
+	// Write add index.
+	var buf [4]byte
+	binary.LittleEndian.PutUint32(buf[:], uint32(n.AddIndex))
+	wroteBytes, err = w.Write(buf[:])
+	if err != nil {
+		return totalBytes, err
+	}
+	totalBytes += wroteBytes
+
+	// If below nodes are present, then call writeOne on those nieces as well and
+	// mark as nieces being present. If they don't exist, just mark as nieces
+	// missing and move on.
+	if n.LBelow != empty && n.RBelow != empty {
+		wroteBytes, err := w.Write([]byte{1})
+		if err != nil {
+			return totalBytes, err
+		}
+		totalBytes += wroteBytes
+
+		lNode, found := m.Nodes.Get(n.LBelow)
+		if !found {
+			return totalBytes, fmt.Errorf("lBelow of %v not found", n.LBelow)
+		}
+
+		leftBytes, err := m.writeOne(n.LBelow, lNode, w)
+		if err != nil {
+			return totalBytes, err
+		}
+		totalBytes += leftBytes
+
+		rNode, found := m.Nodes.Get(n.RBelow)
+		if !found {
+			return totalBytes, fmt.Errorf("lBelow of %v not found", n.LBelow)
+		}
+		rightBytes, err := m.writeOne(n.RBelow, rNode, w)
+		if err != nil {
+			return totalBytes, err
+		}
+		totalBytes += rightBytes
+	} else {
+		wroteBytes, err := w.Write([]byte{0})
+		if err != nil {
+			return totalBytes, err
+		}
+		totalBytes += wroteBytes
+	}
+
+	return totalBytes, nil
+
+}
+
+// readOne reads a node from the reader. It's recursive and calls itself if the node
+// it just read has below nodes.
+func (m *MapPollard) readOne(above Hash, r io.Reader) (int64, Hash, error) {
+	totalBytes := int64(0)
+
+	var hash Hash
+	node := Node{Above: above}
+
+	// Read from the reader. If we're at EOF, we've finished restoring
+	// the pollard.
+	readBytes, err := r.Read(hash[:])
+	if err != nil {
+		if err == io.EOF {
+			return int64(readBytes), Hash{}, nil
+		}
+		return totalBytes, Hash{}, err
+	}
+	totalBytes += int64(readBytes)
+
+	if hash == empty {
+		return totalBytes, hash, nil
+	}
+
+	// Read remember.
+	var buf [8]byte
+	readBytes, err = r.Read(buf[:1])
+	if err != nil {
+		return totalBytes, Hash{}, err
+	}
+	totalBytes += int64(readBytes)
+
+	if buf[0] == 1 {
+		node.Remember = true
+	}
+
+	readBytes, err = r.Read(buf[:4])
+	if err != nil {
+		return totalBytes, Hash{}, err
+	}
+	totalBytes += int64(readBytes)
+
+	node.AddIndex = int32(binary.LittleEndian.Uint32(buf[:]))
+
+	// Read if the node has nieces. If the node does have nieces, then we call readOne
+	// for the nieces as well.
+	readBytes, err = r.Read(buf[:1])
+	if err != nil {
+		return totalBytes, hash, err
+	}
+	totalBytes += int64(readBytes)
+
+	// Return early.
+	if buf[0] == 0 {
+		m.Nodes.Put(hash, node)
+		return totalBytes, hash, err
+	}
+
+	if buf[0] == 1 {
+		leftBytes, lHash, err := m.readOne(hash, r)
+		if err != nil {
+			return totalBytes, hash, err
+		}
+		totalBytes += leftBytes
+		node.LBelow = lHash
+
+		rightBytes, rHash, err := m.readOne(hash, r)
+		if err != nil {
+			return totalBytes, hash, err
+		}
+		totalBytes += rightBytes
+		node.RBelow = rHash
+	}
+	m.Nodes.Put(hash, node)
+
+	return totalBytes, hash, nil
+}
+
 // Write writes the entire pollard to the writer.
 func (m *MapPollard) Write(w io.Writer) (int, error) {
 	m.rwLock.RLock()
