@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math"
 	"sort"
 	"sync"
 
@@ -2278,35 +2277,6 @@ func (m *MapPollard) Write(w io.Writer) (int, error) {
 	}
 	totalBytes += bytes
 
-	// Write the count for the cache leaf elements in the map.
-	binary.LittleEndian.PutUint64(buf[:], uint64(m.CachedLeaves.Length()))
-	bytes, err = w.Write(buf[:])
-	if err != nil {
-		return totalBytes, err
-	}
-	totalBytes += bytes
-
-	// Write the map elements.
-	err = m.CachedLeaves.ForEach(func(k Hash, v LeafInfo) error {
-		written, err := w.Write(k[:])
-		if err != nil {
-			return err
-		}
-		totalBytes += written
-
-		binary.LittleEndian.PutUint64(buf[:], v.Position)
-		bytes, err = w.Write(buf[:])
-		if err != nil {
-			return err
-		}
-		totalBytes += bytes
-
-		return nil
-	})
-	if err != nil {
-		return totalBytes, err
-	}
-
 	// Write the count for the node elements in the map.
 	binary.LittleEndian.PutUint64(buf[:], uint64(m.Nodes.Length()))
 	bytes, err = w.Write(buf[:])
@@ -2315,30 +2285,29 @@ func (m *MapPollard) Write(w io.Writer) (int, error) {
 	}
 	totalBytes += bytes
 
-	// Write the node elements.
-	var leafBuf [33]byte
-	err = m.Nodes.ForEach(func(k uint64, v Leaf) error {
-		binary.LittleEndian.PutUint64(buf[:], k)
-		bytes, err := w.Write(buf[:])
-		if err != nil {
-			return err
-		}
-		totalBytes += bytes
-
-		copy(leafBuf[:32], v.Hash[:])
-		if v.Remember {
-			leafBuf[32] = 1
-		}
-		bytes, err = w.Write(leafBuf[:])
-		if err != nil {
-			return err
-		}
-		totalBytes += bytes
-
-		return nil
-	})
+	// Write the count for the roots.
+	bytes, err = w.Write([]byte{uint8(len(m.Roots))})
 	if err != nil {
 		return totalBytes, err
+	}
+	totalBytes += bytes
+
+	// Then write the entire map pollard to the writer.
+	for _, root := range m.Roots {
+		var node Node
+		if root != empty {
+			var found bool
+			node, found = m.Nodes.Get(root)
+			if !found {
+				return totalBytes, fmt.Errorf("root %v not found in nodes", root)
+			}
+		}
+
+		bytes, err := m.writeOne(root, node, w)
+		if err != nil {
+			return totalBytes, err
+		}
+		totalBytes += bytes
 	}
 
 	return totalBytes, nil
@@ -2358,8 +2327,9 @@ func (m *MapPollard) Read(r io.Reader) (int, error) {
 	if err != nil {
 		return totalBytes, err
 	}
-	m.TotalRows = buf[0]
 	totalBytes += bytes
+
+	m.TotalRows = buf[0]
 
 	// Read the number of leaves.
 	bytes, err = r.Read(buf[:])
@@ -2369,81 +2339,35 @@ func (m *MapPollard) Read(r io.Reader) (int, error) {
 	totalBytes += bytes
 	m.NumLeaves = binary.LittleEndian.Uint64(buf[:])
 
-	// Read the count for the cache leaf elements in the map.
+	// Read num nodes.
 	bytes, err = r.Read(buf[:])
 	if err != nil {
 		return totalBytes, err
 	}
 	totalBytes += bytes
-	numCachedLeaves := binary.LittleEndian.Uint64(buf[:])
+
+	numNodes := binary.LittleEndian.Uint64(buf[:])
+	m.Nodes = newNodesMap(int(numNodes))
+
+	// Read the count for the roots.
+	bytes, err = r.Read(buf[:1])
+	if err != nil {
+		return totalBytes, err
+	}
+	totalBytes += bytes
+
+	numRoots := buf[0]
+	m.Roots = make([]Hash, numRoots)
 
 	// Read elements and put them in the map.
-	var hash Hash
-	for i := 0; i < int(numCachedLeaves); i++ {
-		read, err := r.Read(hash[:])
+	for i := range m.Roots {
+		bytes, rootHash, err := m.readOne(empty, r)
 		if err != nil {
 			return totalBytes, err
 		}
-		totalBytes += read
 
-		// Read the number of leaves.
-		bytes, err = r.Read(buf[:])
-		if err != nil {
-			return totalBytes, err
-		}
-		totalBytes += bytes
-		m.CachedLeaves.Add(hash, binary.LittleEndian.Uint64(buf[:]), math.MaxUint32)
-	}
-
-	// Read the count for the node elements in the map.
-	bytes, err = r.Read(buf[:])
-	if err != nil {
-		return totalBytes, err
-	}
-	totalBytes += bytes
-	nodeCount := binary.LittleEndian.Uint64(buf[:])
-
-	var leafBuf [33]byte
-	for i := 0; i < int(nodeCount); i++ {
-		bytes, err := r.Read(buf[:])
-		if err != nil {
-			return bytes, err
-		}
-		totalBytes += bytes
-		position := binary.LittleEndian.Uint64(buf[:])
-
-		read, err := r.Read(leafBuf[:])
-		if err != nil {
-			return totalBytes, err
-		}
-		totalBytes += read
-
-		var hash Hash
-		copy(hash[:], leafBuf[:32])
-		leaf := Leaf{Hash: hash, Remember: leafBuf[32] == 1}
-
-		m.Nodes.Put(position, leaf)
-
-	}
-
-	// Sanity check.
-	leafHashes := make([]Hash, 0, m.CachedLeaves.Length())
-	err = m.CachedLeaves.ForEach(func(k Hash, v LeafInfo) error {
-		leaf, found := m.Nodes.Get(v.Position)
-		if !found {
-			return fmt.Errorf("Corrupted pollard. Missing cached leaf at %d", v)
-		}
-
-		if k != leaf.Hash {
-			return fmt.Errorf("Corrupted pollard. Pos %d cached hash: %s, but have %s",
-				v, k, leaf.Hash)
-		}
-
-		leafHashes = append(leafHashes, k)
-		return nil
-	})
-	if err != nil {
-		return bytes, err
+		m.Roots[i] = rootHash
+		totalBytes += int(bytes)
 	}
 
 	return totalBytes, nil
