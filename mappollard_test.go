@@ -870,7 +870,7 @@ func TestVerifyPartialProof(t *testing.T) {
 
 			cached := true
 			for _, leafHash := range toProve.proveLeafHash {
-				_, found := p.CachedLeaves.Get(leafHash)
+				_, found := p.Nodes.Get(leafHash)
 				if !found {
 					cached = false
 				}
