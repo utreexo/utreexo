@@ -1778,6 +1778,8 @@ func (m *MapPollard) VerifyPartialProof(origTargets []uint64, delHashes, proofHa
 
 // GetMissingPositions returns all the missing positions that are needed to verify the given
 // targets.
+//
+// This function is safe for concurrent access.
 func (m *MapPollard) GetMissingPositions(origTargets []uint64) []uint64 {
 	if len(origTargets) == 0 {
 		return []uint64{}
@@ -1799,18 +1801,84 @@ func (m *MapPollard) GetMissingPositions(origTargets []uint64) []uint64 {
 	missingPositions := make([]uint64, 0, len(proofPos))
 	for i := range proofPos {
 		pos := proofPos[i]
-		_, ok := m.Nodes.Get(pos)
-		if !ok {
+		h, _, _, _, _ := m.getNodeByPos(pos)
+		if h == empty {
 			missingPositions = append(missingPositions, pos)
 		}
 	}
 
-	if TreeRows(m.NumLeaves) != m.TotalRows {
-		missingPositions = translatePositions(missingPositions, m.TotalRows, TreeRows(m.NumLeaves))
-		missingPositions = m.trimProofPos(missingPositions, m.NumLeaves)
+	return missingPositions
+}
+
+// getNodeByPos returns the node, it's sibling, and the parent of the given position.
+//
+// This function is NOT safe for concurrent access.
+func (m *MapPollard) getNodeByPos(pos uint64) (nHash Hash, n, sibling, parent *Node, err error) {
+	// Tree is the root the position is located under.
+	// branchLen denotes how far down the root the position is.
+	// bits tell us if we should go down to the left child or the right child.
+	if pos >= maxPosition(TreeRows(m.NumLeaves)) {
+		return Hash{}, nil, nil, nil,
+			fmt.Errorf("Position %d does not exist in tree of %d leaves", pos, m.NumLeaves)
+	}
+	tree, branchLen, bits, err := DetectOffset(pos, m.NumLeaves)
+	if err != nil {
+		return Hash{}, nil, nil, nil, err
+	}
+	if tree >= uint8(len(m.Roots)) {
+		return Hash{}, nil, nil, nil, fmt.Errorf("getNode error: couldn't fetch %d, "+
+			"calculated root index of %d but only have %d roots",
+			pos, tree, len(m.Roots))
 	}
 
-	return missingPositions
+	if m.Roots[tree] == empty {
+		return empty, nil, nil, nil, nil
+	}
+
+	// Initialize.
+	n, sibling, parent = m.getNodeByHash(m.Roots[tree]), m.getNodeByHash(m.Roots[tree]), nil
+	nHash = m.Roots[tree]
+
+	if n == nil {
+		return Hash{}, nil, nil, nil, nil
+	}
+
+	// Go down the tree to find the node we're looking for.
+	for h := int(branchLen) - 1; h >= 0; h-- {
+		// Parent is the sibling of the current node as each of the
+		// nodes point to their nieces.
+		parent = sibling
+
+		// Figure out which node we need to follow.
+		niecePos := uint8(bits>>h) & 1
+		if isLeftNiece(uint64(niecePos)) {
+			nHash = n.LBelow
+			n, sibling = m.getNodeByHash(n.LBelow), m.getNodeByHash(n.RBelow)
+		} else {
+			nHash = n.RBelow
+			n, sibling = m.getNodeByHash(n.RBelow), m.getNodeByHash(n.LBelow)
+		}
+
+		// Return early if the path to the node we're looking for
+		// doesn't exist.
+		if n == nil {
+			return Hash{}, nil, nil, nil, nil
+		}
+	}
+
+	return
+}
+
+// getNodeByHash returns the node from Nodes. Nil if not found.
+//
+// This function is NOT safe for concurrent access.
+func (m *MapPollard) getNodeByHash(hash Hash) *Node {
+	node, found := m.Nodes.Get(hash)
+	if !found {
+		return nil
+	}
+
+	return &node
 }
 
 // Verify returns an error if the given proof and the delHashes do not hash up to the stored roots.
