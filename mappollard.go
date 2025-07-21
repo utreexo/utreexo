@@ -1928,6 +1928,89 @@ func (m *MapPollard) ingest(ins ingestInstruction) error {
 	return nil
 }
 
+// fetchNodeForDel fetches all the nodes that are needed to remove the given hash.
+func (m *MapPollard) fetchNodeForDel(hash Hash) (
+	node, sibNode, aNode Node, sibHash Hash, foundNode bool, err error) {
+
+	node, foundNode = m.Nodes.Get(hash)
+	if !foundNode {
+		return
+	}
+
+	if node.isRoot() {
+		return
+	}
+
+	var found bool
+	aNode, found = m.Nodes.Get(node.Above)
+	if !found {
+		err = fmt.Errorf("node %v points to above of %v but wasn't found",
+			hash, node.Above)
+		return
+	}
+
+	sibHash, _, err = aNode.getSibHash(hash)
+	if err != nil {
+		return
+	}
+
+	sibNode, found = m.Nodes.Get(sibHash)
+	if !found {
+		err = fmt.Errorf("node %v has l %v, r %v but %v wasn't found",
+			node.Above, node.LBelow, node.RBelow, sibHash)
+		return
+	}
+
+	return
+}
+
+// maybeForget checks to see if the hash can be pruned from the accumulator. If it can, it prunes
+// it and recursively calls itself again to see if the above node can be forgotten as well.
+func (m *MapPollard) maybeForget(hash Hash) error {
+	n, found := m.Nodes.Get(hash)
+	if !found {
+		return nil
+	}
+
+	var canPrune bool
+	if n.LBelow == empty && n.RBelow == empty {
+		canPrune = true
+	} else {
+		l, found := m.Nodes.Get(n.LBelow)
+		if !found {
+			return fmt.Errorf("%v points to %v but not found", hash, n.LBelow)
+		}
+		r, found := m.Nodes.Get(n.RBelow)
+		if !found {
+			return fmt.Errorf("%v points to %v but not found", hash, n.RBelow)
+		}
+
+		var err error
+		canPrune, err = l.pruneable(r)
+		if err != nil {
+			return err
+		}
+	}
+
+	if canPrune {
+		m.Nodes.Delete(n.LBelow)
+		m.Nodes.Delete(n.RBelow)
+
+		n.LBelow = empty
+		n.RBelow = empty
+		m.Nodes.Put(hash, n)
+
+		if n.Above != empty {
+			err := m.maybeForget(n.Above)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 // Prune prunes the passed in hashes and the proofs for them. Will not prune the proof if it's
 // needed for another cached hash.
 func (m *MapPollard) Prune(hashes []Hash) error {
