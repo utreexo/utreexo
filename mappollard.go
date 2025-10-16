@@ -1731,6 +1731,64 @@ func (m *MapPollard) Prove(proveHashes []Hash) (Proof, error) {
 	return Proof{Targets: origTargets, Proof: hnp.hashes}, nil
 }
 
+// MakeProofFull attempts to fill in the missing positions of the proofHashes and return a full proof.
+// The haves bools should exist per each proof position and be marked true if the given hash exists in
+// the given proofHashes.
+//
+// NOTE: the proof generated from this function is NOT guaranteed to be a valid proof. The error only checks
+// that we have enough proofHashes to fill in for the missing ones.
+func (m *MapPollard) MakeProofFull(origTargets []uint64, haves []bool, proofHashes []Hash) (*Proof, error) {
+	m.rwLock.Lock()
+	defer m.rwLock.Unlock()
+
+	haveCnt := 0
+	for _, have := range haves {
+		if have {
+			haveCnt++
+		}
+	}
+
+	if haveCnt != len(proofHashes) {
+		return nil, fmt.Errorf("haves says we have %v proofs but only have %v",
+			haveCnt, len(proofHashes))
+	}
+
+	// Sort targets first. Copy to avoid mutating the original.
+	targets := copySortedFunc(origTargets, uint64Cmp)
+
+	// Figure out what hashes at which positions are needed.
+	proofPositions, _ := ProofPositions(targets, m.NumLeaves, TreeRows(m.NumLeaves))
+
+	// Translate the proof positions if needed.
+	if TreeRows(m.NumLeaves) != m.TotalRows {
+		proofPositions = translatePositions(proofPositions, TreeRows(m.NumLeaves), m.TotalRows)
+	}
+
+	// Where we'll merge the hashes that we already have with the proofHashes provided.
+	allProofHashes, err := m.getHashesByPositions(proofPositions)
+	if err != nil {
+		return nil, err
+	}
+
+	proofHashIdx := 0
+	for i, hash := range allProofHashes {
+		if haves[i] {
+			if len(proofHashes) <= proofHashIdx {
+				return nil, fmt.Errorf("proof too short")
+			}
+			allProofHashes[i] = proofHashes[proofHashIdx]
+			proofHashIdx++
+		} else {
+			if hash == empty {
+				return nil, fmt.Errorf("couldn't make proof full missing %v. %v",
+					proofPositions[i], err)
+			}
+		}
+	}
+
+	return &Proof{origTargets, allProofHashes}, nil
+}
+
 // VerifyPartialProof takes partial proof of the targets and attempts to prove their existence.
 // If the remember bool is false, the accumulator is not modified. If it is true, the necessary
 // hashes to prove the targets are cached.
