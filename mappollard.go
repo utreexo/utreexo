@@ -1797,16 +1797,99 @@ func (m *MapPollard) GetMissingPositions(origTargets []uint64) []uint64 {
 	}
 
 	// Go through all the proof positions and mark the ones that are missing.
+	hashes, err := m.getHashesByPositions(proofPos)
+	if err != nil {
+		return proofPos
+	}
+
 	missingPositions := make([]uint64, 0, len(proofPos))
-	for i := range proofPos {
-		pos := proofPos[i]
-		h, _, _, _, _ := m.getNodeByPos(pos)
-		if h == empty {
-			missingPositions = append(missingPositions, pos)
+	for i, hash := range hashes {
+		if hash == empty {
+			missingPositions = append(missingPositions, proofPos[i])
 		}
 	}
 
 	return missingPositions
+}
+
+// getHashesByPositions returns the hashes for the passed in positions.  The hashes that aren't
+// found (either because it's not cached or doesn't exist in the accumulator) will be empty.
+//
+// This function is NOT safe for concurrent access.
+func (m *MapPollard) getHashesByPositions(positions []uint64) ([]Hash, error) {
+	for _, pos := range positions {
+		// Tree is the root the position is located under.
+		// branchLen denotes how far down the root the position is.
+		// bits tell us if we should go down to the left child or the right child.
+		if pos >= maxPosition(TreeRows(m.NumLeaves)) {
+			return nil, fmt.Errorf("Position %d does not exist in tree of %d leaves",
+				pos, m.NumLeaves)
+		}
+	}
+
+	// nodes will contain all the nodes we've previously visited during a fetch
+	// for a different position. When visiting the same node over and over again,
+	// having a cache avoids memory allocation that happens from a m.Nodes.Get() call.
+	nodes := make([]map[string]*Node, len(m.Roots))
+
+	hashes := make([]Hash, 0, len(positions))
+	for _, pos := range positions {
+		tree, branchLen, bits, err := DetectOffset(pos, m.NumLeaves)
+		if err != nil {
+			return nil, err
+		}
+
+		if m.Roots[tree] == empty {
+			hashes = append(hashes, empty)
+			continue
+		}
+
+		if nodes[tree] == nil {
+			nodes[tree] = make(map[string]*Node, branchLen)
+		}
+
+		// Just the root. But initialize sibling from the get go.
+		nHash := m.Roots[tree]
+		n := m.getNodeByHash(m.Roots[tree])
+		bools := make([]uint8, 0, branchLen)
+		for h := int(branchLen) - 1; h >= 0; h-- {
+			// Figure out which node we need to follow.
+			niecePos := uint8(bits>>h) & 1
+			if isLeftNiece(uint64(niecePos)) {
+				nHash = n.LBelow
+
+				// Append 0 if we're following left.
+				bools = append(bools, 0)
+				got, found := nodes[tree][string(bools)]
+				if !found {
+					// Fetch and cache if not found.
+					got = m.getNodeByHash(n.LBelow)
+					nodes[tree][string(bools)] = got
+				}
+				n = got
+			} else {
+				nHash = n.RBelow
+
+				// Append 1 if we're following left.
+				bools = append(bools, 1)
+				got, found := nodes[tree][string(bools)]
+				if !found {
+					// Fetch and cache if not found.
+					got = m.getNodeByHash(n.RBelow)
+					nodes[tree][string(bools)] = got
+				}
+				n = got
+			}
+			if n == nil {
+				nHash = empty
+				break
+			}
+		}
+
+		hashes = append(hashes, nHash)
+	}
+
+	return hashes, nil
 }
 
 // getNodeByHash returns the node from Nodes. Nil if not found.
@@ -2119,8 +2202,11 @@ func (m *MapPollard) GetHash(pos uint64) Hash {
 		pos = translatePos(pos, TreeRows(m.NumLeaves), m.TotalRows)
 	}
 
-	hash, _, _, _, _ := m.getNodeByPos(pos)
-	return hash
+	hashes, err := m.getHashesByPositions([]uint64{pos})
+	if err != nil {
+		return empty
+	}
+	return hashes[0]
 }
 
 // getLeafHashPosition calculates and returns the position of the given hash. The boolean

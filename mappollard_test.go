@@ -144,13 +144,15 @@ func (m *MapPollard) checkProofNodes() error {
 			return err
 		}
 		proofPos := proofPosition(position, m.NumLeaves, m.TotalRows)
-		for _, pos := range proofPos {
-			hash, _, _, _, err := m.getNodeByPos(pos)
-			if err != nil {
-				return fmt.Errorf("Corrupted pollard. Missing pos %d "+
-					"needed for proving %d", pos, position)
-			}
 
+		hashes, err := m.getHashesByPositions(proofPos)
+		if err != nil {
+			return fmt.Errorf("Corrupted pollard. errored while "+
+				"fetching hashes for proving %d. %v", position, err)
+		}
+
+		for i, hash := range hashes {
+			pos := proofPos[i]
 			if hash == empty {
 				return fmt.Errorf("Corrupted pollard. Missing pos %d "+
 					"needed for proving %d", pos, position)
