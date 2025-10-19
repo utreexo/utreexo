@@ -144,13 +144,15 @@ func (m *MapPollard) checkProofNodes() error {
 			return err
 		}
 		proofPos := proofPosition(position, m.NumLeaves, m.TotalRows)
-		for _, pos := range proofPos {
-			hash, _, _, _, err := m.getNodeByPos(pos)
-			if err != nil {
-				return fmt.Errorf("Corrupted pollard. Missing pos %d "+
-					"needed for proving %d", pos, position)
-			}
 
+		hashes, err := m.getHashesByPositions(proofPos)
+		if err != nil {
+			return fmt.Errorf("Corrupted pollard. errored while "+
+				"fetching hashes for proving %d. %v", position, err)
+		}
+
+		for i, hash := range hashes {
+			pos := proofPos[i]
 			if hash == empty {
 				return fmt.Errorf("Corrupted pollard. Missing pos %d "+
 					"needed for proving %d", pos, position)
@@ -379,6 +381,8 @@ func FuzzMapPollardChain(f *testing.F) {
 					err, m.String(), full.String())
 			}
 
+			testMakeProofFull(t, m, cachedProof)
+
 			fullRoots := full.GetRoots()
 			mapRoots := m.GetRoots()
 			if !reflect.DeepEqual(fullRoots, mapRoots) {
@@ -392,6 +396,43 @@ func FuzzMapPollardChain(f *testing.F) {
 			}
 		}
 	})
+}
+
+func testMakeProofFull(t *testing.T, m MapPollard, proof Proof) {
+	if len(proof.Proof) == 0 || len(proof.Targets) == 0 {
+		return
+	}
+
+	haves := make([]bool, len(proof.Proof))
+	proofHashes := make([]Hash, 0, len(proof.Proof))
+	for i, proofHash := range proof.Proof {
+		if rand.Int()%2 == 0 {
+			haves[i] = true
+			proofHashes = append(proofHashes, proofHash)
+		}
+	}
+
+	gotProof, err := m.MakeProofFull(proof.Targets, haves, proofHashes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	require.Equal(t, proof, *gotProof)
+
+	for i := range haves {
+		if !haves[i] {
+			haves[i] = true
+		} else {
+			haves[i] = false
+		}
+	}
+
+	wrongProof, err := m.MakeProofFull(proof.Targets, haves, proofHashes)
+	if err == nil {
+		// A wrong proof is not guaranteed to produce an error so we need to check
+		// this.
+		require.NotEqual(t, proof, *wrongProof)
+	}
 }
 
 func FuzzMapPollardWriteAndRead(f *testing.F) {

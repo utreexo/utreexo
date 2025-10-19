@@ -502,16 +502,6 @@ type simChain struct {
 	rnd          *rand.Rand
 }
 
-// newSimChain initializes and returns a simchain
-func newSimChain(duration uint32) *simChain {
-	var s simChain
-	s.blockHeight = -1
-	s.durationMask = duration
-	s.ttlSlices = make([][]Hash, s.durationMask+1)
-	s.rnd = rand.New(rand.NewSource(0))
-	return &s
-}
-
 // newSimChainWithSeed initializes and returns a simchain, with an externally supplied seed
 func newSimChainWithSeed(duration uint32, seed int64) *simChain {
 	var s simChain
@@ -519,6 +509,7 @@ func newSimChainWithSeed(duration uint32, seed int64) *simChain {
 	s.durationMask = duration
 	s.ttlSlices = make([][]Hash, s.durationMask+1)
 	s.rnd = rand.New(rand.NewSource(seed))
+	s.lookahead = 7
 	return &s
 }
 
