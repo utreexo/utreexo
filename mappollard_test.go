@@ -3,6 +3,7 @@ package utreexo
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math/rand"
@@ -1111,4 +1112,56 @@ func FuzzMapPollardTTLs(f *testing.F) {
 			require.Equal(t, createIndex, gotIndex)
 		}
 	})
+}
+
+func TestSerializeSize(t *testing.T) {
+	tests := []struct {
+		leafCount   int
+		remInterval int
+	}{
+		{leafCount: 0, remInterval: 0},
+		{leafCount: 1524, remInterval: 1},
+		{leafCount: 1524, remInterval: 2},
+		{leafCount: 1524, remInterval: 5},
+		{leafCount: 1524, remInterval: 9},
+		{leafCount: 105487, remInterval: 1},
+		{leafCount: 105487, remInterval: 2},
+		{leafCount: 105487, remInterval: 5},
+		{leafCount: 105487, remInterval: 14},
+	}
+
+	for _, test := range tests {
+		mp := NewMapPollard(false)
+
+		// Create elements to add to the accumulator
+		leaves := make([]Leaf, test.leafCount)
+		var hashBuf [8]byte
+		for i := range leaves {
+			binary.LittleEndian.PutUint64(hashBuf[:], uint64(i))
+			leaves[i] = Leaf{Hash: sha256.Sum256(hashBuf[:])}
+
+			if i%test.remInterval == 0 {
+				leaves[i].Remember = true
+			}
+		}
+
+		// Add the leaves.
+		err := mp.Modify(leaves, nil, Proof{})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Grab the size calculated by serialize size.
+		size := mp.SerializeSize()
+
+		// Write to buf and grab size.
+		var buf bytes.Buffer
+		written, err := mp.Write(&buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		require.Equal(t, written, size)
+	}
+
 }
