@@ -2516,6 +2516,24 @@ func (m *MapPollard) readOne(above Hash, r io.Reader) (int64, Hash, error) {
 	return totalBytes, hash, nil
 }
 
+// nodeSize is how much is node takes up in bytes when serialized.
+const nodeSize = 32 + 1 + 4 + 1
+
+// SerializeSize returns the amount in bytes it would take to write the entire pollard.
+func (m *MapPollard) SerializeSize() int {
+	m.rwLock.RLock()
+	defer m.rwLock.RUnlock()
+
+	// 1 byte for total rows,
+	// 8 byte for numleaves,
+	// 8 byte for node count,
+	// 1 byte for the root count.
+	size := 1 + 8 + 8 + 1
+	size += m.Nodes.Length() * nodeSize
+
+	return size
+}
+
 // Write writes the entire pollard to the writer.
 func (m *MapPollard) Write(w io.Writer) (int, error) {
 	m.rwLock.RLock()
