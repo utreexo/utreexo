@@ -44,6 +44,7 @@ import (
 type WAL struct {
 	journal io.ReadWriteSeeker
 	cached  []*cachedRWS
+	onFlush func([32]byte) error
 }
 
 // journalEntry represents a single write operation in the WAL journal.
@@ -114,6 +115,12 @@ func (w *WAL) Cached(i int) *cachedRWS {
 	return w.cached[i]
 }
 
+// SetOnFlush registers a callback that runs after each successful Flush.
+// The callback receives the bestHash that was flushed.
+func (w *WAL) SetOnFlush(fn func([32]byte) error) {
+	w.onFlush = fn
+}
+
 // Flush atomically commits all cached writes through the journal.
 // The bestHash is written to metaFile (file index 3) at offset 32.
 func (w *WAL) Flush(bestHash [32]byte) error {
@@ -176,6 +183,12 @@ func (w *WAL) Flush(bestHash [32]byte) error {
 	for i, c := range w.cached {
 		if err := c.resetAfterFlush(); err != nil {
 			return fmt.Errorf("wal reset cache %d: %w", i, err)
+		}
+	}
+
+	if w.onFlush != nil {
+		if err := w.onFlush(bestHash); err != nil {
+			return fmt.Errorf("wal onFlush: %w", err)
 		}
 	}
 
