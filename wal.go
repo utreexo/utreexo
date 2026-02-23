@@ -66,7 +66,7 @@ const (
 
 // WALFile represents an underlying file with its entry size and cache config.
 type WALFile struct {
-	File          io.ReadWriteSeeker
+	File          ForestFile
 	EntrySize     int   // 4, 8, or 32
 	MaxCacheBytes int64 // 0 means use default (64MB)
 }
@@ -82,7 +82,7 @@ func NewWAL(journal io.ReadWriteSeeker, files ...WALFile) (*WAL, error) {
 		return nil, fmt.Errorf("wal requires exactly 4 files, got %d", len(files))
 	}
 
-	underlying := make([]io.ReadWriteSeeker, len(files))
+	underlying := make([]ForestFile, len(files))
 	for i, f := range files {
 		underlying[i] = f.File
 	}
@@ -297,7 +297,7 @@ func parseEntries(buf []byte) ([]journalEntry, error) {
 }
 
 // applyEntries writes each entry to the appropriate underlying file.
-func applyEntries(entries []journalEntry, underlying []io.ReadWriteSeeker) error {
+func applyEntries(entries []journalEntry, underlying []ForestFile) error {
 	for _, e := range entries {
 		if int(e.fileIdx) >= len(underlying) {
 			return fmt.Errorf("wal: fileIdx %d out of range (have %d files)", e.fileIdx, len(underlying))
@@ -334,7 +334,7 @@ func (w *WAL) clearJournal() error {
 
 // recoverFromJournal replays any committed journal entries to the
 // underlying files. Called once during NewWAL, before cachedRWS creation.
-func (w *WAL) recoverFromJournal(underlying []io.ReadWriteSeeker) error {
+func (w *WAL) recoverFromJournal(underlying []ForestFile) error {
 	// Get journal size.
 	size, err := w.journal.Seek(0, io.SeekEnd)
 	if err != nil {

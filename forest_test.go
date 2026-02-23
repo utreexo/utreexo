@@ -66,6 +66,17 @@ func (m *memFile) Seek(offset int64, whence int) (int64, error) {
 	return m.offset, nil
 }
 
+func (m *memFile) ReadAt(p []byte, off int64) (int, error) {
+	if off >= int64(len(m.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, m.data[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
 func (m *memFile) Truncate(size int64) error {
 	if size < int64(len(m.data)) {
 		m.data = m.data[:size]

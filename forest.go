@@ -13,6 +13,12 @@ import (
 // Assert that Forest implements the Utreexo interface.
 var _ Utreexo = (*Forest)(nil)
 
+// ForestFile is the interface required for the main data file.
+type ForestFile interface {
+	io.ReadWriteSeeker
+	io.ReaderAt
+}
+
 // positionMap value packing: upper 17 bits = addIndex, lower 47 bits = position
 // Supports up to 2^47 (~140 trillion) leaves and 2^17 (131,072) adds per block.
 const (
@@ -93,10 +99,10 @@ func (b *deletedBitmap) count() int {
 type Forest struct {
 	mu sync.RWMutex // protects all fields below
 
-	file         io.ReadWriteSeeker
-	deletedFile  io.ReadWriteSeeker // separate file tracking deleted leaf positions
-	addIndexFile io.ReadWriteSeeker // stores int32 addIndex at offset pos*4
-	metaFile     io.ReadWriteSeeker // stores recordMode (bytes 0-31) + consistency hash (bytes 32-63)
+	file         ForestFile
+	deletedFile  ForestFile // separate file tracking deleted leaf positions
+	addIndexFile ForestFile // stores int32 addIndex at offset pos*4
+	metaFile     ForestFile // stores recordMode (bytes 0-31) + consistency hash (bytes 32-63)
 	NumLeaves    uint64
 	forestRows   uint8 // Fixed maximum rows for stable position mapping
 
@@ -124,7 +130,7 @@ type Forest struct {
 // forestRows sets the maximum tree height (determines max leaves = 2^forestRows).
 //
 // The positionMap is rebuilt by reading all leaf hashes from the file, skipping positions recorded in deletedFile.
-func NewForest(file, deletedFile, addIndexFile, metaFile io.ReadWriteSeeker, forestRows uint8) (*Forest, error) {
+func NewForest(file, deletedFile, addIndexFile, metaFile ForestFile, forestRows uint8) (*Forest, error) {
 	if deletedFile == nil || file == nil || addIndexFile == nil || metaFile == nil {
 		return nil, fmt.Errorf("one of the given files are nil")
 	}
