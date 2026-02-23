@@ -936,3 +936,89 @@ func TestForestVerifyDeletedLeaf(t *testing.T) {
 		require.NoError(t, err, "non-deleted leaf should still verify")
 	}
 }
+
+// TestForestUndoAfterRebuild verifies that Undo works correctly after
+// restarting a Forest with a fresh Swiss Table (forcing positionMap rebuild).
+// This catches bugs where the rebuilt positionMap is missing state needed
+// for Undo to succeed.
+func TestForestUndoAfterRebuild(t *testing.T) {
+	// Shared backing files (persist across restarts).
+	mainFile := newMemFile()
+	delFile := newMemFile()
+	addIdxFile := newMemFile()
+	metaFile := newMemFile()
+
+	tmpDir1 := t.TempDir()
+	forest, err := NewForest(
+		mainFile, delFile, addIdxFile, metaFile,
+		tmpDir1+"/ctrl", tmpDir1+"/slots", 10,
+	)
+	require.NoError(t, err)
+
+	// Use a pollard as the reference accumulator.
+	pollard := NewAccumulator()
+	sc := newSimChainWithSeed(0x42, 0x42)
+
+	// Run 100 blocks to build up state.
+	for b := range 100 {
+		adds, _, delHashes := sc.NextBlock(5)
+
+		proof, err := pollard.Prove(delHashes)
+		require.NoError(t, err)
+
+		err = forest.Modify(adds, delHashes, Proof{})
+		require.NoError(t, err)
+
+		err = pollard.Modify(adds, delHashes, proof)
+		require.NoError(t, err)
+
+		compareRoots(t, forest, pollard, fmt.Sprintf("setup block %d", b))
+	}
+
+	// Checkpoint: save roots before the block we will undo.
+	checkpointRoots := forest.GetRoots()
+
+	// Run one more block — we will undo this one after restart.
+	adds, _, delHashes := sc.NextBlock(5)
+
+	proof, err := pollard.Prove(delHashes)
+	require.NoError(t, err)
+
+	err = forest.Modify(adds, delHashes, Proof{})
+	require.NoError(t, err)
+
+	err = pollard.Modify(adds, delHashes, proof)
+	require.NoError(t, err)
+
+	postModifyRoots := forest.GetRoots()
+	compareRoots(t, forest, pollard, "after extra block")
+
+	// Save undo args: extract hashes from adds for Undo's prevAdds parameter.
+	prevAdds := make([]Hash, len(adds))
+	for i, leaf := range adds {
+		prevAdds[i] = leaf.Hash
+	}
+
+	// Restart: new tmpDir forces Swiss Table rebuild (consistency hash mismatch).
+	tmpDir2 := t.TempDir()
+	forest2, err := NewForest(
+		mainFile, delFile, addIdxFile, metaFile,
+		tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
+	)
+	require.NoError(t, err)
+
+	// Restarted forest should have the same roots as before restart.
+	require.Equal(t, postModifyRoots, forest2.GetRoots(),
+		"roots should match after restart with rebuilt positionMap")
+
+	// Undo the last block on the restarted forest.
+	err = forest2.Undo(prevAdds, Proof{}, delHashes, checkpointRoots)
+	require.NoError(t, err)
+
+	// After undo, roots should match the checkpoint.
+	require.Equal(t, checkpointRoots, forest2.GetRoots(),
+		"roots should match checkpoint after Undo on restarted forest")
+
+	err = forest2.sanityCheck()
+	require.NoError(t, err, "sanityCheck after Undo on restarted forest")
+}
