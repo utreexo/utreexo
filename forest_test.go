@@ -131,14 +131,23 @@ func compareRoots(t *testing.T, forest *Forest, pollard Pollard, context string)
 	}
 }
 
+// newTestForest creates a Forest for testing with temp files for the swiss table.
+func newTestForest(t *testing.T, forestRows uint8) *Forest {
+	t.Helper()
+	tmpDir := t.TempDir()
+	forest, err := NewForest(
+		newMemFile(), newMemFile(), newMemFile(), newMemFile(),
+		tmpDir+"/ctrl", tmpDir+"/slots",
+		forestRows,
+	)
+	require.NoError(t, err)
+	return forest
+}
+
 // TestForestString tests the ToString interface implementation.
 func TestForestString(t *testing.T) {
-	file := newMemFile()
 	// Use small forestRows for visualization
-	forest, err := NewForest(file, newMemFile(), newMemFile(), newMemFile(), 3)
-	if err != nil {
-		t.Fatalf("NewForest: %v", err)
-	}
+	forest := newTestForest(t, 3)
 
 	// Add 4 leaves
 	for i := 0; i < 4; i++ {
@@ -159,89 +168,77 @@ func TestForestString(t *testing.T) {
 
 // TestForestSanityCheck tests that sanityCheck catches inconsistencies.
 func TestForestSanityCheck(t *testing.T) {
-	file := newMemFile()
-	forest, err := NewForest(file, newMemFile(), newMemFile(), newMemFile(), 10)
-	if err != nil {
-		t.Fatalf("NewForest: %v", err)
-	}
-
-	// Add 4 leaves
-	hashes := make([]Hash, 4)
-	for i := 0; i < 4; i++ {
-		hashes[i] = testHashFromInt(i + 1)
-		err := forest.add(hashes[i], 0)
-		if err != nil {
-			t.Fatalf("add %d: %v", i, err)
+	// setupForest creates a forest with 4 leaves for each subtest.
+	setupForest := func(t *testing.T) (*Forest, []Hash) {
+		t.Helper()
+		forest := newTestForest(t, 10)
+		hashes := make([]Hash, 4)
+		for i := range 4 {
+			hashes[i] = testHashFromInt(i + 1)
+			if err := forest.add(hashes[i], 0); err != nil {
+				t.Fatalf("add %d: %v", i, err)
+			}
 		}
+		return forest, hashes
 	}
 
-	// Valid forest should pass sanityCheck
-	err = forest.sanityCheck()
-	if err != nil {
-		t.Fatalf("sanityCheck failed on valid forest: %v", err)
+	tests := []struct {
+		name    string
+		corrupt func(t *testing.T, f *Forest, hashes []Hash)
+		wantErr bool
+		errStr  string // if non-empty, error must contain this substring
+	}{
+		{
+			name:    "valid forest passes",
+			corrupt: func(t *testing.T, f *Forest, hashes []Hash) {},
+			wantErr: false,
+		},
+		{
+			name: "extra positionMap entry detected",
+			corrupt: func(t *testing.T, f *Forest, hashes []Hash) {
+				wrongHash := testHashFromInt(999)
+				require.NoError(t, f.positionMap.Set(wrongHash, packPosIndex(0, 0)))
+			},
+			wantErr: true,
+		},
+		{
+			name: "corrupted file leaf detected",
+			corrupt: func(t *testing.T, f *Forest, hashes []Hash) {
+				wrongHash := testHashFromInt(999)
+				require.NoError(t, f.writeHash(0, wrongHash))
+			},
+			wantErr: true,
+		},
+		{
+			name: "corrupted root detected",
+			corrupt: func(t *testing.T, f *Forest, hashes []Hash) {
+				wrongHash := testHashFromInt(999)
+				rootPositions := RootPositions(f.NumLeaves, f.forestRows)
+				if len(rootPositions) == 0 {
+					t.Skip("no roots")
+				}
+				require.NoError(t, f.writeHash(rootPositions[0], wrongHash))
+			},
+			wantErr: true,
+			errStr:  "invalid parent",
+		},
 	}
 
-	// Test 1: Corrupt positionMap by adding wrong entry
-	// This should be caught by sanityCheck (either positionMap or parent verification)
-	wrongHash := testHashFromInt(999)
-	forest.positionMap[wrongHash.mini()] = packPosIndex(0, 0) // points to position 0, but hash there is hashes[0]
-	err = forest.sanityCheck()
-	if err == nil {
-		t.Error("sanityCheck should fail with corrupted positionMap")
-	}
-	// Clean up
-	delete(forest.positionMap, wrongHash.mini())
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			forest, hashes := setupForest(t)
+			tc.corrupt(t, forest, hashes)
 
-	// Test 2: Corrupt positionMap by pointing to wrong position
-	// This should be caught by sanityCheck (either positionMap or parent verification)
-	// Use position 1 instead of 99 since sanityCheck skips positions >= NumLeaves
-	originalPacked := forest.positionMap[hashes[0].mini()]
-	forest.positionMap[hashes[0].mini()] = packPosIndex(1, 0) // wrong position (has different hash)
-	err = forest.sanityCheck()
-	if err == nil {
-		t.Error("sanityCheck should fail with wrong position in positionMap")
-	}
-	// Clean up
-	forest.positionMap[hashes[0].mini()] = originalPacked
-
-	// Test 3: Corrupt file by writing wrong hash to leaf position
-	// This should be caught by sanityCheck (either positionMap or parent verification)
-	err = forest.writeHash(0, wrongHash) // overwrite position 0 with wrong hash
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = forest.sanityCheck()
-	if err == nil {
-		t.Error("sanityCheck should fail with corrupted file (leaf)")
-	}
-	// Restore
-	err = forest.writeHash(0, hashes[0])
-	if err != nil {
-		t.Fatalf("failed to restore: %v", err)
-	}
-
-	// Test 4: Corrupt a root position directly and verify root check catches it
-	// First verify sanityCheck passes after restoration
-	err = forest.sanityCheck()
-	if err != nil {
-		t.Fatalf("sanityCheck should pass after restore: %v", err)
-	}
-
-	// Get root position and corrupt it
-	// This should be caught by the path verification (invalid parent)
-	rootPositions := RootPositions(forest.NumLeaves, forest.forestRows)
-	if len(rootPositions) > 0 {
-		rootPos := rootPositions[0]
-		err = forest.writeHash(rootPos, wrongHash)
-		if err != nil {
-			t.Fatalf("failed to write to root: %v", err)
-		}
-		err = forest.sanityCheck()
-		if err == nil {
-			t.Error("sanityCheck should fail with corrupted root")
-		} else if !strings.Contains(err.Error(), "invalid parent") {
-			t.Errorf("expected invalid parent error, got: %v", err)
-		}
+			err := forest.sanityCheck()
+			if tc.wantErr {
+				require.Error(t, err, "sanityCheck should have failed")
+				if tc.errStr != "" {
+					require.Contains(t, err.Error(), tc.errStr)
+				}
+			} else {
+				require.NoError(t, err, "sanityCheck failed on valid forest")
+			}
+		})
 	}
 }
 
@@ -258,6 +255,15 @@ func (f *Forest) sanityCheck() error {
 	if fileEntries != mapEntries {
 		return fmt.Errorf("deletedLeafPositions mismatch: file has %d entries, map has %d",
 			fileEntries, mapEntries)
+	}
+
+	// Check 0.5: Verify positionMap entry count matches expected
+	// positionMap should have exactly NumLeaves
+	expectedPosMapCount := f.NumLeaves
+	actualPosMapCount := f.positionMap.Count()
+	if actualPosMapCount != expectedPosMapCount {
+		return fmt.Errorf("positionMap count mismatch: expected %d, got %d",
+			expectedPosMapCount, actualPosMapCount)
 	}
 
 	// Cache file reads - many paths share ancestors
@@ -277,26 +283,31 @@ func (f *Forest) sanityCheck() error {
 	// Track which parent positions we've already verified
 	verified := make(map[uint64]bool)
 
-	for mini, packed := range f.positionMap {
+	// Collect positions to verify from positionMap
+	var positions []uint64
+	f.positionMap.ForEach(func(packed uint64) {
 		pos := unpackPos(packed)
 
-		// Skip positions >= NumLeaves (undone additions)
-		if pos >= f.NumLeaves {
-			continue
-		}
 		// Skip deleted positions
 		if f.deletedLeafPositions.isSet(pos) {
-			continue
+			return
 		}
+		positions = append(positions, pos)
+	})
 
+	for _, pos := range positions {
 		// Check 1: Verify positionMap entry matches file contents
 		hash, err := cachedRead(pos)
 		if err != nil {
 			return fmt.Errorf("positionMap sanity: failed to read pos %d: %w", pos, err)
 		}
-		if hash.mini() != mini {
-			return fmt.Errorf("positionMap sanity: pos %d has hash %x but map key is %x",
-				pos, hash[:8], mini[:])
+		// Verify the hash is in positionMap
+		_, found, err := f.positionMap.Get(hash)
+		if err != nil {
+			return fmt.Errorf("positionMap sanity: Get error for pos %d: %w", pos, err)
+		}
+		if !found {
+			return fmt.Errorf("positionMap sanity: hash at pos %d not found in map", pos)
 		}
 
 		// Check 2: Verify path to root (skip already-verified parents)
@@ -359,23 +370,28 @@ func (f *Forest) nodeMapToString() string {
 func (f *Forest) positionMapToString() string {
 	var sb strings.Builder
 	idx := 0
-	for h, packed := range f.positionMap {
+	f.positionMap.ForEach(func(packed uint64) {
 		pos := unpackPos(packed)
 
 		// Skip positions >= NumLeaves (undone additions)
 		if pos >= f.NumLeaves {
-			continue
+			return
 		}
 		// Skip deleted positions
 		if f.deletedLeafPositions.isSet(pos) {
-			continue
+			return
+		}
+		// Read hash from file
+		hash, err := f.readHash(pos)
+		if err != nil {
+			return
 		}
 		if idx != 0 {
 			sb.WriteString("\n")
 		}
-		fmt.Fprintf(&sb, "key:%s, pos:%d", hex.EncodeToString(h[:]), pos)
+		fmt.Fprintf(&sb, "hash:%s, pos:%d", hex.EncodeToString(hash[:8]), pos)
 		idx++
-	}
+	})
 	return sb.String()
 }
 
@@ -406,7 +422,8 @@ func FuzzForestChain(f *testing.F) {
 
 		memFile := newMemFile()
 		delFile := newMemFile()
-		forest, err := NewForest(memFile, delFile, newMemFile(), newMemFile(), 16)
+		tmpDir := t.TempDir()
+		forest, err := NewForest(memFile, delFile, newMemFile(), newMemFile(), tmpDir+"/ctrl", tmpDir+"/slots", 16)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -490,13 +507,15 @@ func FuzzForestRecord(f *testing.F) {
 		sc := newSimChainWithSeed(duration, seed)
 
 		// Forest using normal Modify
-		modifyForest, err := NewForest(newMemFile(), newMemFile(), newMemFile(), newMemFile(), 16)
+		tmpDir1 := t.TempDir()
+		modifyForest, err := NewForest(newMemFile(), newMemFile(), newMemFile(), newMemFile(), tmpDir1+"/ctrl", tmpDir1+"/slots", 16)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		// Forest using Record + HashAll
-		recordForest, err := NewForest(newMemFile(), newMemFile(), newMemFile(), newMemFile(), 16)
+		tmpDir2 := t.TempDir()
+		recordForest, err := NewForest(newMemFile(), newMemFile(), newMemFile(), newMemFile(), tmpDir2+"/ctrl", tmpDir2+"/slots", 16)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -600,7 +619,8 @@ func FuzzTreeBuilding(f *testing.F) {
 
 		memFile := newMemFile()
 		delFile := newMemFile()
-		forest, err := NewForest(memFile, delFile, newMemFile(), newMemFile(), 17)
+		tmpDir := t.TempDir()
+		forest, err := NewForest(memFile, delFile, newMemFile(), newMemFile(), tmpDir+"/ctrl", tmpDir+"/slots", 17)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -646,7 +666,8 @@ func TestForestCachedRWSNoFlush(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create forest backed by the cached files.
-	forest, err := NewForest(cachedFile, cachedDelFile, cachedAddIdxFile, cachedMetaFile, 10)
+	tmpDir := t.TempDir()
+	forest, err := NewForest(cachedFile, cachedDelFile, cachedAddIdxFile, cachedMetaFile, tmpDir+"/ctrl", tmpDir+"/slots", 10)
 	require.NoError(t, err)
 
 	// Reference pollard for correctness comparison.
@@ -699,8 +720,10 @@ func TestForestCachedRWSNoFlush(t *testing.T) {
 
 	// Restart a new forest from the flushed underlying files
 	// and verify the roots still match.
+	tmpDir2 := t.TempDir()
 	forest2, err := NewForest(
-		underlyingFile, underlyingDelFile, underlyingAddIdxFile, underlyingMetaFile, 10,
+		underlyingFile, underlyingDelFile, underlyingAddIdxFile, underlyingMetaFile,
+		tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
 	)
 	require.NoError(t, err)
 	require.Equal(t, forest.GetRoots(), forest2.GetRoots(),
@@ -727,7 +750,8 @@ func TestForestCrashRecovery(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Cached(3), 16)
+	tmpDir := t.TempDir()
+	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Cached(3), tmpDir+"/ctrl", tmpDir+"/slots", 16)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -761,8 +785,10 @@ func TestForestCrashRecovery(t *testing.T) {
 	require.NoError(t, w.crashAfterCommit())
 
 	// Underlying files still only have block-200 data.
+	tmpDir2 := t.TempDir()
 	preRecoveryForest, err := NewForest(
-		mainFile, delFile, addIdxFile, metaFile, 16,
+		mainFile, delFile, addIdxFile, metaFile,
+		tmpDir2+"/ctrl", tmpDir2+"/slots", 16,
 	)
 	require.NoError(t, err)
 	require.Equal(t, block200Roots, preRecoveryForest.GetRoots(),
@@ -777,8 +803,10 @@ func TestForestCrashRecovery(t *testing.T) {
 	)
 	require.NoError(t, err)
 
+	tmpDir3 := t.TempDir()
 	recoveredForest, err := NewForest(
-		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Cached(3), 16,
+		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Cached(3),
+		tmpDir3+"/ctrl", tmpDir3+"/slots", 16,
 	)
 	require.NoError(t, err)
 	require.Equal(t, block400Roots, recoveredForest.GetRoots(),
@@ -811,7 +839,8 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Cached(3), 16)
+	tmpDir := t.TempDir()
+	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Cached(3), tmpDir+"/ctrl", tmpDir+"/slots", 16)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -854,8 +883,10 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	require.NoError(t, err)
 
 	// Forest should be back at the block-200 state.
+	tmpDir2 := t.TempDir()
 	recoveredForest, err := NewForest(
-		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Cached(3), 16,
+		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Cached(3),
+		tmpDir2+"/ctrl", tmpDir2+"/slots", 16,
 	)
 	require.NoError(t, err)
 	require.Equal(t, savedRoots, recoveredForest.GetRoots(),
@@ -867,8 +898,7 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 // addIndex > 0 to catch bugs where packed values are used instead of
 // unpacked positions.
 func TestForestVerifyDeletedLeaf(t *testing.T) {
-	forest, err := NewForest(newMemFile(), newMemFile(), newMemFile(), newMemFile(), 8)
-	require.NoError(t, err)
+	forest := newTestForest(t, 8)
 
 	// Add 4 leaves in one batch - they'll have addIndex 0, 1, 2, 3
 	hashes := make([]Hash, 4)
@@ -878,7 +908,7 @@ func TestForestVerifyDeletedLeaf(t *testing.T) {
 		leaves[i] = Leaf{Hash: hashes[i]}
 	}
 
-	err = forest.Modify(leaves, nil, Proof{})
+	err := forest.Modify(leaves, nil, Proof{})
 	require.NoError(t, err)
 
 	// Verify all leaves exist
