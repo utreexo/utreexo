@@ -178,25 +178,108 @@ func NewForest(file ForestFile, deletedFile, addIndexFile, metaFile ForestFile, 
 		return nil, fmt.Errorf("load deleted positions: %w", err)
 	}
 
+	// Rebuild positionMap only if needed (new file or hash mismatch)
 	if needsRebuild {
-		// Rebuild positionMap from existing leaves.
-		for pos := uint64(0); pos < numLeaves; pos++ {
-			hash, err := f.readHash(pos)
-			if err != nil {
-				return nil, fmt.Errorf("rebuild positionMap at %d: %w", pos, err)
-			}
-			// Only add non-empty hashes to the map
-			if hash != empty {
-				addIndex, err := f.readAddIndex(pos)
-				if err != nil {
-					return nil, fmt.Errorf("rebuild addIndex at %d: %w", pos, err)
-				}
-				f.positionMap.Set(hash, packPosIndex(pos, addIndex))
-			}
+		if err := f.rebuildPositionMap(); err != nil {
+			return nil, fmt.Errorf("rebuild positionMap: %w", err)
 		}
 	}
 
 	return f, nil
+}
+
+// rebuildPositionMap reads all leaf hashes and addIndices in parallel bulk reads
+// and populates the positionMap, skipping deleted positions.
+func (f *Forest) rebuildPositionMap() error {
+	if f.NumLeaves == 0 {
+		return nil
+	}
+
+	const batchSize = 4096 // entries per batch
+	type batch struct {
+		pos  uint64
+		size uint64
+		data []byte
+	}
+
+	// done is closed on any error to signal producer goroutines to exit.
+	done := make(chan struct{})
+	defer close(done)
+
+	// readBatches reads fixed-size entries from r in batches, sending them on
+	// ch. It closes ch when finished and respects done for early cancellation.
+	readBatches := func(r io.ReadWriteSeeker, entrySize uint64, ch chan<- batch) error {
+		defer close(ch)
+
+		if _, err := r.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+
+		for pos := uint64(0); pos < f.NumLeaves; pos += batchSize {
+			n := min(uint64(batchSize), f.NumLeaves-pos)
+
+			buf := make([]byte, n*entrySize)
+			if _, err := io.ReadFull(r, buf); err != nil {
+				return err
+			}
+
+			select {
+			case ch <- batch{pos: pos, size: n, data: buf}:
+			case <-done:
+				return nil
+			}
+		}
+		return nil
+	}
+
+	hashCh := make(chan batch, 4)
+	addIdxCh := make(chan batch, 4)
+	hashErrCh := make(chan error, 1)
+	addIdxErrCh := make(chan error, 1)
+
+	go func() { hashErrCh <- readBatches(f.file, 32, hashCh) }()
+	go func() { addIdxErrCh <- readBatches(f.addIndexFile, 4, addIdxCh) }()
+
+	// Consumer: process batches as they arrive.
+	for hashBatch := range hashCh {
+		addIdxBatch, ok := <-addIdxCh
+		if !ok {
+			if err := <-addIdxErrCh; err != nil {
+				return fmt.Errorf("read addIndex: %w", err)
+			}
+			return fmt.Errorf("addIdx channel closed early")
+		}
+		if hashBatch.pos != addIdxBatch.pos || hashBatch.size != addIdxBatch.size {
+			return fmt.Errorf("batch mismatch: hash pos=%d size=%d, addIdx pos=%d size=%d",
+				hashBatch.pos, hashBatch.size, addIdxBatch.pos, addIdxBatch.size)
+		}
+
+		for i := uint64(0); i < hashBatch.size; i++ {
+			leafPos := hashBatch.pos + i
+
+			var hash Hash
+			copy(hash[:], hashBatch.data[i*32:])
+
+			addIndex := int32(binary.LittleEndian.Uint32(addIdxBatch.data[i*4:]))
+			if err := f.positionMap.Set(hash, packPosIndex(leafPos, addIndex)); err != nil {
+				return fmt.Errorf("positionMap.Set at %d: %w", leafPos, err)
+			}
+		}
+	}
+
+	// hashCh is closed — check the hash reader for errors.
+	if err := <-hashErrCh; err != nil {
+		return fmt.Errorf("read hashes: %w", err)
+	}
+
+	// Drain any remaining addIdx batches and check for errors.
+	for range addIdxCh {
+	}
+	if err := <-addIdxErrCh; err != nil {
+		return fmt.Errorf("read addIndex: %w", err)
+	}
+
+	return nil
 }
 
 // loadMetadata reads recordMode from metaFile (bytes 0-31, padded).
