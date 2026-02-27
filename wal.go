@@ -7,9 +7,10 @@ import (
 	"io"
 )
 
-// WAL coordinates crash-safe writes across multiple cachedRWS instances.
-// It uses a write-ahead journal to ensure atomicity: either all buffered
-// writes are applied to the underlying files, or none are.
+// WAL coordinates crash-safe writes across cachedRWS instances and a
+// deletedBitmap. It uses a write-ahead journal to ensure atomicity:
+// either all buffered writes are applied to the underlying files, or
+// none are.
 //
 // Journal format (all little-endian):
 //
@@ -25,26 +26,36 @@ import (
 //	dataLen   uint32   (length of data)
 //	data      []byte   (the actual bytes)
 //
+// File indices in the journal:
+//
+//	0 = main hash file     (cachedRWS)
+//	1 = addIndex file      (cachedRWS)
+//	2 = meta file          (cachedRWS)
+//	3 = deleted bitmap file (dirty words from deletedBitmap)
+//
 // Flush sequence:
-//  1. Collect entries from all cachedRWS caches
-//  2. Add consistency hash entry (file 3, offset 32)
+//  1. Collect entries from cachedRWS caches + dirty bitmap words
+//  2. Add consistency hash entry (file 2, offset 32)
 //  3. Write bestHash + entries + CRC32 checksum to journal
 //  4. Sync journal
 //  5. Apply entries to underlying files (including consistency hash)
 //  6. Sync underlying files
 //  7. Clear journal (write totalLen=0, sync)
-//  8. Reset cachedRWS caches
+//  8. Reset cachedRWS caches + clear bitmap dirty tracking
 //
 // Recovery (in NewWAL):
 //  1. Read journal; if valid checksum found, replay entries to underlying
 //  2. Clear journal
+//  3. Load bitmap from recovered underlying file
 //
 // The consistency hash is written to file 3 (metaFile) at offset 32,
 // and can be read from there after recovery or normal startup.
 type WAL struct {
-	journal io.ReadWriteSeeker
-	cached  []*cachedRWS
-	onFlush func([32]byte) error
+	journal    io.ReadWriteSeeker
+	cached     [3]*cachedRWS // [0]=main, [1]=addIndex, [2]=meta
+	bitmap     *deletedBitmap
+	bitmapFile ForestFile
+	onFlush    func([32]byte) error
 }
 
 // journalEntry represents a single write operation in the WAL journal.
@@ -61,7 +72,8 @@ const (
 	entryHeaderSize     = 13 // 1 (fileIdx) + 8 (offset) + 4 (dataLen)
 	journalMinSize      = journalHeaderSize + journalHashSize + journalChecksumSize
 
-	metaFileIdx    = 3  // index of the metadata file in the WAL file list
+	metaFileIdx    = 2  // journal fileIdx for the metadata file
+	deletedFileIdx = 3  // journal fileIdx for the deleted bitmap file
 	bestHashOffset = 32 // byte offset of the consistency hash in the metadata file
 )
 
@@ -73,24 +85,27 @@ type WALFile struct {
 }
 
 // NewWAL creates a WAL coordinating writes across the given underlying files.
-// It first recovers any committed but unapplied journal entries, then wraps
-// each underlying file in a cachedRWS. Use Cached(i) to get the
-// io.ReadWriteSeeker to pass to Forest.
-// Each file's MaxCacheBytes sets its memory threshold for signaling flush needed.
-// If MaxCacheBytes is 0, a default of 64MB is used.
-func NewWAL(journal io.ReadWriteSeeker, files ...WALFile) (*WAL, error) {
-	if len(files) != 4 {
-		return nil, fmt.Errorf("wal requires exactly 4 files, got %d", len(files))
+// bitmapFile is the deleted-positions bitmap (not wrapped in cachedRWS — its
+// dirty words are tracked by the in-memory deletedBitmap instead).
+// files must be exactly 3 WALFiles: [0]=main, [1]=addIndex, [2]=meta.
+// After recovery the bitmap is loaded from the underlying file and accessible
+// via Bitmap(). Use Cached(i) to get the cachedRWS for file i.
+func NewWAL(journal io.ReadWriteSeeker, bitmapFile ForestFile, files ...WALFile) (*WAL, error) {
+	if len(files) != 3 {
+		return nil, fmt.Errorf("wal requires exactly 3 files, got %d", len(files))
 	}
 
-	underlying := make([]ForestFile, len(files))
+	// Build the underlying array used for journal recovery.
+	// Indices match journal fileIdx: 0=main, 1=addIndex, 2=meta, 3=bitmap.
+	underlying := make([]ForestFile, 4)
 	for i, f := range files {
 		underlying[i] = f.File
 	}
+	underlying[deletedFileIdx] = bitmapFile
 
 	w := &WAL{
-		journal: journal,
-		cached:  make([]*cachedRWS, len(files)),
+		journal:    journal,
+		bitmapFile: bitmapFile,
 	}
 
 	// Replay any committed journal entries before creating caches,
@@ -98,6 +113,13 @@ func NewWAL(journal io.ReadWriteSeeker, files ...WALFile) (*WAL, error) {
 	if err := w.recoverFromJournal(underlying); err != nil {
 		return nil, fmt.Errorf("wal recover: %w", err)
 	}
+
+	// Load bitmap from the (possibly recovered) underlying file.
+	bitmap, err := LoadDeletedBitmap(w.bitmapFile)
+	if err != nil {
+		return nil, fmt.Errorf("wal load bitmap: %w", err)
+	}
+	w.bitmap = bitmap
 
 	for i, f := range files {
 		c, err := newCachedRWS(f.File, f.EntrySize, f.MaxCacheBytes)
@@ -110,9 +132,16 @@ func NewWAL(journal io.ReadWriteSeeker, files ...WALFile) (*WAL, error) {
 	return w, nil
 }
 
-// Cached returns the cachedRWS for the i-th underlying file.
+// Cached returns the cachedRWS for the i-th file.
+// Indices: 0=main, 1=addIndex, 2=meta.
 func (w *WAL) Cached(i int) *cachedRWS {
 	return w.cached[i]
+}
+
+// Bitmap returns the in-memory deleted bitmap loaded from the underlying file.
+// The bitmap tracks dirty words which are serialized during Flush.
+func (w *WAL) Bitmap() *deletedBitmap {
+	return w.bitmap
 }
 
 // SetOnFlush registers a callback that runs after each successful Flush.
@@ -122,7 +151,7 @@ func (w *WAL) SetOnFlush(fn func([32]byte) error) {
 }
 
 // Flush atomically commits all cached writes through the journal.
-// The bestHash is written to metaFile (file index 3) at offset 32.
+// The bestHash is written to metaFile (file index 2) at offset 32.
 func (w *WAL) Flush(bestHash [32]byte) error {
 	// Serialize entries directly from caches to avoid intermediate allocations.
 	entriesBuf := w.serializeEntries(bestHash)
@@ -162,16 +191,19 @@ func (w *WAL) Flush(bestHash [32]byte) error {
 		return fmt.Errorf("wal journal sync: %w", err)
 	}
 
-	// Apply directly from caches to underlying files.
+	// Apply directly from caches + bitmap to underlying files.
 	if err := w.applyFromCaches(bestHash); err != nil {
 		return fmt.Errorf("wal apply: %w", err)
 	}
 
-	// Sync underlying files.
+	// Sync underlying files (including bitmap file).
 	for i, c := range w.cached {
 		if err := syncFile(c.underlying); err != nil {
 			return fmt.Errorf("wal sync file %d: %w", i, err)
 		}
+	}
+	if err := syncFile(w.bitmapFile); err != nil {
+		return fmt.Errorf("wal sync bitmap file: %w", err)
 	}
 
 	// Clear journal.
@@ -186,6 +218,9 @@ func (w *WAL) Flush(bestHash [32]byte) error {
 		}
 	}
 
+	// Clear bitmap dirty tracking.
+	w.bitmap.clearDirty()
+
 	if w.onFlush != nil {
 		if err := w.onFlush(bestHash); err != nil {
 			return fmt.Errorf("wal onFlush: %w", err)
@@ -195,14 +230,16 @@ func (w *WAL) Flush(bestHash [32]byte) error {
 	return nil
 }
 
-// serializeEntries encodes journal entries directly from caches into a byte slice,
-// avoiding intermediate allocations. Includes the bestHash entry for metaFile.
+// serializeEntries encodes journal entries directly from caches and the
+// dirty bitmap into a byte slice. Includes the bestHash entry for metaFile.
 func (w *WAL) serializeEntries(bestHash [32]byte) []byte {
 	// Pre-calculate total size.
 	size := 0
 	for _, c := range w.cached {
 		size += c.cache.count() * (entryHeaderSize + c.cache.entrySize())
 	}
+	// Add dirty bitmap entries.
+	size += len(w.bitmap.dirtyWords) * (entryHeaderSize + 8)
 	// Add bestHash entry for metaFile.
 	size += entryHeaderSize + 32
 
@@ -219,6 +256,14 @@ func (w *WAL) serializeEntries(bestHash [32]byte) []byte {
 		})
 	}
 
+	// Serialize dirty bitmap words.
+	w.bitmap.forEachDirty(func(offset int64, data []byte) {
+		buf = append(buf, deletedFileIdx)
+		buf = binary.LittleEndian.AppendUint64(buf, uint64(offset))
+		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(data)))
+		buf = append(buf, data...)
+	})
+
 	// Add bestHash entry for metaFile.
 	buf = append(buf, metaFileIdx)
 	buf = binary.LittleEndian.AppendUint64(buf, bestHashOffset)
@@ -228,8 +273,8 @@ func (w *WAL) serializeEntries(bestHash [32]byte) []byte {
 	return buf
 }
 
-// applyFromCaches writes cached entries directly to underlying files,
-// avoiding intermediate allocations. Includes the bestHash entry.
+// applyFromCaches writes cached entries and dirty bitmap words directly to
+// underlying files. Includes the bestHash entry.
 func (w *WAL) applyFromCaches(bestHash [32]byte) error {
 	for i, c := range w.cached {
 		var applyErr error
@@ -251,6 +296,25 @@ func (w *WAL) applyFromCaches(bestHash [32]byte) error {
 		}
 	}
 
+	// Apply dirty bitmap words to the underlying bitmap file.
+	var bitmapErr error
+	w.bitmap.forEachDirty(func(offset int64, data []byte) {
+		if bitmapErr != nil {
+			return
+		}
+		if _, err := w.bitmapFile.Seek(offset, io.SeekStart); err != nil {
+			bitmapErr = fmt.Errorf("bitmap file seek to %d: %w", offset, err)
+			return
+		}
+		if _, err := w.bitmapFile.Write(data); err != nil {
+			bitmapErr = fmt.Errorf("bitmap file write at %d: %w", offset, err)
+			return
+		}
+	})
+	if bitmapErr != nil {
+		return bitmapErr
+	}
+
 	// Write bestHash to metaFile at bestHashOffset.
 	metaFile := w.cached[metaFileIdx].underlying
 	if _, err := metaFile.Seek(bestHashOffset, io.SeekStart); err != nil {
@@ -264,13 +328,27 @@ func (w *WAL) applyFromCaches(bestHash [32]byte) error {
 }
 
 // Discard drops all pending writes without committing.
-func (w *WAL) Discard() {
+// The in-memory bitmap is reloaded from the underlying file to revert
+// any mutations from the discarded block.
+func (w *WAL) Discard() error {
 	for _, c := range w.cached {
 		c.Discard()
 	}
+	// Reload bitmap from the underlying file to revert in-memory mutations.
+	// Unlike cachedRWS (which is a read-through cache over the underlying file),
+	// the bitmap is fully in-memory, so we must explicitly restore it.
+	bitmap, err := LoadDeletedBitmap(w.bitmapFile)
+	if err != nil {
+		return fmt.Errorf("wal discard: reload bitmap: %w", err)
+	}
+	w.bitmap = bitmap
+	return nil
 }
 
 // FlushNeeded returns true if any cached file has exceeded its memory threshold.
+// Dirty bitmap words are not considered here because they are tiny (just word
+// indices) and will be written to the journal when a flush is triggered by a
+// cachedRWS overflow.
 func (w *WAL) FlushNeeded() bool {
 	for _, c := range w.cached {
 		if c.FlushNeeded() {
