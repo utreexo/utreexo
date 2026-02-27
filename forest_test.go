@@ -136,7 +136,7 @@ func newTestForest(t *testing.T, forestRows uint8) *Forest {
 	t.Helper()
 	tmpDir := t.TempDir()
 	forest, err := NewForest(
-		newMemFile(), newMemFile(), newMemFile(), newMemFile(),
+		newMemFile(), newMemFile(), newMemFile(), nil,
 		tmpDir+"/ctrl", tmpDir+"/slots",
 		forestRows,
 	)
@@ -245,25 +245,29 @@ func TestForestSanityCheck(t *testing.T) {
 // sanityCheck checks for inconsistencies in the forest.
 // This implements the UtreexoTest interface.
 func (f *Forest) sanityCheck() error {
-	// Check 0: Verify deletedLeafPositions map matches deletedFile length
-	fileSize, err := f.deletedFile.Seek(0, io.SeekEnd)
-	if err != nil {
-		return fmt.Errorf("deletedFile seek: %w", err)
-	}
-	fileEntries := fileSize / 8
-	mapEntries := int64(f.deletedLeafPositions.count())
-	if fileEntries != mapEntries {
-		return fmt.Errorf("deletedLeafPositions mismatch: file has %d entries, map has %d",
-			fileEntries, mapEntries)
-	}
-
-	// Check 0.5: Verify positionMap entry count matches expected
+	// Check 0: Verify positionMap entry count matches expected
 	// positionMap should have exactly NumLeaves
 	expectedPosMapCount := f.NumLeaves
 	actualPosMapCount := f.positionMap.Count()
 	if actualPosMapCount != expectedPosMapCount {
 		return fmt.Errorf("positionMap count mismatch: expected %d, got %d",
 			expectedPosMapCount, actualPosMapCount)
+	}
+
+	// Check 0.5: Verify deletedLeafPositions bitmap is consistent with positionMap.
+	// Every position marked deleted must be a valid leaf in positionMap, and the
+	// number of deleted + live leaves must equal NumLeaves.
+	deletedCount := uint64(f.deletedLeafPositions.count())
+	liveCount := uint64(0)
+	f.positionMap.ForEach(func(packed uint64) {
+		pos := unpackPos(packed)
+		if !f.deletedLeafPositions.isSet(pos) {
+			liveCount++
+		}
+	})
+	if deletedCount+liveCount != f.NumLeaves {
+		return fmt.Errorf("deletedLeafPositions mismatch: %d deleted + %d live = %d, expected NumLeaves %d",
+			deletedCount, liveCount, deletedCount+liveCount, f.NumLeaves)
 	}
 
 	// Cache file reads - many paths share ancestors
@@ -421,9 +425,8 @@ func FuzzForestChain(f *testing.F) {
 		sc := newSimChainWithSeed(duration, seed)
 
 		memFile := newMemFile()
-		delFile := newMemFile()
 		tmpDir := t.TempDir()
-		forest, err := NewForest(memFile, delFile, newMemFile(), newMemFile(), tmpDir+"/ctrl", tmpDir+"/slots", 16)
+		forest, err := NewForest(memFile, newMemFile(), newMemFile(), nil, tmpDir+"/ctrl", tmpDir+"/slots", 16)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -508,14 +511,14 @@ func FuzzForestRecord(f *testing.F) {
 
 		// Forest using normal Modify
 		tmpDir1 := t.TempDir()
-		modifyForest, err := NewForest(newMemFile(), newMemFile(), newMemFile(), newMemFile(), tmpDir1+"/ctrl", tmpDir1+"/slots", 16)
+		modifyForest, err := NewForest(newMemFile(), newMemFile(), newMemFile(), nil, tmpDir1+"/ctrl", tmpDir1+"/slots", 16)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		// Forest using Record + HashAll
 		tmpDir2 := t.TempDir()
-		recordForest, err := NewForest(newMemFile(), newMemFile(), newMemFile(), newMemFile(), tmpDir2+"/ctrl", tmpDir2+"/slots", 16)
+		recordForest, err := NewForest(newMemFile(), newMemFile(), newMemFile(), nil, tmpDir2+"/ctrl", tmpDir2+"/slots", 16)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -618,9 +621,8 @@ func FuzzTreeBuilding(f *testing.F) {
 		}
 
 		memFile := newMemFile()
-		delFile := newMemFile()
 		tmpDir := t.TempDir()
-		forest, err := NewForest(memFile, delFile, newMemFile(), newMemFile(), tmpDir+"/ctrl", tmpDir+"/slots", 17)
+		forest, err := NewForest(memFile, newMemFile(), newMemFile(), nil, tmpDir+"/ctrl", tmpDir+"/slots", 17)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -648,26 +650,25 @@ func FuzzTreeBuilding(f *testing.F) {
 
 // TestForestCachedRWSNoFlush verifies that when Forest is backed by cachedRWS,
 // no data is written to the underlying files until Flush is called.
-func TestForestCachedRWSNoFlush(t *testing.T) {
+func TestForestNoFlushBeforeWAL(t *testing.T) {
 	// Create the raw underlying memFiles.
+	journal := newMemFile()
 	underlyingFile := newMemFile()
 	underlyingDelFile := newMemFile()
 	underlyingAddIdxFile := newMemFile()
 	underlyingMetaFile := newMemFile()
 
-	// Wrap each with cachedRWS so all writes are buffered.
-	cachedFile, err := newCachedRWS(underlyingFile, 32, 0)
-	require.NoError(t, err)
-	cachedDelFile, err := newCachedRWS(underlyingDelFile, 8, 0)
-	require.NoError(t, err)
-	cachedAddIdxFile, err := newCachedRWS(underlyingAddIdxFile, 4, 0)
-	require.NoError(t, err)
-	cachedMetaFile, err := newCachedRWS(underlyingMetaFile, 32, 0)
+	// WAL wraps files in cachedRWS (except bitmap) so writes are buffered.
+	w, err := NewWAL(journal, underlyingDelFile,
+		WALFile{File: underlyingFile, EntrySize: 32},
+		WALFile{File: underlyingAddIdxFile, EntrySize: 4},
+		WALFile{File: underlyingMetaFile, EntrySize: 32},
+	)
 	require.NoError(t, err)
 
-	// Create forest backed by the cached files.
+	// Create forest backed by the WAL.
 	tmpDir := t.TempDir()
-	forest, err := NewForest(cachedFile, cachedDelFile, cachedAddIdxFile, cachedMetaFile, tmpDir+"/ctrl", tmpDir+"/slots", 10)
+	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10)
 	require.NoError(t, err)
 
 	// Reference pollard for correctness comparison.
@@ -684,7 +685,7 @@ func TestForestCachedRWSNoFlush(t *testing.T) {
 	require.NoError(t, err)
 	compareRoots(t, forest, pollard, "after adds")
 
-	// Delete 2 leaves to exercise the deleted-file path as well.
+	// Delete 2 leaves to exercise the deletion path.
 	delHashes := []Hash{leaves[0].Hash, leaves[3].Hash}
 	forestProof, err := forest.Prove(delHashes)
 	require.NoError(t, err)
@@ -701,28 +702,27 @@ func TestForestCachedRWSNoFlush(t *testing.T) {
 	require.Equal(t, 0, len(underlyingFile.data),
 		"main file should be untouched before Flush")
 	require.Equal(t, 0, len(underlyingDelFile.data),
-		"deleted file should be untouched before Flush")
+		"bitmap file should be untouched before Flush")
 	require.Equal(t, 0, len(underlyingAddIdxFile.data),
 		"addIndex file should be untouched before Flush")
 
-	// Flush all caches to the underlying files.
-	require.NoError(t, cachedFile.Flush())
-	require.NoError(t, cachedDelFile.Flush())
-	require.NoError(t, cachedAddIdxFile.Flush())
+	// Flush through WAL.
+	require.NoError(t, w.Flush([32]byte{}))
 
 	// Underlying files should now contain data.
 	require.NotEqual(t, 0, len(underlyingFile.data),
 		"main file should have data after Flush")
 	require.NotEqual(t, 0, len(underlyingDelFile.data),
-		"deleted file should have data after Flush")
+		"bitmap file should have data after Flush")
 	require.NotEqual(t, 0, len(underlyingAddIdxFile.data),
 		"addIndex file should have data after Flush")
 
-	// Restart a new forest from the flushed underlying files
-	// and verify the roots still match.
+	// Restart a new forest from the flushed underlying files.
 	tmpDir2 := t.TempDir()
+	bitmap2, err := LoadDeletedBitmap(underlyingDelFile)
+	require.NoError(t, err)
 	forest2, err := NewForest(
-		underlyingFile, underlyingDelFile, underlyingAddIdxFile, underlyingMetaFile,
+		underlyingFile, underlyingAddIdxFile, underlyingMetaFile, bitmap2,
 		tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
 	)
 	require.NoError(t, err)
@@ -742,16 +742,15 @@ func TestForestCrashRecovery(t *testing.T) {
 	addIdxFile := newMemFile()
 	metaFile := newMemFile()
 
-	w, err := NewWAL(journal,
+	w, err := NewWAL(journal, delFile,
 		WALFile{File: mainFile, EntrySize: 32},
-		WALFile{File: delFile, EntrySize: 8},
 		WALFile{File: addIdxFile, EntrySize: 4},
 		WALFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
 
 	tmpDir := t.TempDir()
-	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Cached(3), tmpDir+"/ctrl", tmpDir+"/slots", 16)
+	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 16)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -786,8 +785,10 @@ func TestForestCrashRecovery(t *testing.T) {
 
 	// Underlying files still only have block-200 data.
 	tmpDir2 := t.TempDir()
+	preRecoveryBitmap, err := LoadDeletedBitmap(delFile)
+	require.NoError(t, err)
 	preRecoveryForest, err := NewForest(
-		mainFile, delFile, addIdxFile, metaFile,
+		mainFile, addIdxFile, metaFile, preRecoveryBitmap,
 		tmpDir2+"/ctrl", tmpDir2+"/slots", 16,
 	)
 	require.NoError(t, err)
@@ -795,9 +796,8 @@ func TestForestCrashRecovery(t *testing.T) {
 		"underlying files should still reflect block 200")
 
 	// ---- "Restart": new WAL recovers from journal ----
-	w2, err := NewWAL(journal,
+	w2, err := NewWAL(journal, delFile,
 		WALFile{File: mainFile, EntrySize: 32},
-		WALFile{File: delFile, EntrySize: 8},
 		WALFile{File: addIdxFile, EntrySize: 4},
 		WALFile{File: metaFile, EntrySize: 32},
 	)
@@ -805,7 +805,7 @@ func TestForestCrashRecovery(t *testing.T) {
 
 	tmpDir3 := t.TempDir()
 	recoveredForest, err := NewForest(
-		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Cached(3),
+		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Bitmap(),
 		tmpDir3+"/ctrl", tmpDir3+"/slots", 16,
 	)
 	require.NoError(t, err)
@@ -831,16 +831,15 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	addIdxFile := newMemFile()
 	metaFile := newMemFile()
 
-	w, err := NewWAL(journal,
+	w, err := NewWAL(journal, delFile,
 		WALFile{File: mainFile, EntrySize: 32},
-		WALFile{File: delFile, EntrySize: 8},
 		WALFile{File: addIdxFile, EntrySize: 4},
 		WALFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
 
 	tmpDir := t.TempDir()
-	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Cached(3), tmpDir+"/ctrl", tmpDir+"/slots", 16)
+	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 16)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -874,9 +873,8 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	require.NoError(t, w.crashBeforeCommit())
 
 	// "Restart": new WAL should discard the incomplete journal.
-	w2, err := NewWAL(journal,
+	w2, err := NewWAL(journal, delFile,
 		WALFile{File: mainFile, EntrySize: 32},
-		WALFile{File: delFile, EntrySize: 8},
 		WALFile{File: addIdxFile, EntrySize: 4},
 		WALFile{File: metaFile, EntrySize: 32},
 	)
@@ -885,7 +883,7 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	// Forest should be back at the block-200 state.
 	tmpDir2 := t.TempDir()
 	recoveredForest, err := NewForest(
-		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Cached(3),
+		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Bitmap(),
 		tmpDir2+"/ctrl", tmpDir2+"/slots", 16,
 	)
 	require.NoError(t, err)
@@ -943,14 +941,22 @@ func TestForestVerifyDeletedLeaf(t *testing.T) {
 // for Undo to succeed.
 func TestForestUndoAfterRebuild(t *testing.T) {
 	// Shared backing files (persist across restarts).
+	journal := newMemFile()
 	mainFile := newMemFile()
 	delFile := newMemFile()
 	addIdxFile := newMemFile()
 	metaFile := newMemFile()
 
+	w, err := NewWAL(journal, delFile,
+		WALFile{File: mainFile, EntrySize: 32},
+		WALFile{File: addIdxFile, EntrySize: 4},
+		WALFile{File: metaFile, EntrySize: 32},
+	)
+	require.NoError(t, err)
+
 	tmpDir1 := t.TempDir()
 	forest, err := NewForest(
-		mainFile, delFile, addIdxFile, metaFile,
+		w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(),
 		tmpDir1+"/ctrl", tmpDir1+"/slots", 10,
 	)
 	require.NoError(t, err)
@@ -999,10 +1005,20 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 		prevAdds[i] = leaf.Hash
 	}
 
-	// Restart: new tmpDir forces Swiss Table rebuild (consistency hash mismatch).
+	// Flush to persist all state to underlying files before restart.
+	require.NoError(t, w.Flush([32]byte{}))
+
+	// Restart: new WAL + new tmpDir forces Swiss Table rebuild.
+	w2, err := NewWAL(journal, delFile,
+		WALFile{File: mainFile, EntrySize: 32},
+		WALFile{File: addIdxFile, EntrySize: 4},
+		WALFile{File: metaFile, EntrySize: 32},
+	)
+	require.NoError(t, err)
+
 	tmpDir2 := t.TempDir()
 	forest2, err := NewForest(
-		mainFile, delFile, addIdxFile, metaFile,
+		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Bitmap(),
 		tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
 	)
 	require.NoError(t, err)
