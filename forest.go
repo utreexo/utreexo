@@ -7,11 +7,18 @@ import (
 	"math/bits"
 	"sync"
 
+	"github.com/utreexo/utreexo/internal/swisstable"
 	"golang.org/x/exp/slices"
 )
 
 // Assert that Forest implements the Utreexo interface.
 var _ Utreexo = (*Forest)(nil)
+
+// ForestFile is the interface required for the main data file.
+type ForestFile interface {
+	io.ReadWriteSeeker
+	io.ReaderAt
+}
 
 // positionMap value packing: upper 17 bits = addIndex, lower 47 bits = position
 // Supports up to 2^47 (~140 trillion) leaves and 2^17 (131,072) adds per block.
@@ -93,17 +100,18 @@ func (b *deletedBitmap) count() int {
 type Forest struct {
 	mu sync.RWMutex // protects all fields below
 
-	file         io.ReadWriteSeeker
-	deletedFile  io.ReadWriteSeeker // separate file tracking deleted leaf positions
-	addIndexFile io.ReadWriteSeeker // stores int32 addIndex at offset pos*4
-	metaFile     io.ReadWriteSeeker // stores recordMode (bytes 0-31) + consistency hash (bytes 32-63)
+	file         ForestFile
+	deletedFile  ForestFile // separate file tracking deleted leaf positions
+	addIndexFile ForestFile // stores int32 addIndex at offset pos*4
+	metaFile     ForestFile // stores recordMode (bytes 0-31) + consistency hash (bytes 32-63)
 	NumLeaves    uint64
 	forestRows   uint8 // Fixed maximum rows for stable position mapping
 
 	// positionMap maps leaf hashes to packed (addIndex, position) values.
 	// Upper 17 bits = addIndex (index within Modify batch), lower 47 bits = position.
 	// Only tracks leaves (row 0), not intermediate nodes.
-	positionMap map[miniHash]uint64
+	// Uses Swiss Table with mmap'd files for memory efficiency.
+	positionMap *swisstable.SwissPositionMap
 
 	// deletedLeafPositions tracks which leaf positions have been deleted.
 	// This is persisted to deletedFile so that on restart we don't re-add
@@ -121,10 +129,11 @@ type Forest struct {
 // deletedFile tracks deleted leaf positions (8 bytes per entry).
 // addIndexFile stores the addIndex for each leaf; its size determines numLeaves (size / 4).
 // metaFile stores recordMode (bytes 0-31) and consistency hash (bytes 32-63).
+// posMapCtrlPath and posMapSlotsPath are file paths for the Swiss Table position map.
 // forestRows sets the maximum tree height (determines max leaves = 2^forestRows).
 //
 // The positionMap is rebuilt by reading all leaf hashes from the file, skipping positions recorded in deletedFile.
-func NewForest(file, deletedFile, addIndexFile, metaFile io.ReadWriteSeeker, forestRows uint8) (*Forest, error) {
+func NewForest(file ForestFile, deletedFile, addIndexFile, metaFile ForestFile, posMapCtrlPath, posMapSlotsPath string, forestRows uint8) (*Forest, error) {
 	if deletedFile == nil || file == nil || addIndexFile == nil || metaFile == nil {
 		return nil, fmt.Errorf("one of the given files are nil")
 	}
@@ -136,12 +145,17 @@ func NewForest(file, deletedFile, addIndexFile, metaFile io.ReadWriteSeeker, for
 	}
 	numLeaves := uint64(addIdxSize / 4)
 
-	// Derive deleted count from deletedFile size (8 bytes per entry).
-	delSize, err := deletedFile.Seek(0, io.SeekEnd)
+	// Read consistency hash from metaFile (bytes 32-63, written atomically by WAL).
+	// Zero hash on first run or if metaFile is empty.
+	var consistencyHash [32]byte
+	metaFile.Seek(32, io.SeekStart)
+	metaFile.Read(consistencyHash[:])
+
+	// Create Swiss Table for position map. Size based on numLeaves (will resize if needed).
+	posMap, needsRebuild, err := swisstable.NewSwissPositionMap(posMapCtrlPath, posMapSlotsPath, 1<<forestRows, consistencyHash, file, positionMask)
 	if err != nil {
-		return nil, fmt.Errorf("get deletedFile size: %w", err)
+		return nil, fmt.Errorf("create position map: %w", err)
 	}
-	numDeleted := uint64(delSize / 8)
 
 	f := &Forest{
 		file:                 file,
@@ -150,7 +164,7 @@ func NewForest(file, deletedFile, addIndexFile, metaFile io.ReadWriteSeeker, for
 		metaFile:             metaFile,
 		NumLeaves:            numLeaves,
 		forestRows:           forestRows,
-		positionMap:          make(map[miniHash]uint64, numLeaves-numDeleted),
+		positionMap:          posMap,
 		deletedLeafPositions: newDeletedBitmap(numLeaves),
 	}
 
@@ -164,26 +178,108 @@ func NewForest(file, deletedFile, addIndexFile, metaFile io.ReadWriteSeeker, for
 		return nil, fmt.Errorf("load deleted positions: %w", err)
 	}
 
-	// Rebuild positionMap from existing leaves, skipping deleted positions
-	for pos := uint64(0); pos < numLeaves; pos++ {
-		if f.deletedLeafPositions.isSet(pos) {
-			continue
-		}
-		hash, err := f.readHash(pos)
-		if err != nil {
-			return nil, fmt.Errorf("rebuild positionMap at %d: %w", pos, err)
-		}
-		// Only add non-empty hashes to the map
-		if hash != empty {
-			addIndex, err := f.readAddIndex(pos)
-			if err != nil {
-				return nil, fmt.Errorf("rebuild addIndex at %d: %w", pos, err)
-			}
-			f.positionMap[hash.mini()] = packPosIndex(pos, addIndex)
+	// Rebuild positionMap only if needed (new file or hash mismatch)
+	if needsRebuild {
+		if err := f.rebuildPositionMap(); err != nil {
+			return nil, fmt.Errorf("rebuild positionMap: %w", err)
 		}
 	}
 
 	return f, nil
+}
+
+// rebuildPositionMap reads all leaf hashes and addIndices in parallel bulk reads
+// and populates the positionMap, skipping deleted positions.
+func (f *Forest) rebuildPositionMap() error {
+	if f.NumLeaves == 0 {
+		return nil
+	}
+
+	const batchSize = 4096 // entries per batch
+	type batch struct {
+		pos  uint64
+		size uint64
+		data []byte
+	}
+
+	// done is closed on any error to signal producer goroutines to exit.
+	done := make(chan struct{})
+	defer close(done)
+
+	// readBatches reads fixed-size entries from r in batches, sending them on
+	// ch. It closes ch when finished and respects done for early cancellation.
+	readBatches := func(r io.ReadWriteSeeker, entrySize uint64, ch chan<- batch) error {
+		defer close(ch)
+
+		if _, err := r.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+
+		for pos := uint64(0); pos < f.NumLeaves; pos += batchSize {
+			n := min(uint64(batchSize), f.NumLeaves-pos)
+
+			buf := make([]byte, n*entrySize)
+			if _, err := io.ReadFull(r, buf); err != nil {
+				return err
+			}
+
+			select {
+			case ch <- batch{pos: pos, size: n, data: buf}:
+			case <-done:
+				return nil
+			}
+		}
+		return nil
+	}
+
+	hashCh := make(chan batch, 4)
+	addIdxCh := make(chan batch, 4)
+	hashErrCh := make(chan error, 1)
+	addIdxErrCh := make(chan error, 1)
+
+	go func() { hashErrCh <- readBatches(f.file, 32, hashCh) }()
+	go func() { addIdxErrCh <- readBatches(f.addIndexFile, 4, addIdxCh) }()
+
+	// Consumer: process batches as they arrive.
+	for hashBatch := range hashCh {
+		addIdxBatch, ok := <-addIdxCh
+		if !ok {
+			if err := <-addIdxErrCh; err != nil {
+				return fmt.Errorf("read addIndex: %w", err)
+			}
+			return fmt.Errorf("addIdx channel closed early")
+		}
+		if hashBatch.pos != addIdxBatch.pos || hashBatch.size != addIdxBatch.size {
+			return fmt.Errorf("batch mismatch: hash pos=%d size=%d, addIdx pos=%d size=%d",
+				hashBatch.pos, hashBatch.size, addIdxBatch.pos, addIdxBatch.size)
+		}
+
+		for i := uint64(0); i < hashBatch.size; i++ {
+			leafPos := hashBatch.pos + i
+
+			var hash Hash
+			copy(hash[:], hashBatch.data[i*32:])
+
+			addIndex := int32(binary.LittleEndian.Uint32(addIdxBatch.data[i*4:]))
+			if err := f.positionMap.Set(hash, packPosIndex(leafPos, addIndex)); err != nil {
+				return fmt.Errorf("positionMap.Set at %d: %w", leafPos, err)
+			}
+		}
+	}
+
+	// hashCh is closed — check the hash reader for errors.
+	if err := <-hashErrCh; err != nil {
+		return fmt.Errorf("read hashes: %w", err)
+	}
+
+	// Drain any remaining addIdx batches and check for errors.
+	for range addIdxCh {
+	}
+	if err := <-addIdxErrCh; err != nil {
+		return fmt.Errorf("read addIndex: %w", err)
+	}
+
+	return nil
 }
 
 // loadMetadata reads recordMode from metaFile (bytes 0-31, padded).
@@ -337,6 +433,15 @@ func (f *Forest) GetTreeRows() uint8 {
 	return TreeRows(f.NumLeaves)
 }
 
+// SyncPositionMap updates the stored consistency hash in the position map.
+// It first fsyncs the mmap'd ctrl and slots files to make all pending position
+// map writes durable, then writes the consistency hash into both file headers
+// and fsyncs again. Call this after WAL flush succeeds to enable skipping
+// rebuild on restart.
+func (f *Forest) SyncPositionMap(consistencyHash [32]byte) error {
+	return f.positionMap.SetConsistencyHash(consistencyHash)
+}
+
 // readHash reads the hash at the given position from the file.
 func (f *Forest) readHash(position uint64) (Hash, error) {
 	offset := int64(position * 32)
@@ -409,7 +514,9 @@ func (f *Forest) writeAddIndex(pos uint64, addIndex int32) error {
 func (f *Forest) add(hash Hash, addIndex int32) error {
 	// Add to position map (before incrementing NumLeaves)
 	if hash != empty {
-		f.positionMap[hash.mini()] = packPosIndex(f.NumLeaves, addIndex)
+		if err := f.positionMap.Set(hash, packPosIndex(f.NumLeaves, addIndex)); err != nil {
+			return fmt.Errorf("positionMap.Set: %w", err)
+		}
 
 		// Write the leaf hash at position NumLeaves
 		err := f.writeHash(f.NumLeaves, hash)
@@ -470,7 +577,10 @@ func (f *Forest) delete(delHashes []Hash) error {
 	}
 
 	for _, delHash := range delHashes {
-		_, found := f.positionMap[delHash.mini()]
+		_, found, err := f.positionMap.Get(delHash)
+		if err != nil {
+			return fmt.Errorf("positionMap.Get: %w", err)
+		}
 		if !found {
 			return fmt.Errorf("delhash %v not found in position map", delHash)
 		}
@@ -487,8 +597,12 @@ func (f *Forest) delete(delHashes []Hash) error {
 }
 
 func (f *Forest) deleteSingle(delHash Hash) error {
-	// Get the original leaf position before any move-ups
-	leafPos := unpackPos(f.positionMap[delHash.mini()])
+	// Get the packed value (contains position + addIndex)
+	packed, _, err := f.positionMap.Get(delHash)
+	if err != nil {
+		return fmt.Errorf("positionMap.Get: %w", err)
+	}
+	leafPos := unpackPos(packed)
 
 	// Record deletion: persist to file and track in memory
 	if err := f.recordDeletedPosition(leafPos); err != nil {
@@ -781,7 +895,17 @@ func (f *Forest) Undo(prevAdds []Hash, proof Proof, delHashes, prevRoots []Hash)
 // numDels is how many leaves were deleted in the block being undone.
 // Deletion positions and hashes are read from internal files.
 func (f *Forest) undoInternal(numAdds uint64, numDels int) error {
-	// Step 1: Undo additions
+	// Step 1: Undo additions - delete from positionMap before decrementing NumLeaves.
+	for i := range numAdds {
+		pos := f.NumLeaves - numAdds + i
+		hash, err := f.readHash(pos)
+		if err != nil {
+			return fmt.Errorf("read hash at %d for undo add: %w", pos, err)
+		}
+		if _, err := f.positionMap.Delete(hash); err != nil {
+			return fmt.Errorf("positionMap.Delete at %d: %w", pos, err)
+		}
+	}
 	f.NumLeaves -= numAdds
 
 	// Step 2: Read deleted positions from deletedFile (last N entries)
@@ -1029,7 +1153,10 @@ func (f *Forest) ModifyAndReturnTTLs(adds []Leaf, delHashes []Hash, _ Proof) ([]
 	// Collect addIndexes before deletion
 	addIndexes := make([]int32, 0, len(delHashes))
 	for _, delHash := range delHashes {
-		packed, found := f.positionMap[delHash.mini()]
+		packed, found, err := f.positionMap.Get(delHash)
+		if err != nil {
+			return nil, fmt.Errorf("positionMap.Get: %w", err)
+		}
 		if !found {
 			return nil, fmt.Errorf("missing %v in positionMap. Cannot return ttls", delHash)
 		}
@@ -1066,7 +1193,10 @@ func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, error) {
 	// Collect addIndexes and track deletions
 	addIndexes := make([]int32, 0, len(delHashes))
 	for _, delHash := range delHashes {
-		packed, found := f.positionMap[delHash.mini()]
+		packed, found, err := f.positionMap.Get(delHash)
+		if err != nil {
+			return nil, fmt.Errorf("positionMap.Get: %w", err)
+		}
 		if !found {
 			return nil, fmt.Errorf("delhash %v not found in position map", delHash)
 		}
@@ -1082,7 +1212,9 @@ func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, error) {
 	// Store leaves without computing parent hashes
 	for i, hash := range adds {
 		if hash != empty {
-			f.positionMap[hash.mini()] = packPosIndex(f.NumLeaves, int32(i))
+			if err := f.positionMap.Set(hash, packPosIndex(f.NumLeaves, int32(i))); err != nil {
+				return nil, fmt.Errorf("positionMap.Set: %w", err)
+			}
 		}
 
 		// Always write the leaf hash (even if empty, so HashAll can read it)
@@ -1173,7 +1305,10 @@ func (f *Forest) HashAll() error {
 
 // calculatePosition calculates the logical position of the given hash.
 func (f *Forest) calculatePosition(hash Hash) (uint64, error) {
-	packed, found := f.positionMap[hash.mini()]
+	packed, found, err := f.positionMap.Get(hash)
+	if err != nil {
+		return 0, fmt.Errorf("positionMap.Get: %w", err)
+	}
 	if !found {
 		return 0, fmt.Errorf("hash %v not found in the position map", hash)
 	}
@@ -1234,7 +1369,10 @@ func (f *Forest) fetchProofHashes(delHashes []Hash) ([]Hash, error) {
 	// Build targets with both calculated and actual positions
 	targets := make([]targetPair, 0, len(delHashes))
 	for _, delHash := range delHashes {
-		packed, found := f.positionMap[delHash.mini()]
+		packed, found, err := f.positionMap.Get(delHash)
+		if err != nil {
+			return nil, fmt.Errorf("positionMap.Get: %w", err)
+		}
 		if !found {
 			return nil, fmt.Errorf("hash %v not found in the position map", delHash)
 		}
@@ -1409,7 +1547,10 @@ func (f *Forest) Verify(delHashes []Hash, _ Proof, _ bool) error {
 	defer f.mu.RUnlock()
 
 	for _, delHash := range delHashes {
-		packed, found := f.positionMap[delHash.mini()]
+		packed, found, err := f.positionMap.Get(delHash)
+		if err != nil {
+			return fmt.Errorf("positionMap.Get: %w", err)
+		}
 		if !found {
 			return fmt.Errorf("hash %v doesn't exist in the forest", delHash)
 		}
@@ -1430,7 +1571,10 @@ func (f *Forest) GetLeafPosition(hash Hash) (uint64, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
-	packed, ok := f.positionMap[hash.mini()]
+	packed, ok, err := f.positionMap.Get(hash)
+	if err != nil {
+		return 0, false
+	}
 	return unpackPos(packed), ok
 }
 

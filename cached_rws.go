@@ -16,7 +16,7 @@ import (
 // NOT handled -- the read will miss the cache and return stale data from
 // the underlying file.
 type cachedRWS struct {
-	underlying io.ReadWriteSeeker
+	underlying ForestFile
 	cache      cacheStore
 	pos        int64 // current seek position
 	maxWritten int64 // highest byte offset written (for SeekEnd)
@@ -29,7 +29,7 @@ type cachedRWS struct {
 // entrySize specifies the fixed record size (4, 8, or 32 bytes).
 // maxCacheBytes sets the threshold for signaling that a flush is needed.
 // If maxCacheBytes is 0, defaultMaxCacheMemory is used.
-func newCachedRWS(underlying io.ReadWriteSeeker, entrySize int, maxCacheBytes int64) (*cachedRWS, error) {
+func newCachedRWS(underlying ForestFile, entrySize int, maxCacheBytes int64) (*cachedRWS, error) {
 	size, err := underlying.Seek(0, io.SeekEnd)
 	if err != nil {
 		return nil, err
@@ -57,6 +57,22 @@ func newCachedRWS(underlying io.ReadWriteSeeker, entrySize int, maxCacheBytes in
 		maxWritten: size,
 		baseSize:   size,
 	}, nil
+}
+
+// ReadAt reads len(p) bytes starting at byte offset off.
+// It checks the cache first, then falls through to the underlying file.
+func (c *cachedRWS) ReadAt(p []byte, off int64) (int, error) {
+	if cached, ok := c.cache.get(off); ok {
+		n := copy(p, cached)
+		if n < len(p) {
+			return n, io.EOF
+		}
+		return n, nil
+	}
+	if off >= c.baseSize {
+		return 0, io.EOF
+	}
+	return c.underlying.ReadAt(p, off)
 }
 
 // Read returns data from the cache if present, otherwise reads from

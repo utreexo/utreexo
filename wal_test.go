@@ -580,7 +580,8 @@ func TestWALForestIntegration(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Cached(3), 10)
+	tmpDir := t.TempDir()
+	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Cached(3), tmpDir+"/ctrl", tmpDir+"/slots", 10)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -613,7 +614,8 @@ func TestWALForestIntegration(t *testing.T) {
 	require.NoError(t, w.Flush([32]byte{}))
 
 	// Restart forest from flushed underlying files and verify roots match.
-	forest2, err := NewForest(mainFile, delFile, addIdxFile, metaFile, 10)
+	tmpDir2 := t.TempDir()
+	forest2, err := NewForest(mainFile, delFile, addIdxFile, metaFile, tmpDir2+"/ctrl", tmpDir2+"/slots", 10)
 	require.NoError(t, err)
 	require.Equal(t, forest.GetRoots(), forest2.GetRoots(),
 		"roots should match after restart from WAL-flushed data")
@@ -637,7 +639,8 @@ func TestWALForestRecovery(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Cached(3), 10)
+	tmpDir := t.TempDir()
+	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Cached(3), tmpDir+"/ctrl", tmpDir+"/slots", 10)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -684,8 +687,9 @@ func TestWALForestRecovery(t *testing.T) {
 	require.NoError(t, err)
 
 	// Build forest from recovered underlying files.
+	tmpDir2 := t.TempDir()
 	forest2, err := NewForest(
-		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Cached(3), 10,
+		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Cached(3), tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
 	)
 	require.NoError(t, err)
 
@@ -712,7 +716,8 @@ func TestWALCrashBeforeCommit(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Cached(3), 10)
+	tmpDir := t.TempDir()
+	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Cached(3), tmpDir+"/ctrl", tmpDir+"/slots", 10)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -753,8 +758,9 @@ func TestWALCrashBeforeCommit(t *testing.T) {
 	require.NoError(t, err)
 
 	// Build forest from underlying files — should be at block 1 state.
+	tmpDir2 := t.TempDir()
 	forest2, err := NewForest(
-		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Cached(3), 10,
+		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Cached(3), tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
 	)
 	require.NoError(t, err)
 
