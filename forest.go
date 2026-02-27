@@ -37,15 +37,20 @@ func unpackIndex(v uint64) int32 { return int32(v >> positionBits) }
 // deletedBitmap tracks deleted leaf positions using 1 bit per position.
 // Position N is stored at bit (N % 64) of bits[N / 64].
 // This is more memory-efficient and cache-friendly than a map.
+//
+// dirtyWords tracks which bitmap words have been modified since the last
+// flush/clear. The WAL uses this to serialize only changed words.
 type deletedBitmap struct {
-	bits []uint64
+	bits       []uint64
+	dirtyWords map[uint64]struct{}
 }
 
 // newDeletedBitmap creates a bitmap sized to track numLeaves positions.
 func newDeletedBitmap(numLeaves uint64) *deletedBitmap {
 	numWords := (numLeaves + 63) / 64
 	return &deletedBitmap{
-		bits: make([]uint64, numWords),
+		bits:       make([]uint64, numWords),
+		dirtyWords: make(map[uint64]struct{}),
 	}
 }
 
@@ -58,6 +63,7 @@ func (b *deletedBitmap) set(pos uint64) {
 		b.bits = newBits
 	}
 	b.bits[word] |= 1 << (pos % 64)
+	b.dirtyWords[word] = struct{}{}
 }
 
 // unset marks the given position as not deleted.
@@ -67,6 +73,63 @@ func (b *deletedBitmap) unset(pos uint64) {
 		return
 	}
 	b.bits[word] &^= 1 << (pos % 64)
+	b.dirtyWords[word] = struct{}{}
+}
+
+// forEachDirty calls fn for each dirty bitmap word, providing the byte offset
+// in the file and the 8-byte little-endian encoded word.
+func (b *deletedBitmap) forEachDirty(fn func(offset int64, data []byte)) {
+	for wordIdx := range b.dirtyWords {
+		// This should never happen in practice since dirtyWords are only
+		// added by set/unset which ensure the index is within bounds.
+		if wordIdx >= uint64(len(b.bits)) {
+			continue
+		}
+		var buf [8]byte
+		binary.LittleEndian.PutUint64(buf[:], b.bits[wordIdx])
+		fn(int64(wordIdx)*8, buf[:])
+	}
+}
+
+// clearDirty resets dirty tracking. Called after WAL flush or discard.
+func (b *deletedBitmap) clearDirty() {
+	clear(b.dirtyWords)
+}
+
+// LoadDeletedBitmap reads a bitmap file into a new deletedBitmap.
+// The file stores uint64 words in little-endian format, one per 8 bytes.
+func LoadDeletedBitmap(file io.ReadSeeker) (*deletedBitmap, error) {
+	size, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+
+	if size == 0 {
+		return newDeletedBitmap(0), nil
+	}
+
+	if size%8 != 0 {
+		return nil, fmt.Errorf("bitmap file size %d is not a multiple of 8", size)
+	}
+
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+
+	buf := make([]byte, size)
+	if _, err := io.ReadFull(file, buf); err != nil {
+		return nil, err
+	}
+
+	numWords := uint64(size) / 8
+	// Multiply by 64 to convert from word count to a capacity that
+	// newDeletedBitmap will round back into the correct word count.
+	b := newDeletedBitmap(numWords * 64)
+	for i := range numWords {
+		b.bits[i] = binary.LittleEndian.Uint64(buf[i*8:])
+	}
+
+	return b, nil
 }
 
 // isSet returns true if the given position is marked as deleted.
