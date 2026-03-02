@@ -1038,3 +1038,76 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 	err = forest2.sanityCheck()
 	require.NoError(t, err, "sanityCheck after Undo on restarted forest")
 }
+
+func TestOpenForest(t *testing.T) {
+	tests := []struct {
+		name        string
+		adds        []Leaf
+		delHashes   []Hash
+		flushBefore bool // call Flush explicitly before Close
+	}{
+		{
+			name: "add only",
+			adds: []Leaf{
+				{Hash: Hash{1}},
+				{Hash: Hash{2}},
+				{Hash: Hash{3}},
+				{Hash: Hash{4}},
+			},
+		},
+		{
+			name: "add then delete",
+			adds: []Leaf{
+				{Hash: Hash{1}},
+				{Hash: Hash{2}},
+				{Hash: Hash{3}},
+				{Hash: Hash{4}},
+			},
+			delHashes: []Hash{{2}},
+		},
+		{
+			name: "flush then close",
+			adds: []Leaf{
+				{Hash: Hash{1}},
+				{Hash: Hash{2}},
+				{Hash: Hash{3}},
+			},
+			delHashes:   []Hash{{2}},
+			flushBefore: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbpath := t.TempDir()
+
+			forest, err := OpenForest(dbpath)
+			require.NoError(t, err)
+
+			err = forest.Modify(tt.adds, nil, Proof{})
+			require.NoError(t, err)
+
+			if len(tt.delHashes) > 0 {
+				err = forest.Modify(nil, tt.delHashes, Proof{})
+				require.NoError(t, err)
+			}
+
+			roots := forest.GetRoots()
+
+			var bestHash [32]byte
+			bestHash[0] = 0xAB
+			if tt.flushBefore {
+				require.NoError(t, forest.Flush(bestHash))
+			}
+			require.NoError(t, forest.Close(bestHash))
+
+			// Reopen and verify state persisted.
+			forest2, err := OpenForest(dbpath)
+			require.NoError(t, err)
+			defer forest2.Close(bestHash)
+
+			require.Equal(t, roots, forest2.GetRoots(),
+				"roots should match after reopen")
+		})
+	}
+}
