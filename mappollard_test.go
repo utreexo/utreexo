@@ -1056,10 +1056,9 @@ func FuzzMapPollardTTLs(f *testing.F) {
 
 		// Create forest with addIndexFile for TTL tracking
 		memFile := newMemFile()
-		delFile := newMemFile()
 		addIndexFile := newMemFile()
 		tmpDir := t.TempDir()
-		forest, err := NewForest(memFile, delFile, addIndexFile, newMemFile(), tmpDir+"/ctrl", tmpDir+"/slots", 16)
+		forest, err := NewForest(memFile, addIndexFile, newMemFile(), nil, tmpDir+"/ctrl", tmpDir+"/slots", 16)
 		if err != nil {
 			t.Fatal(err)
 		}

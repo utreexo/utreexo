@@ -37,15 +37,20 @@ func unpackIndex(v uint64) int32 { return int32(v >> positionBits) }
 // deletedBitmap tracks deleted leaf positions using 1 bit per position.
 // Position N is stored at bit (N % 64) of bits[N / 64].
 // This is more memory-efficient and cache-friendly than a map.
+//
+// dirtyWords tracks which bitmap words have been modified since the last
+// flush/clear. The WAL uses this to serialize only changed words.
 type deletedBitmap struct {
-	bits []uint64
+	bits       []uint64
+	dirtyWords map[uint64]struct{}
 }
 
 // newDeletedBitmap creates a bitmap sized to track numLeaves positions.
 func newDeletedBitmap(numLeaves uint64) *deletedBitmap {
 	numWords := (numLeaves + 63) / 64
 	return &deletedBitmap{
-		bits: make([]uint64, numWords),
+		bits:       make([]uint64, numWords),
+		dirtyWords: make(map[uint64]struct{}),
 	}
 }
 
@@ -58,6 +63,7 @@ func (b *deletedBitmap) set(pos uint64) {
 		b.bits = newBits
 	}
 	b.bits[word] |= 1 << (pos % 64)
+	b.dirtyWords[word] = struct{}{}
 }
 
 // unset marks the given position as not deleted.
@@ -67,6 +73,63 @@ func (b *deletedBitmap) unset(pos uint64) {
 		return
 	}
 	b.bits[word] &^= 1 << (pos % 64)
+	b.dirtyWords[word] = struct{}{}
+}
+
+// forEachDirty calls fn for each dirty bitmap word, providing the byte offset
+// in the file and the 8-byte little-endian encoded word.
+func (b *deletedBitmap) forEachDirty(fn func(offset int64, data []byte)) {
+	for wordIdx := range b.dirtyWords {
+		// This should never happen in practice since dirtyWords are only
+		// added by set/unset which ensure the index is within bounds.
+		if wordIdx >= uint64(len(b.bits)) {
+			continue
+		}
+		var buf [8]byte
+		binary.LittleEndian.PutUint64(buf[:], b.bits[wordIdx])
+		fn(int64(wordIdx)*8, buf[:])
+	}
+}
+
+// clearDirty resets dirty tracking. Called after WAL flush or discard.
+func (b *deletedBitmap) clearDirty() {
+	clear(b.dirtyWords)
+}
+
+// LoadDeletedBitmap reads a bitmap file into a new deletedBitmap.
+// The file stores uint64 words in little-endian format, one per 8 bytes.
+func LoadDeletedBitmap(file io.ReadSeeker) (*deletedBitmap, error) {
+	size, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+
+	if size == 0 {
+		return newDeletedBitmap(0), nil
+	}
+
+	if size%8 != 0 {
+		return nil, fmt.Errorf("bitmap file size %d is not a multiple of 8", size)
+	}
+
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+
+	buf := make([]byte, size)
+	if _, err := io.ReadFull(file, buf); err != nil {
+		return nil, err
+	}
+
+	numWords := uint64(size) / 8
+	// Multiply by 64 to convert from word count to a capacity that
+	// newDeletedBitmap will round back into the correct word count.
+	b := newDeletedBitmap(numWords * 64)
+	for i := range numWords {
+		b.bits[i] = binary.LittleEndian.Uint64(buf[i*8:])
+	}
+
+	return b, nil
 }
 
 // isSet returns true if the given position is marked as deleted.
@@ -101,7 +164,6 @@ type Forest struct {
 	mu sync.RWMutex // protects all fields below
 
 	file         ForestFile
-	deletedFile  ForestFile // separate file tracking deleted leaf positions
 	addIndexFile ForestFile // stores int32 addIndex at offset pos*4
 	metaFile     ForestFile // stores recordMode (bytes 0-31) + consistency hash (bytes 32-63)
 	NumLeaves    uint64
@@ -114,8 +176,9 @@ type Forest struct {
 	positionMap *swisstable.SwissPositionMap
 
 	// deletedLeafPositions tracks which leaf positions have been deleted.
-	// This is persisted to deletedFile so that on restart we don't re-add
-	// deleted leaves to the positionMap.
+	// Persisted via the WAL (dirty words are serialized during flush).
+	// On restart the bitmap is loaded from the underlying file by the WAL
+	// (or LoadDeletedBitmap for non-WAL usage) and passed to NewForest.
 	deletedLeafPositions *deletedBitmap
 
 	// recordMode is true after Record is called but before HashAll completes.
@@ -126,15 +189,15 @@ type Forest struct {
 
 // NewForest creates a new Forest backed by the given file.
 // The file should be an io.ReadWriteSeeker (e.g., *os.File).
-// deletedFile tracks deleted leaf positions (8 bytes per entry).
 // addIndexFile stores the addIndex for each leaf; its size determines numLeaves (size / 4).
 // metaFile stores recordMode (bytes 0-31) and consistency hash (bytes 32-63).
+// bitmap tracks deleted leaf positions; pass nil for a fresh forest. When using a WAL,
+// the bitmap is loaded by the WAL after recovery (via WAL.Bitmap()). For non-WAL usage,
+// load it with LoadDeletedBitmap.
 // posMapCtrlPath and posMapSlotsPath are file paths for the Swiss Table position map.
 // forestRows sets the maximum tree height (determines max leaves = 2^forestRows).
-//
-// The positionMap is rebuilt by reading all leaf hashes from the file, skipping positions recorded in deletedFile.
-func NewForest(file ForestFile, deletedFile, addIndexFile, metaFile ForestFile, posMapCtrlPath, posMapSlotsPath string, forestRows uint8) (*Forest, error) {
-	if deletedFile == nil || file == nil || addIndexFile == nil || metaFile == nil {
+func NewForest(file ForestFile, addIndexFile, metaFile ForestFile, bitmap *deletedBitmap, posMapCtrlPath, posMapSlotsPath string, forestRows uint8) (*Forest, error) {
+	if file == nil || addIndexFile == nil || metaFile == nil {
 		return nil, fmt.Errorf("one of the given files are nil")
 	}
 
@@ -157,25 +220,23 @@ func NewForest(file ForestFile, deletedFile, addIndexFile, metaFile ForestFile, 
 		return nil, fmt.Errorf("create position map: %w", err)
 	}
 
+	if bitmap == nil {
+		bitmap = newDeletedBitmap(numLeaves)
+	}
+
 	f := &Forest{
 		file:                 file,
-		deletedFile:          deletedFile,
 		addIndexFile:         addIndexFile,
 		metaFile:             metaFile,
 		NumLeaves:            numLeaves,
 		forestRows:           forestRows,
 		positionMap:          posMap,
-		deletedLeafPositions: newDeletedBitmap(numLeaves),
+		deletedLeafPositions: bitmap,
 	}
 
 	// Load metadata (recordMode)
 	if err := f.loadMetadata(); err != nil {
 		return nil, fmt.Errorf("load metadata: %w", err)
-	}
-
-	// Rebuild deletedLeafPositions from deletedFile
-	if err := f.loadDeletedPositions(); err != nil {
-		return nil, fmt.Errorf("load deleted positions: %w", err)
 	}
 
 	// Rebuild positionMap only if needed (new file or hash mismatch)
@@ -299,37 +360,6 @@ func (f *Forest) loadMetadata() error {
 	return nil
 }
 
-// loadDeletedPositions reads all deleted leaf positions from deletedFile.
-func (f *Forest) loadDeletedPositions() error {
-	size, err := f.deletedFile.Seek(0, io.SeekEnd)
-	if err != nil {
-		return err
-	}
-
-	if size == 0 {
-		return nil
-	}
-
-	_, err = f.deletedFile.Seek(0, io.SeekStart)
-	if err != nil {
-		return err
-	}
-
-	numEntries := size / 8
-	buf := make([]byte, numEntries*8)
-	_, err = io.ReadFull(f.deletedFile, buf)
-	if err != nil {
-		return err
-	}
-
-	for i := range numEntries {
-		pos := binary.LittleEndian.Uint64(buf[i*8:])
-		f.deletedLeafPositions.set(pos)
-	}
-
-	return nil
-}
-
 // saveRecordMode writes the recordMode to metaFile (bytes 0-31, padded).
 func (f *Forest) saveRecordMode() error {
 	_, err := f.metaFile.Seek(0, io.SeekStart)
@@ -355,64 +385,6 @@ func (f *Forest) ReadConsistencyHash() ([32]byte, error) {
 	}
 	_, err = io.ReadFull(f.metaFile, hash[:])
 	return hash, err
-}
-
-// recordDeletedPosition appends a deleted leaf position to the deletedFile.
-func (f *Forest) recordDeletedPosition(pos uint64) error {
-	// Seek to end of file
-	_, err := f.deletedFile.Seek(0, io.SeekEnd)
-	if err != nil {
-		return err
-	}
-
-	return binary.Write(f.deletedFile, binary.LittleEndian, pos)
-}
-
-// popDeletedPositions reads and removes the last n positions from deletedFile.
-// Returns positions in the order they were deleted (oldest first for the popped batch).
-func (f *Forest) popDeletedPositions(n int) ([]uint64, error) {
-	if n == 0 {
-		return nil, nil
-	}
-
-	// Get current file size
-	endOffset, err := f.deletedFile.Seek(0, io.SeekEnd)
-	if err != nil {
-		return nil, err
-	}
-
-	totalEntries := endOffset / 8
-	if int64(n) > totalEntries {
-		return nil, fmt.Errorf("popDeletedPositions: requested %d but only %d recorded", n, totalEntries)
-	}
-
-	// Seek to start of the last n entries
-	startOffset := endOffset - int64(n)*8
-	_, err = f.deletedFile.Seek(startOffset, io.SeekStart)
-	if err != nil {
-		return nil, err
-	}
-
-	// Read the positions
-	positions := make([]uint64, n)
-	for i := range n {
-		err := binary.Read(f.deletedFile, binary.LittleEndian, &positions[i])
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// Truncate the file to remove these entries
-	truncater, ok := f.deletedFile.(interface{ Truncate(int64) error })
-	if !ok {
-		return nil, fmt.Errorf("deletedFile does not support Truncate")
-	}
-	err = truncater.Truncate(startOffset)
-	if err != nil {
-		return nil, err
-	}
-
-	return positions, nil
 }
 
 // GetNumLeaves returns the total number of leaves added to the forest.
@@ -604,10 +576,8 @@ func (f *Forest) deleteSingle(delHash Hash) error {
 	}
 	leafPos := unpackPos(packed)
 
-	// Record deletion: persist to file and track in memory
-	if err := f.recordDeletedPosition(leafPos); err != nil {
-		return fmt.Errorf("record deleted position %d: %w", leafPos, err)
-	}
+	// Mark position as deleted in the in-memory bitmap.
+	// The WAL will persist dirty bitmap words during flush.
 	f.deletedLeafPositions.set(leafPos)
 
 	// First I need to check if I moved up.
@@ -887,14 +857,14 @@ func (f *Forest) Undo(prevAdds []Hash, proof Proof, delHashes, prevRoots []Hash)
 		return fmt.Errorf("cannot call Undo while in record mode; call HashAll first")
 	}
 
-	return f.undoInternal(uint64(len(prevAdds)), len(delHashes))
+	return f.undoInternal(uint64(len(prevAdds)), delHashes)
 }
 
 // undoInternal reverts additions and deletions.
 // numAdds is how many leaves were added in the block being undone.
-// numDels is how many leaves were deleted in the block being undone.
-// Deletion positions and hashes are read from internal files.
-func (f *Forest) undoInternal(numAdds uint64, numDels int) error {
+// delHashes are the hashes that were deleted in the block being undone;
+// their positions are looked up from positionMap.
+func (f *Forest) undoInternal(numAdds uint64, delHashes []Hash) error {
 	// Step 1: Undo additions - delete from positionMap before decrementing NumLeaves.
 	for i := range numAdds {
 		pos := f.NumLeaves - numAdds + i
@@ -908,13 +878,17 @@ func (f *Forest) undoInternal(numAdds uint64, numDels int) error {
 	}
 	f.NumLeaves -= numAdds
 
-	// Step 2: Read deleted positions from deletedFile (last N entries)
-	delPositions, err := f.popDeletedPositions(numDels)
-	if err != nil {
-		return fmt.Errorf("pop deleted positions: %w", err)
-	}
-	if len(delPositions) != numDels {
-		return fmt.Errorf("expected %d deleted positions, got %d", numDels, len(delPositions))
+	// Step 2: Look up deleted positions from positionMap
+	delPositions := make([]uint64, len(delHashes))
+	for i, hash := range delHashes {
+		packed, found, err := f.positionMap.Get(hash)
+		if err != nil {
+			return fmt.Errorf("positionMap.Get for undo del: %w", err)
+		}
+		if !found {
+			return fmt.Errorf("hash not found in positionMap for undo")
+		}
+		delPositions[i] = unpackPos(packed)
 	}
 
 	// Step 3: Undo deletions in reverse order (LIFO)
@@ -922,7 +896,7 @@ func (f *Forest) undoInternal(numAdds uint64, numDels int) error {
 		pos := delPositions[i]
 		f.deletedLeafPositions.unset(pos)
 
-		err = f.undoSingleDeletion(pos)
+		err := f.undoSingleDeletion(pos)
 		if err != nil {
 			return err
 		}
@@ -1203,9 +1177,6 @@ func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, error) {
 		addIndexes = append(addIndexes, unpackIndex(packed))
 		leafPos := unpackPos(packed)
 
-		if err := f.recordDeletedPosition(leafPos); err != nil {
-			return nil, fmt.Errorf("record deleted position %d: %w", leafPos, err)
-		}
 		f.deletedLeafPositions.set(leafPos)
 	}
 
