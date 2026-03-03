@@ -5,17 +5,34 @@ import (
 	"fmt"
 	"io"
 	"math/bits"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/utreexo/utreexo/internal/swisstable"
 	"golang.org/x/exp/slices"
 )
 
+const (
+	// defaultForestRows is the tree height used by OpenForest.
+	// Supports up to 2^32 (~4.3 billion) leaves.
+	defaultForestRows = 32
+
+	// File names used by OpenForest within the dbpath directory.
+	forestDataFileName        = "forest_data.dat"         // main hash data, 32 bytes per position
+	forestDeletedFileName     = "forest_deleted.dat"      // deleted-leaf bitmap, 8 bytes per word
+	forestAddIndexFileName    = "forest_addindex.dat"     // add-batch index per leaf, 4 bytes each
+	forestJournalFileName     = "forest_journal.dat"      // WAL journal for crash recovery
+	forestMetaFileName        = "forest_meta.dat"         // recordMode + consistency hash
+	forestPosMapCtrlFileName  = "forest_posmap_ctrl.dat"  // Swiss Table control bytes, mmap'd
+	forestPosMapSlotsFileName = "forest_posmap_slots.dat" // Swiss Table slot values, mmap'd
+)
+
 // Assert that Forest implements the Utreexo interface.
 var _ Utreexo = (*Forest)(nil)
 
-// ForestFile is the interface required for the main data file.
-type ForestFile interface {
+// forestFile is the interface required for the main data file.
+type forestFile interface {
 	io.ReadWriteSeeker
 	io.ReaderAt
 }
@@ -96,9 +113,9 @@ func (b *deletedBitmap) clearDirty() {
 	clear(b.dirtyWords)
 }
 
-// LoadDeletedBitmap reads a bitmap file into a new deletedBitmap.
+// loadDeletedBitmap reads a bitmap file into a new deletedBitmap.
 // The file stores uint64 words in little-endian format, one per 8 bytes.
-func LoadDeletedBitmap(file io.ReadSeeker) (*deletedBitmap, error) {
+func loadDeletedBitmap(file io.ReadSeeker) (*deletedBitmap, error) {
 	size, err := file.Seek(0, io.SeekEnd)
 	if err != nil {
 		return nil, err
@@ -163,9 +180,9 @@ func (b *deletedBitmap) count() int {
 type Forest struct {
 	mu sync.RWMutex // protects all fields below
 
-	file         ForestFile
-	addIndexFile ForestFile // stores int32 addIndex at offset pos*4
-	metaFile     ForestFile // stores recordMode (bytes 0-31) + consistency hash (bytes 32-63)
+	file         forestFile
+	addIndexFile forestFile // stores int32 addIndex at offset pos*4
+	metaFile     forestFile // stores recordMode (bytes 0-31) + consistency hash (bytes 32-63)
 	NumLeaves    uint64
 	forestRows   uint8 // Fixed maximum rows for stable position mapping
 
@@ -178,25 +195,31 @@ type Forest struct {
 	// deletedLeafPositions tracks which leaf positions have been deleted.
 	// Persisted via the WAL (dirty words are serialized during flush).
 	// On restart the bitmap is loaded from the underlying file by the WAL
-	// (or LoadDeletedBitmap for non-WAL usage) and passed to NewForest.
+	// (or loadDeletedBitmap for non-WAL usage) and passed to newForest.
 	deletedLeafPositions *deletedBitmap
 
 	// recordMode is true after Record is called but before HashAll completes.
 	// Calling Modify while in record mode would corrupt the tree.
 	// Persisted to metaFile (bytes 0-31, padded).
 	recordMode bool
+
+	// wal is set when created via OpenForest; nil for newForest (test/advanced usage).
+	wal *wal
+
+	// closers holds os.File handles to close on Close(). Only set by OpenForest.
+	closers []io.Closer
 }
 
-// NewForest creates a new Forest backed by the given file.
+// newForest creates a new Forest backed by the given file.
 // The file should be an io.ReadWriteSeeker (e.g., *os.File).
 // addIndexFile stores the addIndex for each leaf; its size determines numLeaves (size / 4).
 // metaFile stores recordMode (bytes 0-31) and consistency hash (bytes 32-63).
 // bitmap tracks deleted leaf positions; pass nil for a fresh forest. When using a WAL,
-// the bitmap is loaded by the WAL after recovery (via WAL.Bitmap()). For non-WAL usage,
-// load it with LoadDeletedBitmap.
+// the bitmap is loaded by the WAL after recovery and passed here. For non-WAL usage,
+// load it with loadDeletedBitmap.
 // posMapCtrlPath and posMapSlotsPath are file paths for the Swiss Table position map.
 // forestRows sets the maximum tree height (determines max leaves = 2^forestRows).
-func NewForest(file ForestFile, addIndexFile, metaFile ForestFile, bitmap *deletedBitmap, posMapCtrlPath, posMapSlotsPath string, forestRows uint8) (*Forest, error) {
+func newForest(file forestFile, addIndexFile, metaFile forestFile, bitmap *deletedBitmap, posMapCtrlPath, posMapSlotsPath string, forestRows uint8) (*Forest, error) {
 	if file == nil || addIndexFile == nil || metaFile == nil {
 		return nil, fmt.Errorf("one of the given files are nil")
 	}
@@ -247,6 +270,157 @@ func NewForest(file ForestFile, addIndexFile, metaFile ForestFile, bitmap *delet
 	}
 
 	return f, nil
+}
+
+// ForestOption configures OpenForest behavior.
+type ForestOption func(*forestOptions)
+
+type forestOptions struct {
+	maxCacheMemory int64
+}
+
+// MaxCacheMemory sets the total WAL cache memory budget in bytes.
+// The budget is split proportionally across files by entry size.
+// If zero or not set, each file uses the WAL default (64MB).
+func MaxCacheMemory(bytes int64) ForestOption {
+	return func(o *forestOptions) {
+		o.maxCacheMemory = bytes
+	}
+}
+
+// OpenForest opens a file-backed Forest at the given directory path,
+// creating it if it doesn't exist. It sets up a WAL with default cache
+// sizes and wires up the OnFlush callback for position map syncing.
+//
+// Use Close() to flush pending data and release file handles.
+// For custom cache sizes or in-memory usage within the package/tests, use newForest.
+func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
+	var o forestOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	if err := os.MkdirAll(dbpath, 0700); err != nil {
+		return nil, fmt.Errorf("create dbpath: %w", err)
+	}
+
+	fileNames := []string{
+		forestDataFileName,
+		forestDeletedFileName,
+		forestAddIndexFileName,
+		forestJournalFileName,
+		forestMetaFileName,
+	}
+
+	files := make([]*os.File, 0, len(fileNames))
+	for _, name := range fileNames {
+		f, err := os.OpenFile(filepath.Join(dbpath, name), os.O_RDWR|os.O_CREATE, 0600)
+		if err != nil {
+			for _, prev := range files {
+				prev.Close()
+			}
+			return nil, fmt.Errorf("open %s: %w", name, err)
+		}
+		files = append(files, f)
+	}
+
+	dataFile, deletedFile, addIndexFile, journalFile, metaFile := files[0], files[1], files[2], files[3], files[4]
+	closers := make([]io.Closer, len(files))
+	for i, f := range files {
+		closers[i] = f
+	}
+
+	// Split memory budget proportionally by entry size so caches fill
+	// at similar rates. Entry sizes: data=32, addIndex=4, meta=32.
+	// When maxCacheMemory is 0 each walFile gets the WAL default (64MB).
+	const (
+		dataEntrySize     = 32
+		addIndexEntrySize = 4
+		metaEntrySize     = 32
+		totalEntrySize    = dataEntrySize + addIndexEntrySize // meta is tiny, use WAL default
+	)
+	var dataCacheBytes, addIndexCacheBytes int64
+	if o.maxCacheMemory > 0 {
+		dataCacheBytes = o.maxCacheMemory * dataEntrySize / totalEntrySize
+		addIndexCacheBytes = o.maxCacheMemory * addIndexEntrySize / totalEntrySize
+	}
+
+	wal, err := newWAL(journalFile, deletedFile,
+		walFile{File: dataFile, EntrySize: dataEntrySize, MaxCacheBytes: dataCacheBytes},
+		walFile{File: addIndexFile, EntrySize: addIndexEntrySize, MaxCacheBytes: addIndexCacheBytes},
+		walFile{File: metaFile, EntrySize: metaEntrySize},
+	)
+	if err != nil {
+		for _, c := range closers {
+			c.Close()
+		}
+		return nil, fmt.Errorf("create wal: %w", err)
+	}
+
+	ctrlPath := filepath.Join(dbpath, forestPosMapCtrlFileName)
+	slotsPath := filepath.Join(dbpath, forestPosMapSlotsFileName)
+
+	f, err := newForest(
+		wal.Cached(0), wal.Cached(1), wal.Cached(2),
+		wal.Bitmap(),
+		ctrlPath, slotsPath,
+		defaultForestRows,
+	)
+	if err != nil {
+		for _, c := range closers {
+			c.Close()
+		}
+		return nil, fmt.Errorf("create forest: %w", err)
+	}
+
+	wal.SetOnFlush(func(hash [32]byte) error {
+		return f.SyncPositionMap(hash)
+	})
+
+	f.wal = wal
+	f.closers = closers
+
+	return f, nil
+}
+
+// Flush atomically commits all cached writes through the WAL journal.
+// Only valid on forests created via OpenForest.
+func (f *Forest) Flush(bestHash [32]byte) error {
+	if f.wal == nil {
+		return fmt.Errorf("flush: no WAL (use OpenForest to enable)")
+	}
+	return f.wal.Flush(bestHash)
+}
+
+// FlushNeeded returns true if any cached file has exceeded its memory threshold.
+// Always returns false for forests without a WAL.
+func (f *Forest) FlushNeeded() bool {
+	if f.wal == nil {
+		return false
+	}
+	return f.wal.FlushNeeded()
+}
+
+// Close flushes pending writes and closes the position map and all
+// underlying file handles. bestHash is the consistency hash written
+// to the WAL during the final flush.
+func (f *Forest) Close(bestHash [32]byte) error {
+	var firstErr error
+	if f.wal != nil {
+		if err := f.wal.Flush(bestHash); err != nil {
+			firstErr = err
+		}
+	}
+	if err := f.positionMap.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	for _, c := range f.closers {
+		if err := c.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	f.closers = nil
+	return firstErr
 }
 
 // rebuildPositionMap reads all leaf hashes and addIndices in parallel bulk reads

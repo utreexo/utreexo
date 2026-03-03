@@ -30,11 +30,11 @@ func serializeEntries(entries []journalEntry) []byte {
 
 // crashAfterCommit simulates a crash that occurs after the journal has
 // been fully written and synced, but before entries are applied to the
-// underlying files. A subsequent NewWAL on the same journal + files
+// underlying files. A subsequent newWAL on the same journal + files
 // will replay the committed entries during recovery.
 //
 // The wal should not be used after calling this.
-func (w *WAL) crashAfterCommit() error {
+func (w *wal) crashAfterCommit() error {
 	// Use a zero bestHash for testing.
 	var bestHash [journalHashSize]byte
 
@@ -77,11 +77,11 @@ func (w *WAL) crashAfterCommit() error {
 
 // crashBeforeCommit simulates a crash that occurs while the journal is
 // being written, before the checksum is flushed. The journal will be
-// incomplete, so a subsequent NewWAL will discard it and the underlying
+// incomplete, so a subsequent newWAL will discard it and the underlying
 // files will remain at their previous consistent state.
 //
 // The wal should not be used after calling this.
-func (w *WAL) crashBeforeCommit() error {
+func (w *wal) crashBeforeCommit() error {
 	// Use a zero bestHash for testing.
 	var bestHash [journalHashSize]byte
 
@@ -116,10 +116,10 @@ func TestWALBasicFlush(t *testing.T) {
 	journal := newMemFile()
 	files := [4]*memFile{newMemFile(), newMemFile(), newMemFile(), newMemFile()}
 
-	w, err := NewWAL(journal, files[0],
-		WALFile{File: files[1], EntrySize: 32},
-		WALFile{File: files[2], EntrySize: 4},
-		WALFile{File: files[3], EntrySize: 32}, // metaFile
+	w, err := newWAL(journal, files[0],
+		walFile{File: files[1], EntrySize: 32},
+		walFile{File: files[2], EntrySize: 4},
+		walFile{File: files[3], EntrySize: 32}, // metaFile
 	)
 	require.NoError(t, err)
 
@@ -230,10 +230,10 @@ func TestWALRecovery(t *testing.T) {
 	require.Equal(t, 0, len(files[3].data))
 
 	// Create WAL — recovery should replay the journal.
-	w, err := NewWAL(journal, files[0],
-		WALFile{File: files[1], EntrySize: 32},
-		WALFile{File: files[2], EntrySize: 4},
-		WALFile{File: files[3], EntrySize: 32}, // metaFile
+	w, err := newWAL(journal, files[0],
+		walFile{File: files[1], EntrySize: 32},
+		walFile{File: files[2], EntrySize: 4},
+		walFile{File: files[3], EntrySize: 32}, // metaFile
 	)
 	require.NoError(t, err)
 
@@ -301,10 +301,10 @@ func TestWALIncompleteJournal(t *testing.T) {
 	// Intentionally omit checksum.
 
 	// Create WAL — should discard incomplete journal.
-	_, err = NewWAL(journal, files[0],
-		WALFile{File: files[1], EntrySize: 32},
-		WALFile{File: files[2], EntrySize: 4},
-		WALFile{File: files[3], EntrySize: 32}, // metaFile
+	_, err = newWAL(journal, files[0],
+		walFile{File: files[1], EntrySize: 32},
+		walFile{File: files[2], EntrySize: 4},
+		walFile{File: files[3], EntrySize: 32}, // metaFile
 	)
 	require.NoError(t, err)
 
@@ -351,10 +351,10 @@ func TestWALCorruptChecksum(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create WAL — should discard corrupt journal.
-	_, err = NewWAL(journal, files[0],
-		WALFile{File: files[1], EntrySize: 32},
-		WALFile{File: files[2], EntrySize: 4},
-		WALFile{File: files[3], EntrySize: 32}, // metaFile
+	_, err = newWAL(journal, files[0],
+		walFile{File: files[1], EntrySize: 32},
+		walFile{File: files[2], EntrySize: 4},
+		walFile{File: files[3], EntrySize: 32}, // metaFile
 	)
 	require.NoError(t, err)
 
@@ -364,7 +364,7 @@ func TestWALCorruptChecksum(t *testing.T) {
 	require.Equal(t, origHash, gotHash)
 }
 
-// TestWALRequiresThreeFiles ensures NewWAL only accepts exactly 3 files.
+// TestWALRequiresThreeFiles ensures newWAL only accepts exactly 3 files.
 func TestWALRequiresThreeFiles(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -385,12 +385,12 @@ func TestWALRequiresThreeFiles(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			journal := newMemFile()
 			bitmapFile := newMemFile()
-			files := make([]WALFile, tc.fileCount)
+			files := make([]walFile, tc.fileCount)
 			for i := 0; i < tc.fileCount; i++ {
-				files[i] = WALFile{File: newMemFile(), EntrySize: entrySizes[i%len(entrySizes)]}
+				files[i] = walFile{File: newMemFile(), EntrySize: entrySizes[i%len(entrySizes)]}
 			}
 
-			_, err := NewWAL(journal, bitmapFile, files...)
+			_, err := newWAL(journal, bitmapFile, files...)
 			if tc.expectFail {
 				require.Error(t, err)
 				require.Contains(t, err.Error(), "exactly 3 files")
@@ -437,10 +437,10 @@ func TestWALOversizeTotalLen(t *testing.T) {
 			_, err = journal.Write(make([]byte, journalMinSize-journalHeaderSize))
 			require.NoError(t, err)
 
-			_, err = NewWAL(journal, files[0],
-				WALFile{File: files[1], EntrySize: 32},
-				WALFile{File: files[2], EntrySize: 4},
-				WALFile{File: files[3], EntrySize: 32}, // metaFile
+			_, err = newWAL(journal, files[0],
+				walFile{File: files[1], EntrySize: 32},
+				walFile{File: files[2], EntrySize: 4},
+				walFile{File: files[3], EntrySize: 32}, // metaFile
 			)
 			require.NoError(t, err)
 
@@ -468,10 +468,10 @@ func TestWALDiscard(t *testing.T) {
 	journal := newMemFile()
 	files := [4]*memFile{newMemFile(), newMemFile(), newMemFile(), newMemFile()}
 
-	w, err := NewWAL(journal, files[0],
-		WALFile{File: files[1], EntrySize: 32},
-		WALFile{File: files[2], EntrySize: 4},
-		WALFile{File: files[3], EntrySize: 32}, // metaFile
+	w, err := newWAL(journal, files[0],
+		walFile{File: files[1], EntrySize: 32},
+		walFile{File: files[2], EntrySize: 4},
+		walFile{File: files[3], EntrySize: 32}, // metaFile
 	)
 	require.NoError(t, err)
 
@@ -510,10 +510,10 @@ func TestWALMultipleFlushes(t *testing.T) {
 	journal := newMemFile()
 	files := [4]*memFile{newMemFile(), newMemFile(), newMemFile(), newMemFile()}
 
-	w, err := NewWAL(journal, files[0],
-		WALFile{File: files[1], EntrySize: 32},
-		WALFile{File: files[2], EntrySize: 4},
-		WALFile{File: files[3], EntrySize: 32}, // metaFile
+	w, err := newWAL(journal, files[0],
+		walFile{File: files[1], EntrySize: 32},
+		walFile{File: files[2], EntrySize: 4},
+		walFile{File: files[3], EntrySize: 32}, // metaFile
 	)
 	require.NoError(t, err)
 
@@ -554,10 +554,10 @@ func TestWALEmptyFlush(t *testing.T) {
 	journal := newMemFile()
 	files := [4]*memFile{newMemFile(), newMemFile(), newMemFile(), newMemFile()}
 
-	w, err := NewWAL(journal, files[0],
-		WALFile{File: files[1], EntrySize: 32},
-		WALFile{File: files[2], EntrySize: 4},
-		WALFile{File: files[3], EntrySize: 32}, // metaFile
+	w, err := newWAL(journal, files[0],
+		walFile{File: files[1], EntrySize: 32},
+		walFile{File: files[2], EntrySize: 4},
+		walFile{File: files[3], EntrySize: 32}, // metaFile
 	)
 	require.NoError(t, err)
 
@@ -575,15 +575,15 @@ func TestWALForestIntegration(t *testing.T) {
 	addIdxFile := newMemFile()
 	metaFile := newMemFile()
 
-	w, err := NewWAL(journal, delFile,
-		WALFile{File: mainFile, EntrySize: 32},
-		WALFile{File: addIdxFile, EntrySize: 4},
-		WALFile{File: metaFile, EntrySize: 32},
+	w, err := newWAL(journal, delFile,
+		walFile{File: mainFile, EntrySize: 32},
+		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
 
 	tmpDir := t.TempDir()
-	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10)
+	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -617,9 +617,9 @@ func TestWALForestIntegration(t *testing.T) {
 
 	// Restart forest from flushed underlying files and verify roots match.
 	tmpDir2 := t.TempDir()
-	bitmap2, err := LoadDeletedBitmap(delFile)
+	bitmap2, err := loadDeletedBitmap(delFile)
 	require.NoError(t, err)
-	forest2, err := NewForest(mainFile, addIdxFile, metaFile, bitmap2, tmpDir2+"/ctrl", tmpDir2+"/slots", 10)
+	forest2, err := newForest(mainFile, addIdxFile, metaFile, bitmap2, tmpDir2+"/ctrl", tmpDir2+"/slots", 10)
 	require.NoError(t, err)
 	require.Equal(t, forest.GetRoots(), forest2.GetRoots(),
 		"roots should match after restart from WAL-flushed data")
@@ -635,15 +635,15 @@ func TestWALForestRecovery(t *testing.T) {
 	addIdxFile := newMemFile()
 	metaFile := newMemFile()
 
-	w, err := NewWAL(journal, delFile,
-		WALFile{File: mainFile, EntrySize: 32},
-		WALFile{File: addIdxFile, EntrySize: 4},
-		WALFile{File: metaFile, EntrySize: 32},
+	w, err := newWAL(journal, delFile,
+		walFile{File: mainFile, EntrySize: 32},
+		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
 
 	tmpDir := t.TempDir()
-	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10)
+	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -683,16 +683,16 @@ func TestWALForestRecovery(t *testing.T) {
 
 	// Underlying files still only have block 1 data (crash before apply).
 	// Now "restart": create a new WAL which should recover from journal.
-	w2, err := NewWAL(journal, delFile,
-		WALFile{File: mainFile, EntrySize: 32},
-		WALFile{File: addIdxFile, EntrySize: 4},
-		WALFile{File: metaFile, EntrySize: 32},
+	w2, err := newWAL(journal, delFile,
+		walFile{File: mainFile, EntrySize: 32},
+		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
 
 	// Build forest from recovered underlying files.
 	tmpDir2 := t.TempDir()
-	forest2, err := NewForest(
+	forest2, err := newForest(
 		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Bitmap(), tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
 	)
 	require.NoError(t, err)
@@ -716,15 +716,15 @@ func TestWALCrashBeforeCommit(t *testing.T) {
 	addIdxFile := newMemFile()
 	metaFile := newMemFile()
 
-	w, err := NewWAL(journal, delFile,
-		WALFile{File: mainFile, EntrySize: 32},
-		WALFile{File: addIdxFile, EntrySize: 4},
-		WALFile{File: metaFile, EntrySize: 32},
+	w, err := newWAL(journal, delFile,
+		walFile{File: mainFile, EntrySize: 32},
+		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
 
 	tmpDir := t.TempDir()
-	forest, err := NewForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10)
+	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -756,16 +756,16 @@ func TestWALCrashBeforeCommit(t *testing.T) {
 	require.NoError(t, w.crashBeforeCommit())
 
 	// "Restart": create a new WAL which should discard incomplete journal.
-	w2, err := NewWAL(journal, delFile,
-		WALFile{File: mainFile, EntrySize: 32},
-		WALFile{File: addIdxFile, EntrySize: 4},
-		WALFile{File: metaFile, EntrySize: 32},
+	w2, err := newWAL(journal, delFile,
+		walFile{File: mainFile, EntrySize: 32},
+		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
 
 	// Build forest from underlying files — should be at block 1 state.
 	tmpDir2 := t.TempDir()
-	forest2, err := NewForest(
+	forest2, err := newForest(
 		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Bitmap(), tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
 	)
 	require.NoError(t, err)
@@ -781,10 +781,10 @@ func TestWALFlushNeeded(t *testing.T) {
 	files := [4]*memFile{newMemFile(), newMemFile(), newMemFile(), newMemFile()}
 
 	// Use a tiny MaxCacheBytes for file 0 so it overflows quickly.
-	w, err := NewWAL(journal, files[0],
-		WALFile{File: files[1], EntrySize: 32, MaxCacheBytes: 100},
-		WALFile{File: files[2], EntrySize: 4},
-		WALFile{File: files[3], EntrySize: 32},
+	w, err := newWAL(journal, files[0],
+		walFile{File: files[1], EntrySize: 32, MaxCacheBytes: 100},
+		walFile{File: files[2], EntrySize: 4},
+		walFile{File: files[3], EntrySize: 32},
 	)
 	require.NoError(t, err)
 
