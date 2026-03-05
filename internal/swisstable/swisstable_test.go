@@ -553,10 +553,11 @@ func TestSwissPositionMapConsistency(t *testing.T) {
 			wantRebuild:     true,
 		},
 		{
-			name:            "different expectedEntries changes file size",
+			name:            "different expectedEntries reuses consistent files",
 			reopenHash:      savedHash,
 			expectedEntries: 200,
-			wantRebuild:     true,
+			wantRebuild:     false,
+			wantCount:       3,
 		},
 	}
 

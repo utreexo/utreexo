@@ -238,7 +238,9 @@ func newForest(file forestFile, addIndexFile, metaFile forestFile, bitmap *delet
 	metaFile.Read(consistencyHash[:])
 
 	// Create Swiss Table for position map. Size based on numLeaves (will resize if needed).
-	posMap, needsRebuild, err := swisstable.NewSwissPositionMap(posMapCtrlPath, posMapSlotsPath, 1<<forestRows, consistencyHash, file, positionMask)
+	// Use a minimum of 1<<16 to avoid excessive early resizes on a fresh database.
+	expectedEntries := max(numLeaves, 1<<16)
+	posMap, needsRebuild, err := swisstable.NewSwissPositionMap(posMapCtrlPath, posMapSlotsPath, expectedEntries, consistencyHash, file, positionMask)
 	if err != nil {
 		return nil, fmt.Errorf("create position map: %w", err)
 	}

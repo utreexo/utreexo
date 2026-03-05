@@ -84,13 +84,7 @@ func NewSwissPositionMap(ctrlPath, slotsPath string, expectedEntries uint64, con
 		return nil, false, fmt.Errorf("dataFile must not be nil")
 	}
 
-	// Size for ~70% load factor, rounded up to a multiple of groupSize.
-	numSlots := max(roundUpGroupSize(expectedEntries*10/7), groupSize)
-	if numSlots > 1<<33 {
-		return nil, false, fmt.Errorf("expectedEntries %d exceeds maximum", expectedEntries)
-	}
-
-	ctrlFile, slotsFile, ctrlMmap, slotsBytes, needsRebuild, err := openFiles(ctrlPath, slotsPath, numSlots, consistencyHash)
+	ctrlFile, slotsFile, ctrlMmap, slotsBytes, numSlots, needsRebuild, err := openFiles(ctrlPath, slotsPath, expectedEntries, consistencyHash)
 	if err != nil {
 		return nil, false, err
 	}
@@ -127,56 +121,66 @@ func NewSwissPositionMap(ctrlPath, slotsPath string, expectedEntries uint64, con
 }
 
 // openFiles opens and mmaps the ctrl and slots files, wiping both if either
-// is inconsistent. Returns needsRebuild=true if files were wiped (hash
-// mismatch, size mismatch, or zero consistency hash).
-func openFiles(ctrlPath, slotsPath string, numSlots uint64, consistencyHash [32]byte) (
-	ctrlFile, slotsFile *os.File, ctrlMmap, slotsBytes []byte, needsRebuild bool, err error) {
-
-	ctrlSize := int64(fileHeaderSize + numSlots)
-	slotsSize := int64(fileHeaderSize + numSlots*8)
+// are inconsistent. Returns the actual numSlots and needsRebuild=true if files
+// were wiped (hash mismatch, size mismatch, or zero consistency hash).
+// expectedEntries is only used to size new files when rebuilding; consistent
+// files are reused at their on-disk size regardless of expectedEntries.
+func openFiles(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHash [32]byte) (
+	ctrlFile, slotsFile *os.File, ctrlMmap, slotsBytes []byte, numSlots uint64, needsRebuild bool, err error) {
 
 	// Open both files.
 	ctrlFile, err = os.OpenFile(ctrlPath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
-		return nil, nil, nil, nil, false, fmt.Errorf("open ctrl: %w", err)
+		return nil, nil, nil, nil, 0, false, fmt.Errorf("open ctrl: %w", err)
 	}
 	slotsFile, err = os.OpenFile(slotsPath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		ctrlFile.Close()
-		return nil, nil, nil, nil, false, fmt.Errorf("open slots: %w", err)
+		return nil, nil, nil, nil, 0, false, fmt.Errorf("open slots: %w", err)
 	}
 
-	// Check whether existing files are consistent: both must have the
-	// expected size, the consistency hash must be non-zero, and the stored
-	// hash must match.
 	ctrlFi, err := ctrlFile.Stat()
 	if err != nil {
 		ctrlFile.Close()
 		slotsFile.Close()
-		return nil, nil, nil, nil, false, err
+		return nil, nil, nil, nil, 0, false, err
 	}
 	slotsFi, err := slotsFile.Stat()
 	if err != nil {
 		ctrlFile.Close()
 		slotsFile.Close()
-		return nil, nil, nil, nil, false, err
+		return nil, nil, nil, nil, 0, false, err
 	}
 
 	needsRebuild = true
+
+	// Check whether existing files are consistent: the consistency hash must
+	// be non-zero, stored hashes must match, and ctrl/slots file sizes must
+	// agree on the same valid number of slots.
 	var ctrlHash, slotsHash [32]byte
 	ctrlFile.ReadAt(ctrlHash[:], 0)
 	slotsFile.ReadAt(slotsHash[:], 0)
 	if consistencyHash != [32]byte{} &&
-		ctrlFi.Size() == ctrlSize &&
-		slotsFi.Size() == slotsSize &&
 		ctrlHash == consistencyHash &&
 		slotsHash == consistencyHash {
-		needsRebuild = false
+		// Hashes match. Derive numSlots from actual file sizes and verify
+		// that ctrl and slots are self-consistent. This allows reusing
+		// files that grew via resize() even if expectedEntries changed.
+		fileNumSlots := uint64(ctrlFi.Size()) - fileHeaderSize
+		if fileNumSlots > 0 &&
+			fileNumSlots%groupSize == 0 &&
+			slotsFi.Size() == int64(fileHeaderSize+fileNumSlots*8) {
+			numSlots = fileNumSlots
+			needsRebuild = false
+		}
 	}
 
-	// If rebuild needed, wipe both files so the OS provides fresh
-	// zero-filled pages with no stale ctrl or slot data.
+	// If rebuild needed, compute numSlots from expectedEntries and wipe both
+	// files so the OS provides fresh zero-filled pages.
 	if needsRebuild {
+		numSlots = max(roundUpGroupSize(expectedEntries*10/7), groupSize)
+		ctrlSize := int64(fileHeaderSize + numSlots)
+		slotsSize := int64(fileHeaderSize + numSlots*8)
 		for _, wipe := range []struct {
 			f    *os.File
 			size int64
@@ -188,23 +192,25 @@ func openFiles(ctrlPath, slotsPath string, numSlots uint64, consistencyHash [32]
 			if err := wipe.f.Truncate(0); err != nil {
 				ctrlFile.Close()
 				slotsFile.Close()
-				return nil, nil, nil, nil, false, fmt.Errorf("truncate %s: %w", wipe.name, err)
+				return nil, nil, nil, nil, 0, false, fmt.Errorf("truncate %s: %w", wipe.name, err)
 			}
 			if err := wipe.f.Truncate(wipe.size); err != nil {
 				ctrlFile.Close()
 				slotsFile.Close()
-				return nil, nil, nil, nil, false, fmt.Errorf("extend %s: %w", wipe.name, err)
+				return nil, nil, nil, nil, 0, false, fmt.Errorf("extend %s: %w", wipe.name, err)
 			}
 		}
 	}
 
 	// Mmap both files.
+	ctrlSize := int64(fileHeaderSize + numSlots)
+	slotsSize := int64(fileHeaderSize + numSlots*8)
 	ctrlMmap, err = syscall.Mmap(int(ctrlFile.Fd()), 0, int(ctrlSize),
 		syscall.PROT_READ|syscall.PROT_WRITE, mmapFlags)
 	if err != nil {
 		ctrlFile.Close()
 		slotsFile.Close()
-		return nil, nil, nil, nil, false, fmt.Errorf("mmap ctrl: %w", err)
+		return nil, nil, nil, nil, 0, false, fmt.Errorf("mmap ctrl: %w", err)
 	}
 	slotsBytes, err = syscall.Mmap(int(slotsFile.Fd()), 0, int(slotsSize),
 		syscall.PROT_READ|syscall.PROT_WRITE, mmapFlags)
@@ -212,10 +218,10 @@ func openFiles(ctrlPath, slotsPath string, numSlots uint64, consistencyHash [32]
 		syscall.Munmap(ctrlMmap)
 		ctrlFile.Close()
 		slotsFile.Close()
-		return nil, nil, nil, nil, false, fmt.Errorf("mmap slots: %w", err)
+		return nil, nil, nil, nil, 0, false, fmt.Errorf("mmap slots: %w", err)
 	}
 
-	return ctrlFile, slotsFile, ctrlMmap, slotsBytes, needsRebuild, nil
+	return ctrlFile, slotsFile, ctrlMmap, slotsBytes, numSlots, needsRebuild, nil
 }
 
 // roundUpGroupSize rounds n up to the nearest multiple of groupSize.
