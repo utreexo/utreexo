@@ -1711,10 +1711,17 @@ func (f *Forest) Verify(delHashes []Hash, _ Proof, _ bool) error {
 // GetLeafPosition returns the logical position for the given leaf hash.
 // This implements the Utreexo interface.
 //
+// NOTE: Always returns (0, false) during record mode since hashes have not
+// been computed yet and positions cannot be correctly calculated.
+//
 // This function is safe for concurrent access.
 func (f *Forest) GetLeafPosition(hash Hash) (uint64, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
+
+	if f.recordMode {
+		return 0, false
+	}
 
 	pos, err := f.calculatePosition(hash)
 	if err != nil {
