@@ -15,8 +15,17 @@ import (
 
 const (
 	// defaultForestRows is the tree height used by OpenForest.
-	// Supports up to 2^32 (~4.3 billion) leaves.
-	defaultForestRows = 32
+	// With forestRows=63 the position arithmetic works via unsigned
+	// wrapping; the compact file layout (posToFileOffset) maps tree
+	// positions to dense row-based offsets so file offsets stay within
+	// int64 range.
+	defaultForestRows = 63
+
+	// maxFileLeavesBits caps the per-row slot count used by the
+	// compact file layout.  Row r gets 1<<(maxFileLeavesBits-r) slots
+	// (min 1).  With 34 this supports up to ~17 billion leaves while
+	// keeping the sparse data file around 1 TB apparent size.
+	maxFileLeavesBits = 34
 
 	// File names used by OpenForest within the dbpath directory.
 	forestDataFileName        = "forest_data.dat"         // main hash data, 32 bytes per position
@@ -27,6 +36,22 @@ const (
 	forestPosMapCtrlFileName  = "forest_posmap_ctrl.dat"  // Swiss Table control bytes, mmap'd
 	forestPosMapSlotsFileName = "forest_posmap_slots.dat" // Swiss Table slot values, mmap'd
 )
+
+// rowBaseOffset returns the byte offset where row r begins in the data
+// file.  Rows 0..capBits each have 1<<(capBits-r) slots of 32 bytes
+// (a geometric series).  row must be <= capBits.
+func rowBaseOffset(row, forestRows uint8) int64 {
+	capBits := min(forestRows, maxFileLeavesBits)
+	return (int64(1)<<(capBits+1) - int64(1)<<(capBits-row+1)) * 32
+}
+
+// dataFileSize returns the total byte size of the compact data file
+// for the given forestRows.  Rows 0..capBits follow the geometric
+// series; rows capBits+1..63 each have a single 32-byte slot.
+func dataFileSize(forestRows uint8) int64 {
+	capBits := min(forestRows, maxFileLeavesBits)
+	return (int64(1)<<(capBits+1) - 1 + int64(63-capBits)) * 32
+}
 
 // Assert that Forest implements the Utreexo interface.
 var _ Utreexo = (*Forest)(nil)
@@ -168,12 +193,14 @@ func (b *deletedBitmap) count() int {
 }
 
 // Forest is a Utreexo accumulator backed by a contiguous file.
-// All nodes are stored at position-based offsets (position * 32 bytes).
+// Nodes are stored at row-based offsets computed by posToFileOffset:
+// each row gets a dense section sized by maxFileLeavesBits so that
+// even with forestRows=63 file offsets stay within int64 range.
 // Deleted leaves remain in the file for Undo support.
 //
 // Unlike Pollard which uses pointer-based trees, Forest stores everything
-// in a flat file where position N maps to file offset N*32 bytes.
-// Deletions work by copying the sibling hash to the parent position.
+// in a flat file. Deletions work by copying the sibling hash to the
+// parent position.
 //
 // Forest uses a fixed forestRows to ensure stable position mappings.
 // This is set at creation time based on expected maximum leaves.
@@ -330,6 +357,18 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 	closers := make([]io.Closer, len(files))
 	for i, f := range files {
 		closers[i] = f
+	}
+
+	// Ensure the data file spans the full compact row layout before the
+	// WAL wraps it, so the cachedRWS layer sees the correct file size.
+	// On filesystems with sparse-file support only written blocks
+	// consume physical disk space.
+	totalSize := dataFileSize(defaultForestRows)
+	if err := dataFile.Truncate(totalSize); err != nil {
+		for _, c := range closers {
+			c.Close()
+		}
+		return nil, fmt.Errorf("truncate data file: %w", err)
 	}
 
 	// Split memory budget proportionally by entry size so caches fill
@@ -590,9 +629,19 @@ func (f *Forest) SyncPositionMap(consistencyHash [32]byte) error {
 	return f.positionMap.SetConsistencyHash(consistencyHash)
 }
 
+// posToFileOffset translates a tree position to a byte offset in the
+// data file.  Each row is stored in a dense section whose start is
+// precomputed in rowBase; the offset within the row is the distance
+// from the row's first position.
+func (f *Forest) posToFileOffset(position uint64) int64 {
+	row := DetectRow(position, f.forestRows)
+	rowStart := startPositionAtRow(row, f.forestRows)
+	return rowBaseOffset(row, f.forestRows) + int64(position-rowStart)*32
+}
+
 // readHash reads the hash at the given position from the file.
 func (f *Forest) readHash(position uint64) (Hash, error) {
-	offset := int64(position * 32)
+	offset := f.posToFileOffset(position)
 	_, err := f.file.Seek(offset, io.SeekStart)
 	if err != nil {
 		return Hash{}, fmt.Errorf("seek to position %d: %w", position, err)
@@ -612,7 +661,7 @@ func (f *Forest) readHash(position uint64) (Hash, error) {
 
 // writeHash writes the hash at the given position to the file.
 func (f *Forest) writeHash(position uint64, hash Hash) error {
-	offset := int64(position * 32)
+	offset := f.posToFileOffset(position)
 	_, err := f.file.Seek(offset, io.SeekStart)
 	if err != nil {
 		return fmt.Errorf("seek to position %d: %w", position, err)
