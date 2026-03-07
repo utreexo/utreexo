@@ -1323,14 +1323,20 @@ func getNewPositions(blockTargets []uint64, slice hashAndPos, numLeaves uint64, 
 func (p *Proof) updateProofRemove(blockTargets []uint64, cachedHashes []Hash, updated hashAndPos, numLeaves uint64) []Hash {
 	totalRows := TreeRows(numLeaves)
 
-	// Delete from the target.
 	sortedBlockTargets := copySortedFunc(blockTargets, uint64Cmp)
 	targetsWithHash := toHashAndPos(p.Targets, cachedHashes)
+	if totalRows != defaultForestRows {
+		sortedBlockTargets = translatePositions(sortedBlockTargets, defaultForestRows, totalRows)
+		targetsWithHash.positions = translatePositions(targetsWithHash.positions, defaultForestRows, totalRows)
+	}
+
+	// Attach positions to the proofs. Use targetsWithHash.positions before subtraction
+	// since it's already the sorted translated targets.
+	proofPos, _ := ProofPositions(targetsWithHash.positions, numLeaves, totalRows)
+
+	// Delete from the target.
 	targetsWithHash = subtractSortedHashAndPos(targetsWithHash, sortedBlockTargets, uint64Cmp)
 
-	// Attach positions to the proofs.
-	sortedCachedTargets := copySortedFunc(p.Targets, uint64Cmp)
-	proofPos, _ := ProofPositions(sortedCachedTargets, numLeaves, totalRows)
 	oldProofs := toHashAndPos(proofPos, p.Proof)
 	newProofs := hashAndPos{make([]uint64, 0, len(p.Proof)), make([]Hash, 0, len(p.Proof))}
 
@@ -1387,6 +1393,11 @@ func (p *Proof) updateProofRemove(blockTargets []uint64, cachedHashes []Hash, up
 	sortedBlockTargets = deTwin(sortedBlockTargets, totalRows)
 	targetsWithHash = getNewPositions(sortedBlockTargets, targetsWithHash, numLeaves, true)
 	newProofs = getNewPositions(sortedBlockTargets, newProofs, numLeaves, false)
+
+	// Translate targets back to defaultForestRows space.
+	if totalRows != defaultForestRows {
+		targetsWithHash.positions = translatePositions(targetsWithHash.positions, totalRows, defaultForestRows)
+	}
 
 	*p = Proof{targetsWithHash.positions, newProofs.hashes}
 	return targetsWithHash.hashes
