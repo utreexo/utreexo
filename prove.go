@@ -1604,12 +1604,18 @@ func (p *Proof) undoDel(blockTargets []uint64, blockHashes, cachedHashes []Hash,
 		return cachedHashes, nil
 	}
 
+	// toHashAndPos copies the targets so the originals aren't mutated.
 	targetsWithHashes := toHashAndPos(p.Targets, cachedHashes)
+	blockTargetsWithHash := toHashAndPos(blockTargets, blockHashes)
+	if totalRows != defaultForestRows {
+		targetsWithHashes.positions = translatePositions(targetsWithHashes.positions, defaultForestRows, totalRows)
+		blockTargetsWithHash.positions = translatePositions(blockTargetsWithHash.positions, defaultForestRows, totalRows)
+	}
+
 	proofPos, _ := ProofPositions(targetsWithHashes.positions, numLeaves, totalRows)
 	proofWithPos := toHashAndPos(proofPos, p.Proof)
 
 	// Detwin the block targets.
-	blockTargetsWithHash := toHashAndPos(blockTargets, blockHashes)
 	blockTargetsWithHash = deTwinHashAndPos(blockTargetsWithHash, totalRows)
 
 	// newProofs are the newly needed proofs that come from undoing the deletions.
@@ -1706,6 +1712,11 @@ func (p *Proof) undoDel(blockTargets []uint64, blockHashes, cachedHashes []Hash,
 	proofWithPos = getHashAndPosSubset(proofWithPos, neededProofPos)
 
 	p.Proof = proofWithPos.hashes
+
+	// Translate targets back to defaultForestRows space.
+	if totalRows != defaultForestRows {
+		targetsWithHashes.positions = translatePositions(targetsWithHashes.positions, totalRows, defaultForestRows)
+	}
 	p.Targets = targetsWithHashes.positions
 
 	return targetsWithHashes.hashes, nil
