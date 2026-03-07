@@ -1470,11 +1470,16 @@ func pruneEdges(hnp hashAndPos, numAdds, numLeaves uint64, forestRows, prevFores
 // undoAdd remaps the targets to their previous positions and prunes positions and
 // proof hashes that could not have existed before the add.
 func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestroy []uint64) ([]Hash, error) {
+	forestRows := TreeRows(numLeaves)
+
+	// toHashAndPos copies the targets so the original isn't mutated.
 	targetsWithHash := toHashAndPos(p.Targets, cachedHashes)
-	proofPos, _ := ProofPositions(targetsWithHash.positions, numLeaves, TreeRows(numLeaves))
+	if forestRows != defaultForestRows {
+		targetsWithHash.positions = translatePositions(targetsWithHash.positions, defaultForestRows, forestRows)
+	}
+	proofPos, _ := ProofPositions(targetsWithHash.positions, numLeaves, forestRows)
 	proofWithPos := toHashAndPos(proofPos, p.Proof)
 
-	forestRows := TreeRows(numLeaves)
 	prevForestRows := TreeRows(numLeaves - numAdds)
 
 	// Move positions to their previous positions before the empty roots were destroyed.
@@ -1579,6 +1584,11 @@ func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestro
 
 	// Set the proof.
 	p.Proof = proofWithPos.hashes
+
+	// Translate targets back to defaultForestRows space.
+	if prevForestRows != defaultForestRows {
+		targetsWithHash.positions = translatePositions(targetsWithHash.positions, prevForestRows, defaultForestRows)
+	}
 	p.Targets = targetsWithHash.positions
 
 	return targetsWithHash.hashes, nil
