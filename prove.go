@@ -778,7 +778,11 @@ func generateIngestAndUndoInfo(numLeaves uint64, delHashes []Hash, proof Proof) 
 
 	undoInf := initUndoInfo(len(proof.Proof))
 
+	// toHashAndPos copies the targets so the original isn't mutated.
 	toProve := toHashAndPos(proof.Targets, delHashes)
+	if totalRows != defaultForestRows {
+		toProve.positions = translatePositions(toProve.positions, defaultForestRows, totalRows)
+	}
 	toProveIdx := 0
 	// Where all the root hashes that we've calculated will go to.
 	calculatedRootHashes := make([]Hash, 0, numRoots(numLeaves))
