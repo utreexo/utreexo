@@ -295,9 +295,18 @@ func checkUpdateData(updateData UpdateData, adds, delHashes, prevRoots []Hash, p
 	/*
 	 * Then check the validity of the addition and deletions fields in the updateData.
 	 */
-	// Attach the hashes to their positions.
-	targetsWithHash := toHashAndPos(proof.Targets, delHashes)
-	proofPos, _ := ProofPositions(targetsWithHash.positions, updateData.PrevNumLeaves, TreeRows(updateData.PrevNumLeaves))
+	// Translate targets to internal TreeRows space for position arithmetic.
+	checkTreeRows := TreeRows(updateData.PrevNumLeaves)
+	internalTargets := proof.Targets
+	if checkTreeRows != defaultForestRows {
+		internalTargets = translatePositions(proof.Targets, defaultForestRows, checkTreeRows)
+	}
+
+	// Attach the hashes to their positions (in TreeRows space for comparison with updateData).
+	targetsWithHash := toHashAndPos(internalTargets, delHashes)
+	// Use the sorted positions from targetsWithHash, since ProofPositions depends on
+	// target order for sibling detection, and proof.Proof was generated with sorted targets.
+	proofPos, _ := ProofPositions(targetsWithHash.positions, updateData.PrevNumLeaves, checkTreeRows)
 	proofWithPositions := toHashAndPos(proofPos, proof.Proof)
 
 	// Update accordingly.
@@ -318,6 +327,11 @@ func checkUpdateData(updateData UpdateData, adds, delHashes, prevRoots []Hash, p
 		if targetsIdx < targetsWithHash.Len() && targetsWithHash.positions[targetsIdx] == pos {
 			targetsWithHash.hashes[targetsIdx] = hash
 		}
+	}
+
+	// Translate targets back to defaultForestRows for calculateHashes (which handles translation internally).
+	if checkTreeRows != defaultForestRows {
+		targetsWithHash.positions = translatePositions(targetsWithHash.positions, checkTreeRows, defaultForestRows)
 	}
 
 	// Calculate the modified roots after the remove.

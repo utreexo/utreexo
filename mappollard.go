@@ -1748,6 +1748,13 @@ func (m *MapPollard) Prove(proveHashes []Hash) (Proof, error) {
 	}
 
 	sort.Sort(hnp)
+
+	// Translate targets to defaultForestRows space.
+	treeRows := TreeRows(m.NumLeaves)
+	if treeRows != defaultForestRows {
+		origTargets = translatePositions(origTargets, treeRows, defaultForestRows)
+	}
+
 	return Proof{Targets: origTargets, Proof: hnp.hashes}, nil
 }
 
@@ -1775,14 +1782,13 @@ func (m *MapPollard) MakeProofFull(origTargets []uint64, haves []bool, proofHash
 
 	// Sort targets first. Copy to avoid mutating the original.
 	targets := copySortedFunc(origTargets, uint64Cmp)
+	treeRows := TreeRows(m.NumLeaves)
+	if treeRows != defaultForestRows {
+		targets = translatePositions(targets, defaultForestRows, treeRows)
+	}
 
 	// Figure out what hashes at which positions are needed.
-	proofPositions, _ := ProofPositions(targets, m.NumLeaves, TreeRows(m.NumLeaves))
-
-	// Translate the proof positions if needed.
-	if TreeRows(m.NumLeaves) != m.TotalRows {
-		proofPositions = translatePositions(proofPositions, TreeRows(m.NumLeaves), m.TotalRows)
-	}
+	proofPositions, _ := ProofPositions(targets, m.NumLeaves, treeRows)
 
 	// Where we'll merge the hashes that we already have with the proofHashes provided.
 	allProofHashes, err := m.getHashesByPositions(proofPositions)
@@ -1820,14 +1826,13 @@ func (m *MapPollard) VerifyPartialProof(origTargets []uint64, delHashes, proofHa
 
 	// Sort targets first. Copy to avoid mutating the original.
 	targets := copySortedFunc(origTargets, uint64Cmp)
+	treeRows := TreeRows(m.NumLeaves)
+	if treeRows != defaultForestRows {
+		targets = translatePositions(targets, defaultForestRows, treeRows)
+	}
 
 	// Figure out what hashes at which positions are needed.
-	proofPositions, _ := ProofPositions(targets, m.NumLeaves, TreeRows(m.NumLeaves))
-
-	// Translate the proof positions if needed.
-	if TreeRows(m.NumLeaves) != m.TotalRows {
-		proofPositions = translatePositions(proofPositions, TreeRows(m.NumLeaves), m.TotalRows)
-	}
+	proofPositions, _ := ProofPositions(targets, m.NumLeaves, treeRows)
 
 	// Where we'll merge the hashes that we already have with the proofHashes provided.
 	allProofHashes := make([]Hash, 0, len(proofPositions))
@@ -1868,11 +1873,13 @@ func (m *MapPollard) GetMissingPositions(origTargets []uint64) []uint64 {
 	// Sort targets first. Copy to avoid mutating the original.
 	targets := copySortedFunc(origTargets, uint64Cmp)
 
-	// Generate the positions needed to prove this.
-	proofPos, _ := ProofPositions(targets, m.NumLeaves, TreeRows(m.NumLeaves))
-	if TreeRows(m.NumLeaves) != m.TotalRows {
-		proofPos = translatePositions(proofPos, TreeRows(m.NumLeaves), m.TotalRows)
+	treeRows := TreeRows(m.NumLeaves)
+	if treeRows != defaultForestRows {
+		targets = translatePositions(targets, defaultForestRows, treeRows)
 	}
+
+	// Generate the positions needed to prove this.
+	proofPos, _ := ProofPositions(targets, m.NumLeaves, treeRows)
 
 	// Go through all the proof positions and mark the ones that are missing.
 	hashes, err := m.getHashesByPositions(proofPos)
@@ -1885,6 +1892,11 @@ func (m *MapPollard) GetMissingPositions(origTargets []uint64) []uint64 {
 		if hash == empty {
 			missingPositions = append(missingPositions, proofPos[i])
 		}
+	}
+
+	// Translate before returning.
+	if treeRows != defaultForestRows {
+		missingPositions = translatePositions(missingPositions, treeRows, defaultForestRows)
 	}
 
 	return missingPositions
@@ -2276,8 +2288,8 @@ func (m *MapPollard) getRoots() []Hash {
 //
 // This function is NOT safe for concurrent access.
 func (m *MapPollard) GetHash(pos uint64) Hash {
-	if m.TotalRows != TreeRows(m.NumLeaves) {
-		pos = translatePos(pos, TreeRows(m.NumLeaves), m.TotalRows)
+	if m.TotalRows != defaultForestRows {
+		pos = translatePos(pos, defaultForestRows, m.TotalRows)
 	}
 
 	hashes, err := m.getHashesByPositions([]uint64{pos})

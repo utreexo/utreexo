@@ -171,6 +171,10 @@ func (p *Pollard) getNode(pos uint64) (n, sibling, parent *polNode, err error) {
 // GetHash returns the hash for the given position. Empty hash (all values are 0) is returned
 // if the given position does not exist.
 func (p *Pollard) GetHash(pos uint64) Hash {
+	if TreeRows(p.NumLeaves) != defaultForestRows {
+		pos = translatePos(pos, defaultForestRows, TreeRows(p.NumLeaves))
+	}
+
 	return p.getHash(pos)
 }
 

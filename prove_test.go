@@ -56,6 +56,15 @@ func randomIndexes(length, minimum int) []int {
 func calcDelHashAndProof(p *Pollard, proof Proof, missingPositions, desiredPositions []uint64,
 	leftOutLeaves, leaves hashAndPos) (Proof, []Hash, error) {
 
+	// Translate targets to internal TreeRows space for ProofPositions.
+	treeRows := TreeRows(p.NumLeaves)
+
+	// Translate missingPositions and desiredPositions from defaultForestRows to TreeRows space.
+	if treeRows != defaultForestRows {
+		missingPositions = translatePositions(missingPositions, defaultForestRows, treeRows)
+		desiredPositions = translatePositions(desiredPositions, defaultForestRows, treeRows)
+	}
+
 	// Grab all the hashes that are needed from the pollard.
 	neededHashes := hashAndPos{}
 	sort.Slice(missingPositions, func(a, b int) bool { return missingPositions[a] < missingPositions[b] })
@@ -68,15 +77,21 @@ func calcDelHashAndProof(p *Pollard, proof Proof, missingPositions, desiredPosit
 		neededHashes.Append(pos, hash)
 	}
 
+	internalTargets := make([]uint64, len(proof.Targets))
+	copy(internalTargets, proof.Targets)
+	if treeRows != defaultForestRows {
+		internalTargets = translatePositions(internalTargets, defaultForestRows, treeRows)
+	}
+
 	// Attach positions to the proof hashes.
-	proofPos, _ := ProofPositions(proof.Targets, p.NumLeaves, TreeRows(p.NumLeaves))
+	proofPos, _ := ProofPositions(internalTargets, p.NumLeaves, treeRows)
 	currentHashes := toHashAndPos(proofPos, proof.Proof)
 	// Append the needed hashes to the proof.
 	currentHashes.AppendMany(neededHashes.positions, neededHashes.hashes)
 
 	// As new targets are added, we're able to calulate positions that we couldn't before. These positions
 	// may already exist as proofs. Remove these as duplicates are not expected during proof verification.
-	_, calculateables := ProofPositions(desiredPositions, p.NumLeaves, TreeRows(p.NumLeaves))
+	_, calculateables := ProofPositions(desiredPositions, p.NumLeaves, treeRows)
 	for _, cal := range calculateables {
 		idx := slices.IndexFunc(currentHashes.positions, func(elem uint64) bool { return elem == cal })
 		if idx != -1 {
@@ -93,8 +108,15 @@ func calcDelHashAndProof(p *Pollard, proof Proof, missingPositions, desiredPosit
 		}
 	}
 
+	// Translate desiredPositions back to defaultForestRows space for the proof targets.
+	apiDesiredPositions := make([]uint64, len(desiredPositions))
+	copy(apiDesiredPositions, desiredPositions)
+	if treeRows != defaultForestRows {
+		apiDesiredPositions = translatePositions(apiDesiredPositions, treeRows, defaultForestRows)
+	}
+
 	// Create the proof.
-	newProof := Proof{Targets: append(proof.Targets, desiredPositions...)}
+	newProof := Proof{Targets: append(proof.Targets, apiDesiredPositions...)}
 	// Sort the targets as it needs to match the ordering of the deletion hashes and
 	// the deletions hashes will also be sorted.
 	sort.Slice(newProof.Targets, func(a, b int) bool { return newProof.Targets[a] < newProof.Targets[b] })
@@ -155,7 +177,11 @@ func FuzzGetMissingPositions(f *testing.F) {
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := hashAndPos{make([]uint64, 0, len(leaves)-len(delHashes)), make([]Hash, 0, len(leaves)-len(delHashes))}
 		for _, node := range p.NodeMap {
-			currentLeaves.Append(p.calculatePosition(node), node.data)
+			pos := p.calculatePosition(node)
+			if treeRows := TreeRows(p.NumLeaves); treeRows != defaultForestRows {
+				pos = translatePos(pos, treeRows, defaultForestRows)
+			}
+			currentLeaves.Append(pos, node.data)
 		}
 		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
 		// guaranteed to have the same order, we need to do this.
@@ -258,7 +284,11 @@ func FuzzAddProof(f *testing.F) {
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := hashAndPos{make([]uint64, 0, len(leaves)-len(delHashes)), make([]Hash, 0, len(leaves)-len(delHashes))}
 		for _, node := range p.NodeMap {
-			currentLeaves.Append(p.calculatePosition(node), node.data)
+			pos := p.calculatePosition(node)
+			if treeRows := TreeRows(p.NumLeaves); treeRows != defaultForestRows {
+				pos = translatePos(pos, treeRows, defaultForestRows)
+			}
+			currentLeaves.Append(pos, node.data)
 		}
 		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
 		// guaranteed to have the same order, we need to do this.
@@ -358,7 +388,11 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := hashAndPos{make([]uint64, 0, len(leaves)-len(delHashes)), make([]Hash, 0, len(leaves)-len(delHashes))}
 		for _, node := range p.NodeMap {
-			currentLeaves.Append(p.calculatePosition(node), node.data)
+			pos := p.calculatePosition(node)
+			if treeRows := TreeRows(p.NumLeaves); treeRows != defaultForestRows {
+				pos = translatePos(pos, treeRows, defaultForestRows)
+			}
+			currentLeaves.Append(pos, node.data)
 		}
 		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
 		// guaranteed to have the same order, we need to do this.
@@ -387,7 +421,7 @@ func FuzzUpdateProofRemove(f *testing.F) {
 		// Fetch hashes.
 		blockDelHashes := make([]Hash, len(delPositions))
 		for i := range blockDelHashes {
-			blockDelHashes[i] = p.getHash(delPositions[i])
+			blockDelHashes[i] = p.GetHash(delPositions[i])
 			if blockDelHashes[i] == empty {
 				t.Fatal("FuzzUpdateProofRemove Fail. Couldn't fetch hash for position", delPositions[i])
 			}
@@ -445,7 +479,13 @@ func FuzzUpdateProofRemove(f *testing.F) {
 				pollardBeforeStr, p.String())
 		}
 
-		cachedProofPos, _ := ProofPositions(cachedProof.Targets, p.NumLeaves, TreeRows(p.NumLeaves))
+		cachedTreeRows := TreeRows(p.NumLeaves)
+		cachedInternalTargets := make([]uint64, len(cachedProof.Targets))
+		copy(cachedInternalTargets, cachedProof.Targets)
+		if cachedTreeRows != defaultForestRows {
+			cachedInternalTargets = translatePositions(cachedInternalTargets, defaultForestRows, cachedTreeRows)
+		}
+		cachedProofPos, _ := ProofPositions(cachedInternalTargets, p.NumLeaves, cachedTreeRows)
 		if len(cachedProofPos) != len(cachedProof.Proof) {
 			t.Fatalf("FuzzUpdateProofRemove Fail. CachedProof has these hashes:\n%v\n"+
 				"for these targets:\n%v\n"+
@@ -512,7 +552,11 @@ func FuzzUpdateProofAdd(f *testing.F) {
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := hashAndPos{make([]uint64, 0, len(leaves)), make([]Hash, 0, len(leaves))}
 		for _, node := range p.NodeMap {
-			currentLeaves.Append(p.calculatePosition(node), node.data)
+			pos := p.calculatePosition(node)
+			if treeRows := TreeRows(p.NumLeaves); treeRows != defaultForestRows {
+				pos = translatePos(pos, treeRows, defaultForestRows)
+			}
+			currentLeaves.Append(pos, node.data)
 		}
 		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
 		// guaranteed to have the same order, we need to do this.
@@ -615,8 +659,13 @@ func FuzzModifyProofChain(f *testing.F) {
 			}
 
 			// Sanity checking.
+			blockTreeRows := TreeRows(p.NumLeaves)
 			for _, target := range blockProof.Targets {
-				n, _, _, err := p.getNode(target)
+				internalTarget := target
+				if blockTreeRows != defaultForestRows {
+					internalTarget = translatePos(internalTarget, defaultForestRows, blockTreeRows)
+				}
+				n, _, _, err := p.getNode(internalTarget)
 				if err != nil {
 					t.Fatalf("FuzzModifyProof fail at block %d. Error: %v", b, err)
 				}
@@ -782,7 +831,11 @@ func FuzzGetProofSubset(f *testing.F) {
 		// Grab the current leaves that exist in the accumulator.
 		currentLeaves := hashAndPos{make([]uint64, 0, len(leaves)-len(delHashes)), make([]Hash, 0, len(leaves)-len(delHashes))}
 		for _, node := range p.NodeMap {
-			currentLeaves.Append(p.calculatePosition(node), node.data)
+			pos := p.calculatePosition(node)
+			if treeRows := TreeRows(p.NumLeaves); treeRows != defaultForestRows {
+				pos = translatePos(pos, treeRows, defaultForestRows)
+			}
+			currentLeaves.Append(pos, node.data)
 		}
 		// Sort to have a deterministic order of the currentLeaves. Since maps aren't
 		// guaranteed to have the same order, we need to do this.
@@ -920,8 +973,13 @@ func FuzzUndoProofChain(f *testing.F) {
 			}
 
 			// Sanity checking.
+			undoBlockTreeRows := TreeRows(p.NumLeaves)
 			for _, target := range blockProof.Targets {
-				n, _, _, err := p.getNode(target)
+				internalTarget := target
+				if undoBlockTreeRows != defaultForestRows {
+					internalTarget = translatePos(internalTarget, defaultForestRows, undoBlockTreeRows)
+				}
+				n, _, _, err := p.getNode(internalTarget)
 				if err != nil {
 					t.Fatalf("FuzzUndoProofChain fail at block %d. Error: %v", b, err)
 				}

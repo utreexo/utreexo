@@ -189,12 +189,6 @@ func (m *MapPollard) checkHashes() error {
 		return err
 	}
 
-	if m.TotalRows != TreeRows(m.NumLeaves) {
-		for i := range proof.Targets {
-			proof.Targets[i] = translatePos(proof.Targets[i], m.TotalRows, TreeRows(m.NumLeaves))
-		}
-	}
-
 	haveRoots := m.getRoots()
 	rootIndexes, err := Verify(Stump{Roots: haveRoots, NumLeaves: m.NumLeaves}, leafHashes, proof)
 	if err != nil {
@@ -319,8 +313,8 @@ func FuzzMapPollardChain(f *testing.F) {
 
 			for _, target := range proof.Targets {
 				fetch := target
-				if m.TotalRows != TreeRows(m.NumLeaves) {
-					fetch = translatePos(fetch, TreeRows(m.NumLeaves), m.TotalRows)
+				if defaultForestRows != m.TotalRows {
+					fetch = translatePos(fetch, defaultForestRows, m.TotalRows)
 				}
 				hash := m.GetHash(fetch)
 				if hash == empty {
@@ -365,13 +359,6 @@ func FuzzMapPollardChain(f *testing.F) {
 			cachedProof, err := m.Prove(leafHashes)
 			if err != nil {
 				t.Fatal(err)
-			}
-
-			if m.TotalRows != TreeRows(m.NumLeaves) {
-				for i := range cachedProof.Targets {
-					cachedProof.Targets[i] = translatePos(
-						cachedProof.Targets[i], m.TotalRows, TreeRows(m.NumLeaves))
-				}
 			}
 
 			err = cachedProof.checkEqualProof(cachedProofExpect)
@@ -700,7 +687,14 @@ func TestGetMissingPositions(t *testing.T) {
 					},
 				},
 			},
-			proves: [][]uint64{{2}, {8}, {16}, {35}, {2, 19}, {2, 16, 19}},
+			proves: [][]uint64{
+				{2},
+				{8},
+				{translatePos(16, TreeRows(9), defaultForestRows)},
+				{translatePos(35, TreeRows(9), defaultForestRows)},
+				{2, translatePos(19, TreeRows(9), defaultForestRows)},
+				{2, translatePos(16, TreeRows(9), defaultForestRows), translatePos(19, TreeRows(9), defaultForestRows)},
+			},
 		},
 
 		// Creates a tree like below.
@@ -737,15 +731,10 @@ func TestGetMissingPositions(t *testing.T) {
 	sanityCheck := func(t *testing.T, p *MapPollard, proves, missing []uint64) {
 		// Check that all the positions can actually exist.
 		for i := range missing {
-			if !inForest(missing[i], p.NumLeaves, TreeRows(p.NumLeaves)) {
+			if !inForest(missing[i], p.NumLeaves, defaultForestRows) {
 				t.Fatalf("pos %d cannot exist in an accumulator with %d leaves",
 					missing[i], p.NumLeaves)
 			}
-		}
-
-		// Translate if needed.
-		if TreeRows(p.NumLeaves) != p.TotalRows {
-			missing = translatePositions(missing, TreeRows(p.NumLeaves), p.TotalRows)
 		}
 
 		// Check for duplicates and turn the slice into a map for easy lookup.
@@ -760,10 +749,15 @@ func TestGetMissingPositions(t *testing.T) {
 			missingMap[elem] = struct{}{}
 		}
 
+		targets := copySortedFunc(proves, uint64Cmp)
+		if p.TotalRows != defaultForestRows {
+			targets = translatePositions(targets, defaultForestRows, p.TotalRows)
+		}
+
 		// Calculate the positions actually needed.
-		needs, _ := ProofPositions(proves, p.NumLeaves, TreeRows(p.NumLeaves))
-		if TreeRows(p.NumLeaves) != p.TotalRows {
-			needs = translatePositions(needs, TreeRows(p.NumLeaves), p.TotalRows)
+		needs, _ := ProofPositions(targets, p.NumLeaves, p.TotalRows)
+		if defaultForestRows != p.TotalRows {
+			needs = translatePositions(needs, p.TotalRows, defaultForestRows)
 		}
 
 		// Check that the missing positions are indeed missing.
@@ -896,9 +890,16 @@ func TestVerifyPartialProof(t *testing.T) {
 		}
 
 		for _, toProve := range test.toProves {
+			// Translate hardcoded positions to defaultForestRows for the API calls.
+			apiTargets := toProve.proveTargets
+			verifyTreeRows := TreeRows(p.NumLeaves)
+			if verifyTreeRows != defaultForestRows {
+				apiTargets = translatePositions(toProve.proveTargets, verifyTreeRows, defaultForestRows)
+			}
+
 			// Generate the missing positions of the hashes we need to
 			// prove the targets.
-			missing := p.GetMissingPositions(toProve.proveTargets)
+			missing := p.GetMissingPositions(apiTargets)
 
 			// Grab the missing hashes from the full accumulator.
 			// This simulates another utreexo peer returning the missing hashes
@@ -918,7 +919,7 @@ func TestVerifyPartialProof(t *testing.T) {
 
 			// Call VerifyPartialProof and make sure that with the given hashes,
 			// we can verify the targets.
-			err = p.VerifyPartialProof(toProve.proveTargets, toProve.proveLeafHash, hashes, false)
+			err = p.VerifyPartialProof(apiTargets, toProve.proveLeafHash, hashes, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -929,7 +930,7 @@ func TestVerifyPartialProof(t *testing.T) {
 			}
 
 			// Now call with remember as true.
-			err = p.VerifyPartialProof(toProve.proveTargets, toProve.proveLeafHash, hashes, true)
+			err = p.VerifyPartialProof(apiTargets, toProve.proveLeafHash, hashes, true)
 			if err != nil {
 				t.Fatal(err)
 			}

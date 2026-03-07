@@ -808,8 +808,13 @@ func FuzzModifyChain(f *testing.F) {
 				t.Fatal(err)
 			}
 
+			modifyTreeRows := TreeRows(p.NumLeaves)
 			for _, target := range proof.Targets {
-				n, _, _, err := p.getNode(target)
+				internalTarget := target
+				if modifyTreeRows != defaultForestRows {
+					internalTarget = translatePos(target, defaultForestRows, modifyTreeRows)
+				}
+				n, _, _, err := p.getNode(internalTarget)
 				if err != nil {
 					t.Fatalf("FuzzModifyChain fail at block %d. Error: %v", b, err)
 				}
@@ -1143,13 +1148,7 @@ func fuzzUndoChain(t *testing.T, p UtreexoTest, blockCount, numAdds, duration ui
 		}
 
 		for i := range bp.Targets {
-			var gotHash Hash
-			if TreeRows(p.GetNumLeaves()) != p.GetTreeRows() {
-				gotHash = p.GetHash(translatePos(bp.Targets[i], TreeRows(p.GetNumLeaves()), p.GetTreeRows()))
-			} else {
-				gotHash = p.GetHash(bp.Targets[i])
-			}
-
+			gotHash := p.GetHash(bp.Targets[i])
 			if gotHash != delHashes[i] {
 				t.Fatalf("FuzzUndoChain fail at block %d. For pos %d, expected %s, got %s",
 					b, bp.Targets[i], delHashes[i], gotHash)

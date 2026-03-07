@@ -81,7 +81,14 @@ func (p *Pollard) Prove(hashes []Hash) (Proof, error) {
 	sort.Slice(sortedTargets, func(a, b int) bool { return sortedTargets[a] < sortedTargets[b] })
 
 	// Get the positions of all the hashes that are needed to prove the targets
-	proofPositions, _ := ProofPositions(sortedTargets, p.NumLeaves, TreeRows(p.NumLeaves))
+	treeRows := TreeRows(p.NumLeaves)
+	proofPositions, _ := ProofPositions(sortedTargets, p.NumLeaves, treeRows)
+
+	// Translate targets to defaultForestRows space.
+	if treeRows != defaultForestRows {
+		proof.Targets = translatePositions(proof.Targets, treeRows, defaultForestRows)
+	}
+
 	if len(proofPositions) == 0 {
 		// Return early.
 		return proof, nil
@@ -569,7 +576,11 @@ func generateModifyIns(numLeaves uint64, delHashes []Hash, proof Proof) (
 	// Where all the parent hashes we've calculated in a given row will go to.
 	nextHashes := hashAndPos{make([]uint64, 0, len(proof.Targets)), make([]Hash, 0, len(proof.Targets))}
 
+	// toHashAndPos copies the targets so the original isn't mutated.
 	toProve := toHashAndPos(proof.Targets, delHashes)
+	if totalRows != defaultForestRows {
+		toProve.positions = translatePositions(toProve.positions, defaultForestRows, totalRows)
+	}
 	toProveIdx := 0
 
 	// Separate index for the hashes in the passed in proof.
@@ -767,7 +778,11 @@ func generateIngestAndUndoInfo(numLeaves uint64, delHashes []Hash, proof Proof) 
 
 	undoInf := initUndoInfo(len(proof.Proof))
 
+	// toHashAndPos copies the targets so the original isn't mutated.
 	toProve := toHashAndPos(proof.Targets, delHashes)
+	if totalRows != defaultForestRows {
+		toProve.positions = translatePositions(toProve.positions, defaultForestRows, totalRows)
+	}
 	toProveIdx := 0
 	// Where all the root hashes that we've calculated will go to.
 	calculatedRootHashes := make([]Hash, 0, numRoots(numLeaves))
@@ -949,7 +964,11 @@ func calculateHashes(numLeaves uint64, delHashes []Hash, proof Proof) (hashAndPo
 	if delHashes == nil {
 		delHashes = make([]Hash, len(proof.Targets))
 	}
+	// toHashAndPos copies the targets so the original isn't mutated.
 	toProve := toHashAndPos(proof.Targets, delHashes)
+	if totalRows != defaultForestRows {
+		toProve.positions = translatePositions(toProve.positions, defaultForestRows, totalRows)
+	}
 	toProveIdx := 0
 
 	// Where all the root hashes that we've calculated will go to.
@@ -1144,10 +1163,13 @@ func subtractSortedSlice[E, F any](a []E, b []F, cmp func(E, F) int) []E {
 func GetMissingPositions(numLeaves uint64, proofTargets, desiredTargets []uint64) []uint64 {
 	forestRows := TreeRows(numLeaves)
 
-	// Copy the targets to avoid mutating the original. Then detwin it
-	// to prep for deletion.
+	// Copy the targets to avoid mutating the original. Then translate and sort.
 	targets := make([]uint64, len(proofTargets))
 	copy(targets, proofTargets)
+	if forestRows != defaultForestRows {
+		targets = translatePositions(targets, defaultForestRows, forestRows)
+		desiredTargets = translatePositions(desiredTargets, defaultForestRows, forestRows)
+	}
 
 	// Targets and the desiredTargets need to be sorted.
 	sort.Slice(targets, func(a, b int) bool { return targets[a] < targets[b] })
@@ -1175,6 +1197,11 @@ func GetMissingPositions(numLeaves uint64, proofTargets, desiredTargets []uint64
 	// Get rid of any positions that we already have.
 	desiredPositions = subtractSortedSlice(desiredPositions, havePositions, uint64Cmp)
 
+	// Translate back to defaultForestRows space.
+	if forestRows != defaultForestRows {
+		desiredPositions = translatePositions(desiredPositions, forestRows, defaultForestRows)
+	}
+
 	return desiredPositions
 }
 
@@ -1185,11 +1212,17 @@ func AddProof(proofA, proofB Proof, targetHashesA, targetHashesB []Hash, numLeav
 
 	// Calculate proof hashes for proof A and add positions to the proof hashes.
 	targetsA := copySortedFunc(proofA.Targets, uint64Cmp)
+	if defaultForestRows != totalRows {
+		targetsA = translatePositions(targetsA, defaultForestRows, totalRows)
+	}
 	proofPosA, calculateableA := ProofPositions(targetsA, numLeaves, totalRows)
 	proofAndPosA := hashAndPos{proofPosA, proofA.Proof}
 
 	// Calculate proof hashes for proof B and add positions to the proof hashes.
 	targetsB := copySortedFunc(proofB.Targets, uint64Cmp)
+	if defaultForestRows != totalRows {
+		targetsB = translatePositions(targetsB, defaultForestRows, totalRows)
+	}
 	proofPosB, calculateableB := ProofPositions(targetsB, numLeaves, totalRows)
 	proofAndPosB := hashAndPos{proofPosB, proofB.Proof}
 
@@ -1224,6 +1257,10 @@ func AddProof(proofA, proofB Proof, targetHashesA, targetHashesB []Hash, numLeav
 	proofAndPosC = subtractSortedHashAndPos(proofAndPosC, targetsC, uint64Cmp)
 
 	// Extract the proof hashes.
+	// Translate targets back to defaultForestRows space.
+	if totalRows != defaultForestRows {
+		targetsC = translatePositions(targetsC, totalRows, defaultForestRows)
+	}
 	retProof := Proof{targetsC, proofAndPosC.hashes}
 
 	// Get the hashes for the targets.
@@ -1291,14 +1328,20 @@ func getNewPositions(blockTargets []uint64, slice hashAndPos, numLeaves uint64, 
 func (p *Proof) updateProofRemove(blockTargets []uint64, cachedHashes []Hash, updated hashAndPos, numLeaves uint64) []Hash {
 	totalRows := TreeRows(numLeaves)
 
-	// Delete from the target.
 	sortedBlockTargets := copySortedFunc(blockTargets, uint64Cmp)
 	targetsWithHash := toHashAndPos(p.Targets, cachedHashes)
+	if totalRows != defaultForestRows {
+		sortedBlockTargets = translatePositions(sortedBlockTargets, defaultForestRows, totalRows)
+		targetsWithHash.positions = translatePositions(targetsWithHash.positions, defaultForestRows, totalRows)
+	}
+
+	// Attach positions to the proofs. Use targetsWithHash.positions before subtraction
+	// since it's already the sorted translated targets.
+	proofPos, _ := ProofPositions(targetsWithHash.positions, numLeaves, totalRows)
+
+	// Delete from the target.
 	targetsWithHash = subtractSortedHashAndPos(targetsWithHash, sortedBlockTargets, uint64Cmp)
 
-	// Attach positions to the proofs.
-	sortedCachedTargets := copySortedFunc(p.Targets, uint64Cmp)
-	proofPos, _ := ProofPositions(sortedCachedTargets, numLeaves, totalRows)
 	oldProofs := toHashAndPos(proofPos, p.Proof)
 	newProofs := hashAndPos{make([]uint64, 0, len(p.Proof)), make([]Hash, 0, len(p.Proof))}
 
@@ -1355,6 +1398,11 @@ func (p *Proof) updateProofRemove(blockTargets []uint64, cachedHashes []Hash, up
 	sortedBlockTargets = deTwin(sortedBlockTargets, totalRows)
 	targetsWithHash = getNewPositions(sortedBlockTargets, targetsWithHash, numLeaves, true)
 	newProofs = getNewPositions(sortedBlockTargets, newProofs, numLeaves, false)
+
+	// Translate targets back to defaultForestRows space.
+	if totalRows != defaultForestRows {
+		targetsWithHash.positions = translatePositions(targetsWithHash.positions, totalRows, defaultForestRows)
+	}
 
 	*p = Proof{targetsWithHash.positions, newProofs.hashes}
 	return targetsWithHash.hashes
@@ -1427,11 +1475,16 @@ func pruneEdges(hnp hashAndPos, numAdds, numLeaves uint64, forestRows, prevFores
 // undoAdd remaps the targets to their previous positions and prunes positions and
 // proof hashes that could not have existed before the add.
 func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestroy []uint64) ([]Hash, error) {
+	forestRows := TreeRows(numLeaves)
+
+	// toHashAndPos copies the targets so the original isn't mutated.
 	targetsWithHash := toHashAndPos(p.Targets, cachedHashes)
-	proofPos, _ := ProofPositions(targetsWithHash.positions, numLeaves, TreeRows(numLeaves))
+	if forestRows != defaultForestRows {
+		targetsWithHash.positions = translatePositions(targetsWithHash.positions, defaultForestRows, forestRows)
+	}
+	proofPos, _ := ProofPositions(targetsWithHash.positions, numLeaves, forestRows)
 	proofWithPos := toHashAndPos(proofPos, p.Proof)
 
-	forestRows := TreeRows(numLeaves)
 	prevForestRows := TreeRows(numLeaves - numAdds)
 
 	// Move positions to their previous positions before the empty roots were destroyed.
@@ -1536,6 +1589,11 @@ func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestro
 
 	// Set the proof.
 	p.Proof = proofWithPos.hashes
+
+	// Translate targets back to defaultForestRows space.
+	if prevForestRows != defaultForestRows {
+		targetsWithHash.positions = translatePositions(targetsWithHash.positions, prevForestRows, defaultForestRows)
+	}
 	p.Targets = targetsWithHash.positions
 
 	return targetsWithHash.hashes, nil
@@ -1551,12 +1609,18 @@ func (p *Proof) undoDel(blockTargets []uint64, blockHashes, cachedHashes []Hash,
 		return cachedHashes, nil
 	}
 
+	// toHashAndPos copies the targets so the originals aren't mutated.
 	targetsWithHashes := toHashAndPos(p.Targets, cachedHashes)
+	blockTargetsWithHash := toHashAndPos(blockTargets, blockHashes)
+	if totalRows != defaultForestRows {
+		targetsWithHashes.positions = translatePositions(targetsWithHashes.positions, defaultForestRows, totalRows)
+		blockTargetsWithHash.positions = translatePositions(blockTargetsWithHash.positions, defaultForestRows, totalRows)
+	}
+
 	proofPos, _ := ProofPositions(targetsWithHashes.positions, numLeaves, totalRows)
 	proofWithPos := toHashAndPos(proofPos, p.Proof)
 
 	// Detwin the block targets.
-	blockTargetsWithHash := toHashAndPos(blockTargets, blockHashes)
 	blockTargetsWithHash = deTwinHashAndPos(blockTargetsWithHash, totalRows)
 
 	// newProofs are the newly needed proofs that come from undoing the deletions.
@@ -1653,6 +1717,11 @@ func (p *Proof) undoDel(blockTargets []uint64, blockHashes, cachedHashes []Hash,
 	proofWithPos = getHashAndPosSubset(proofWithPos, neededProofPos)
 
 	p.Proof = proofWithPos.hashes
+
+	// Translate targets back to defaultForestRows space.
+	if totalRows != defaultForestRows {
+		targetsWithHashes.positions = translatePositions(targetsWithHashes.positions, totalRows, defaultForestRows)
+	}
 	p.Targets = targetsWithHashes.positions
 
 	return targetsWithHashes.hashes, nil
@@ -1664,11 +1733,23 @@ func (p *Proof) undoDel(blockTargets []uint64, blockHashes, cachedHashes []Hash,
 //
 // NOTE The returned hashes and proof targets are in the same permutation as the given wants.
 func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64) ([]Hash, Proof, error) {
-	// Copy to avoid mutating the original.
+	totalRows := TreeRows(numLeaves)
+
+	// Copy to avoid mutating the original. Then translate to internal TreeRows space.
 	proofTargetsCopy := copySortedFunc(proof.Targets, uint64Cmp)
+	if totalRows != defaultForestRows {
+		proofTargetsCopy = translatePositions(proofTargetsCopy, defaultForestRows, totalRows)
+	}
+
+	// Translate wants to internal TreeRows space.
+	internalWants := make([]uint64, len(wants))
+	copy(internalWants, wants)
+	if totalRows != defaultForestRows {
+		internalWants = translatePositions(internalWants, defaultForestRows, totalRows)
+	}
 
 	// Check that all the targets in removes are also present in the proof.
-	expectedEmpty := copySortedFunc(wants, uint64Cmp)
+	expectedEmpty := copySortedFunc(internalWants, uint64Cmp)
 	expectedEmpty = subtractSortedSlice(expectedEmpty, proofTargetsCopy, uint64Cmp)
 	if len(expectedEmpty) > 0 {
 		err := fmt.Errorf("missing positions %v from the proof: deletions %v, proof.Targets %v",
@@ -1681,6 +1762,7 @@ func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64
 
 	// calculateHashes provides us with all the intermediate calculated nodes in the tree.
 	// Need to sort the returned positions and hashes as they aren't sorted.
+	// NOTE: calculateHashes translates proof.Targets from defaultForestRows internally.
 	posAndHashes, _, err := calculateHashes(numLeaves, hashes, proof)
 	if err != nil {
 		return nil, Proof{}, err
@@ -1688,7 +1770,7 @@ func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64
 	sort.Sort(posAndHashes)
 
 	// Put positions onto the proof hashes.
-	positions, _ := ProofPositions(proofTargetsCopy, numLeaves, TreeRows(numLeaves))
+	positions, _ := ProofPositions(proofTargetsCopy, numLeaves, totalRows)
 	proofPos := toHashAndPos(positions, proof.Proof)
 
 	// Merge the proof positions and its hashes along with the calculated intermediate nodes
@@ -1696,11 +1778,11 @@ func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64
 	posAndHashes = mergeSortedHashAndPos(posAndHashes, proofPos)
 
 	// Copy to avoid mutating the wants.
-	sortedWants := copySortedFunc(wants, uint64Cmp)
+	sortedWants := copySortedFunc(internalWants, uint64Cmp)
 	targetHashesWithPos = getHashAndPosSubset(targetHashesWithPos, sortedWants)
 
 	// Grab the positions that we need to prove the wants.
-	wantProofPos, _ := ProofPositions(targetHashesWithPos.positions, numLeaves, TreeRows(numLeaves))
+	wantProofPos, _ := ProofPositions(targetHashesWithPos.positions, numLeaves, totalRows)
 
 	// Extract the proof positions we want and then sanity check to see that we have everything.
 	posAndHashes = getHashAndPosSubset(posAndHashes, wantProofPos)
@@ -1711,8 +1793,8 @@ func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64
 
 	// Lastly, we make separate slice of hashes as we guarantee that the hashes
 	// and targets will be in the same permutation as the passed in wants by the caller.
-	retHashes := make([]Hash, len(wants))
-	for i, want := range wants {
+	retHashes := make([]Hash, len(internalWants))
+	for i, want := range internalWants {
 		idx := slices.Index(targetHashesWithPos.positions, want)
 		retHashes[i] = targetHashesWithPos.hashes[idx]
 	}
@@ -1748,11 +1830,16 @@ func maybeRemap(numLeaves, numAdds uint64, hnp hashAndPos) hashAndPos {
 func (p *Proof) updateProofAdd(adds, cachedDelHashes []Hash, remembers []uint32,
 	newNodes hashAndPos, beforeNumLeaves uint64, toDestroy []uint64) []Hash {
 
-	// Combine the hashes with the targets.
+	beforeRows := TreeRows(beforeNumLeaves)
+
+	// toHashAndPos copies the targets so the original isn't mutated.
 	origTargetsWithHash := toHashAndPos(p.Targets, cachedDelHashes)
+	if beforeRows != defaultForestRows {
+		origTargetsWithHash.positions = translatePositions(origTargetsWithHash.positions, defaultForestRows, beforeRows)
+	}
 
 	// Attach positions to the proof.
-	proofPos, _ := ProofPositions(origTargetsWithHash.positions, beforeNumLeaves, TreeRows(beforeNumLeaves))
+	proofPos, _ := ProofPositions(origTargetsWithHash.positions, beforeNumLeaves, beforeRows)
 	proofWithPos := toHashAndPos(proofPos, p.Proof)
 
 	// Remap the positions if we moved up a after the addition row.
@@ -1809,6 +1896,12 @@ func (p *Proof) updateProofAdd(adds, cachedDelHashes []Hash, remembers []uint32,
 
 	sort.Sort(newProofWithPos)
 	p.Proof = newProofWithPos.hashes
+
+	// Translate targets back to defaultForestRows space.
+	afterRows := TreeRows(beforeNumLeaves + uint64(len(adds)))
+	if afterRows != defaultForestRows {
+		origTargetsWithHash.positions = translatePositions(origTargetsWithHash.positions, afterRows, defaultForestRows)
+	}
 
 	p.Targets = origTargetsWithHash.positions
 	return origTargetsWithHash.hashes

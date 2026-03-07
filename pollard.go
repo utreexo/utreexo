@@ -88,6 +88,12 @@ func (p *Pollard) Modify(adds []Leaf, delHashes []Hash, proof Proof) error {
 	dels := make([]uint64, delCount)
 	copy(dels, proof.Targets)
 
+	// Translate dels from defaultForestRows space to internal TreeRows space.
+	treeRows := TreeRows(p.NumLeaves)
+	if treeRows != defaultForestRows {
+		dels = translatePositions(dels, defaultForestRows, treeRows)
+	}
+
 	// Remove the delHashes from the map.
 	p.deleteFromMap(delHashes)
 
@@ -342,12 +348,21 @@ func (p *Pollard) Undo(prevAdds []Hash, proof Proof, delHashes []Hash, prevRoots
 	for i := 0; i < len(prevAdds); i++ {
 		p.undoSingleAdd()
 	}
-	err := p.undoEmptyRoots(uint64(len(prevAdds)), proof.Targets, prevRoots)
+
+	// Translate targets from defaultForestRows space to internal TreeRows space.
+	dels := make([]uint64, len(proof.Targets))
+	copy(dels, proof.Targets)
+	treeRows := TreeRows(p.NumLeaves)
+	if treeRows != defaultForestRows {
+		dels = translatePositions(dels, defaultForestRows, treeRows)
+	}
+
+	err := p.undoEmptyRoots(uint64(len(prevAdds)), dels, prevRoots)
 	if err != nil {
 		return err
 	}
 
-	err = p.undoDels(proof.Targets, delHashes)
+	err = p.undoDels(dels, delHashes)
 	if err != nil {
 		return err
 	}
