@@ -1197,6 +1197,11 @@ func GetMissingPositions(numLeaves uint64, proofTargets, desiredTargets []uint64
 	// Get rid of any positions that we already have.
 	desiredPositions = subtractSortedSlice(desiredPositions, havePositions, uint64Cmp)
 
+	// Translate back to defaultForestRows space.
+	if forestRows != defaultForestRows {
+		desiredPositions = translatePositions(desiredPositions, forestRows, defaultForestRows)
+	}
+
 	return desiredPositions
 }
 
@@ -1825,11 +1830,16 @@ func maybeRemap(numLeaves, numAdds uint64, hnp hashAndPos) hashAndPos {
 func (p *Proof) updateProofAdd(adds, cachedDelHashes []Hash, remembers []uint32,
 	newNodes hashAndPos, beforeNumLeaves uint64, toDestroy []uint64) []Hash {
 
-	// Combine the hashes with the targets.
+	beforeRows := TreeRows(beforeNumLeaves)
+
+	// toHashAndPos copies the targets so the original isn't mutated.
 	origTargetsWithHash := toHashAndPos(p.Targets, cachedDelHashes)
+	if beforeRows != defaultForestRows {
+		origTargetsWithHash.positions = translatePositions(origTargetsWithHash.positions, defaultForestRows, beforeRows)
+	}
 
 	// Attach positions to the proof.
-	proofPos, _ := ProofPositions(origTargetsWithHash.positions, beforeNumLeaves, TreeRows(beforeNumLeaves))
+	proofPos, _ := ProofPositions(origTargetsWithHash.positions, beforeNumLeaves, beforeRows)
 	proofWithPos := toHashAndPos(proofPos, p.Proof)
 
 	// Remap the positions if we moved up a after the addition row.
@@ -1886,6 +1896,12 @@ func (p *Proof) updateProofAdd(adds, cachedDelHashes []Hash, remembers []uint32,
 
 	sort.Sort(newProofWithPos)
 	p.Proof = newProofWithPos.hashes
+
+	// Translate targets back to defaultForestRows space.
+	afterRows := TreeRows(beforeNumLeaves + uint64(len(adds)))
+	if afterRows != defaultForestRows {
+		origTargetsWithHash.positions = translatePositions(origTargetsWithHash.positions, afterRows, defaultForestRows)
+	}
 
 	p.Targets = origTargetsWithHash.positions
 	return origTargetsWithHash.hashes
