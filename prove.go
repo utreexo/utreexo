@@ -1728,11 +1728,23 @@ func (p *Proof) undoDel(blockTargets []uint64, blockHashes, cachedHashes []Hash,
 //
 // NOTE The returned hashes and proof targets are in the same permutation as the given wants.
 func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64) ([]Hash, Proof, error) {
-	// Copy to avoid mutating the original.
+	totalRows := TreeRows(numLeaves)
+
+	// Copy to avoid mutating the original. Then translate to internal TreeRows space.
 	proofTargetsCopy := copySortedFunc(proof.Targets, uint64Cmp)
+	if totalRows != defaultForestRows {
+		proofTargetsCopy = translatePositions(proofTargetsCopy, defaultForestRows, totalRows)
+	}
+
+	// Translate wants to internal TreeRows space.
+	internalWants := make([]uint64, len(wants))
+	copy(internalWants, wants)
+	if totalRows != defaultForestRows {
+		internalWants = translatePositions(internalWants, defaultForestRows, totalRows)
+	}
 
 	// Check that all the targets in removes are also present in the proof.
-	expectedEmpty := copySortedFunc(wants, uint64Cmp)
+	expectedEmpty := copySortedFunc(internalWants, uint64Cmp)
 	expectedEmpty = subtractSortedSlice(expectedEmpty, proofTargetsCopy, uint64Cmp)
 	if len(expectedEmpty) > 0 {
 		err := fmt.Errorf("missing positions %v from the proof: deletions %v, proof.Targets %v",
@@ -1745,6 +1757,7 @@ func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64
 
 	// calculateHashes provides us with all the intermediate calculated nodes in the tree.
 	// Need to sort the returned positions and hashes as they aren't sorted.
+	// NOTE: calculateHashes translates proof.Targets from defaultForestRows internally.
 	posAndHashes, _, err := calculateHashes(numLeaves, hashes, proof)
 	if err != nil {
 		return nil, Proof{}, err
@@ -1752,7 +1765,7 @@ func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64
 	sort.Sort(posAndHashes)
 
 	// Put positions onto the proof hashes.
-	positions, _ := ProofPositions(proofTargetsCopy, numLeaves, TreeRows(numLeaves))
+	positions, _ := ProofPositions(proofTargetsCopy, numLeaves, totalRows)
 	proofPos := toHashAndPos(positions, proof.Proof)
 
 	// Merge the proof positions and its hashes along with the calculated intermediate nodes
@@ -1760,11 +1773,11 @@ func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64
 	posAndHashes = mergeSortedHashAndPos(posAndHashes, proofPos)
 
 	// Copy to avoid mutating the wants.
-	sortedWants := copySortedFunc(wants, uint64Cmp)
+	sortedWants := copySortedFunc(internalWants, uint64Cmp)
 	targetHashesWithPos = getHashAndPosSubset(targetHashesWithPos, sortedWants)
 
 	// Grab the positions that we need to prove the wants.
-	wantProofPos, _ := ProofPositions(targetHashesWithPos.positions, numLeaves, TreeRows(numLeaves))
+	wantProofPos, _ := ProofPositions(targetHashesWithPos.positions, numLeaves, totalRows)
 
 	// Extract the proof positions we want and then sanity check to see that we have everything.
 	posAndHashes = getHashAndPosSubset(posAndHashes, wantProofPos)
@@ -1775,8 +1788,8 @@ func GetProofSubset(proof Proof, hashes []Hash, wants []uint64, numLeaves uint64
 
 	// Lastly, we make separate slice of hashes as we guarantee that the hashes
 	// and targets will be in the same permutation as the passed in wants by the caller.
-	retHashes := make([]Hash, len(wants))
-	for i, want := range wants {
+	retHashes := make([]Hash, len(internalWants))
+	for i, want := range internalWants {
 		idx := slices.Index(targetHashesWithPos.positions, want)
 		retHashes[i] = targetHashesWithPos.hashes[idx]
 	}
