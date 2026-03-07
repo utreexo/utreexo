@@ -1207,11 +1207,17 @@ func AddProof(proofA, proofB Proof, targetHashesA, targetHashesB []Hash, numLeav
 
 	// Calculate proof hashes for proof A and add positions to the proof hashes.
 	targetsA := copySortedFunc(proofA.Targets, uint64Cmp)
+	if defaultForestRows != totalRows {
+		targetsA = translatePositions(targetsA, defaultForestRows, totalRows)
+	}
 	proofPosA, calculateableA := ProofPositions(targetsA, numLeaves, totalRows)
 	proofAndPosA := hashAndPos{proofPosA, proofA.Proof}
 
 	// Calculate proof hashes for proof B and add positions to the proof hashes.
 	targetsB := copySortedFunc(proofB.Targets, uint64Cmp)
+	if defaultForestRows != totalRows {
+		targetsB = translatePositions(targetsB, defaultForestRows, totalRows)
+	}
 	proofPosB, calculateableB := ProofPositions(targetsB, numLeaves, totalRows)
 	proofAndPosB := hashAndPos{proofPosB, proofB.Proof}
 
@@ -1246,6 +1252,10 @@ func AddProof(proofA, proofB Proof, targetHashesA, targetHashesB []Hash, numLeav
 	proofAndPosC = subtractSortedHashAndPos(proofAndPosC, targetsC, uint64Cmp)
 
 	// Extract the proof hashes.
+	// Translate targets back to defaultForestRows space.
+	if totalRows != defaultForestRows {
+		targetsC = translatePositions(targetsC, totalRows, defaultForestRows)
+	}
 	retProof := Proof{targetsC, proofAndPosC.hashes}
 
 	// Get the hashes for the targets.
