@@ -576,7 +576,11 @@ func generateModifyIns(numLeaves uint64, delHashes []Hash, proof Proof) (
 	// Where all the parent hashes we've calculated in a given row will go to.
 	nextHashes := hashAndPos{make([]uint64, 0, len(proof.Targets)), make([]Hash, 0, len(proof.Targets))}
 
+	// toHashAndPos copies the targets so the original isn't mutated.
 	toProve := toHashAndPos(proof.Targets, delHashes)
+	if totalRows != defaultForestRows {
+		toProve.positions = translatePositions(toProve.positions, defaultForestRows, totalRows)
+	}
 	toProveIdx := 0
 
 	// Separate index for the hashes in the passed in proof.
