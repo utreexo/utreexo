@@ -81,7 +81,14 @@ func (p *Pollard) Prove(hashes []Hash) (Proof, error) {
 	sort.Slice(sortedTargets, func(a, b int) bool { return sortedTargets[a] < sortedTargets[b] })
 
 	// Get the positions of all the hashes that are needed to prove the targets
-	proofPositions, _ := ProofPositions(sortedTargets, p.NumLeaves, TreeRows(p.NumLeaves))
+	treeRows := TreeRows(p.NumLeaves)
+	proofPositions, _ := ProofPositions(sortedTargets, p.NumLeaves, treeRows)
+
+	// Translate targets to defaultForestRows space.
+	if treeRows != defaultForestRows {
+		proof.Targets = translatePositions(proof.Targets, treeRows, defaultForestRows)
+	}
+
 	if len(proofPositions) == 0 {
 		// Return early.
 		return proof, nil
