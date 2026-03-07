@@ -1163,10 +1163,13 @@ func subtractSortedSlice[E, F any](a []E, b []F, cmp func(E, F) int) []E {
 func GetMissingPositions(numLeaves uint64, proofTargets, desiredTargets []uint64) []uint64 {
 	forestRows := TreeRows(numLeaves)
 
-	// Copy the targets to avoid mutating the original. Then detwin it
-	// to prep for deletion.
+	// Copy the targets to avoid mutating the original. Then translate and sort.
 	targets := make([]uint64, len(proofTargets))
 	copy(targets, proofTargets)
+	if forestRows != defaultForestRows {
+		targets = translatePositions(targets, defaultForestRows, forestRows)
+		desiredTargets = translatePositions(desiredTargets, defaultForestRows, forestRows)
+	}
 
 	// Targets and the desiredTargets need to be sorted.
 	sort.Slice(targets, func(a, b int) bool { return targets[a] < targets[b] })
