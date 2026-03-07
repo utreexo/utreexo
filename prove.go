@@ -964,7 +964,11 @@ func calculateHashes(numLeaves uint64, delHashes []Hash, proof Proof) (hashAndPo
 	if delHashes == nil {
 		delHashes = make([]Hash, len(proof.Targets))
 	}
+	// toHashAndPos copies the targets so the original isn't mutated.
 	toProve := toHashAndPos(proof.Targets, delHashes)
+	if totalRows != defaultForestRows {
+		toProve.positions = translatePositions(toProve.positions, defaultForestRows, totalRows)
+	}
 	toProveIdx := 0
 
 	// Where all the root hashes that we've calculated will go to.
