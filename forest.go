@@ -1058,7 +1058,7 @@ func (f *Forest) getHash(pos uint64) Hash {
 	return startHash
 }
 
-// GetHash returns the hash at the given position (in forestRows space).
+// GetHash returns the hash at the given position in defaultForestRows space.
 // Implements the ToString interface for debugging.
 // Traverses from root to target position, following the tree structure
 // and handling move-ups where a child's hash equals its parent's hash.
@@ -1067,6 +1067,11 @@ func (f *Forest) getHash(pos uint64) Hash {
 func (f *Forest) GetHash(position uint64) Hash {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
+
+	treeRows := TreeRows(f.NumLeaves)
+	if treeRows != defaultForestRows {
+		position = translatePos(position, defaultForestRows, treeRows)
+	}
 	return f.getHash(position)
 }
 
@@ -1706,8 +1711,8 @@ func (f *Forest) Prove(delHashes []Hash) (Proof, error) {
 		return Proof{}, nil
 	}
 
-	// Find target positions using the walk-up algorithm
-	// findTarget returns positions in TreeRows space
+	// Find target positions using the walk-up algorithm.
+	// calculatePosition returns positions in f.forestRows space.
 	targets := make([]uint64, len(delHashes))
 	for i, hash := range delHashes {
 		target, err := f.calculatePosition(hash)
@@ -1717,9 +1722,9 @@ func (f *Forest) Prove(delHashes []Hash) (Proof, error) {
 		targets[i] = target
 	}
 
-	treeRows := TreeRows(f.NumLeaves)
-	if treeRows != f.forestRows {
-		targets = translatePositions(targets, f.forestRows, treeRows)
+	// Translate from f.forestRows space to defaultForestRows space.
+	if f.forestRows != defaultForestRows {
+		targets = translatePositions(targets, f.forestRows, defaultForestRows)
 	}
 
 	proofHashes, err := f.fetchProofHashes(delHashes)
@@ -1727,7 +1732,6 @@ func (f *Forest) Prove(delHashes []Hash) (Proof, error) {
 		return Proof{}, err
 	}
 
-	// targets are already in TreeRows space
 	return Proof{
 		Targets: targets,
 		Proof:   proofHashes,
