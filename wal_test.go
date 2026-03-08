@@ -133,7 +133,7 @@ func TestWALBasicFlush(t *testing.T) {
 	// Mark a position as deleted in the bitmap (backed by files[0]).
 	w.Bitmap().set(42)
 
-	// Write 4 bytes to addIndex (Cached(1)).
+	// Write 4 bytes to blockCounts (Cached(1)).
 	_, err = w.Cached(1).Seek(0, io.SeekStart)
 	require.NoError(t, err)
 	err = binary.Write(w.Cached(1), binary.LittleEndian, int32(7))
@@ -149,10 +149,10 @@ func TestWALBasicFlush(t *testing.T) {
 	require.NoError(t, w.Flush([32]byte{}))
 
 	// Now underlying files should have data.
-	// files[0] = bitmap, files[1] = main, files[2] = addIndex, files[3] = meta
+	// files[0] = bitmap, files[1] = main, files[2] = blockCounts, files[3] = meta
 	require.Equal(t, 8, len(files[0].data), "bitmap should have 8 bytes after Flush (one word)")
 	require.Equal(t, 32, len(files[1].data), "main should have 32 bytes after Flush")
-	require.Equal(t, 4, len(files[2].data), "addIndex should have 4 bytes after Flush")
+	require.Equal(t, 4, len(files[2].data), "blockCounts should have 4 bytes after Flush")
 	require.Equal(t, 96, len(files[3].data), "meta should have 96 bytes after Flush (consistency hash at offset 64)")
 
 	// Verify the data is correct.
@@ -194,7 +194,7 @@ func TestWALRecovery(t *testing.T) {
 	h := testHashFromInt(99)
 	entries := []journalEntry{
 		{fileIdx: 0, offset: 0, data: h[:]},
-		{fileIdx: 1, offset: 0, data: []byte{5, 0, 0, 0}},             // addIndex=5
+		{fileIdx: 1, offset: 0, data: []byte{5, 0, 0, 0}},             // blockCount=5
 		{fileIdx: 2, offset: 64, data: make([]byte, 32)},              // consistency hash
 		{fileIdx: 3, offset: 0, data: []byte{1, 0, 0, 0, 0, 0, 0, 0}}, // deleted bitmap word
 	}
@@ -238,10 +238,10 @@ func TestWALRecovery(t *testing.T) {
 	require.NoError(t, err)
 
 	// Underlying files should now have the recovered data.
-	// files[0] = bitmap, files[1] = main, files[2] = addIndex, files[3] = meta
+	// files[0] = bitmap, files[1] = main, files[2] = blockCounts, files[3] = meta
 	require.Equal(t, 8, len(files[0].data), "bitmap should be recovered")
 	require.Equal(t, 32, len(files[1].data), "main should be recovered")
-	require.Equal(t, 4, len(files[2].data), "addIndex should be recovered")
+	require.Equal(t, 4, len(files[2].data), "blockCounts should be recovered")
 	require.Equal(t, 96, len(files[3].data), "meta should be recovered")
 
 	var gotHash Hash
@@ -572,12 +572,12 @@ func TestWALForestIntegration(t *testing.T) {
 	journal := newMemFile()
 	mainFile := newMemFile()
 	delFile := newMemFile()
-	addIdxFile := newMemFile()
+	blockCountsFile := newMemFile()
 	metaFile := newMemFile()
 
 	w, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -619,7 +619,7 @@ func TestWALForestIntegration(t *testing.T) {
 	tmpDir2 := t.TempDir()
 	bitmap2, err := loadDeletedBitmap(delFile)
 	require.NoError(t, err)
-	forest2, err := newForest(mainFile, addIdxFile, metaFile, bitmap2, tmpDir2+"/ctrl", tmpDir2+"/slots", 10)
+	forest2, err := newForest(mainFile, blockCountsFile, metaFile, bitmap2, tmpDir2+"/ctrl", tmpDir2+"/slots", 10)
 	require.NoError(t, err)
 	require.Equal(t, forest.GetRoots(), forest2.GetRoots(),
 		"roots should match after restart from WAL-flushed data")
@@ -632,12 +632,12 @@ func TestWALForestRecovery(t *testing.T) {
 	journal := newMemFile()
 	mainFile := newMemFile()
 	delFile := newMemFile()
-	addIdxFile := newMemFile()
+	blockCountsFile := newMemFile()
 	metaFile := newMemFile()
 
 	w, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -685,7 +685,7 @@ func TestWALForestRecovery(t *testing.T) {
 	// Now "restart": create a new WAL which should recover from journal.
 	w2, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -713,12 +713,12 @@ func TestWALCrashBeforeCommit(t *testing.T) {
 	journal := newMemFile()
 	mainFile := newMemFile()
 	delFile := newMemFile()
-	addIdxFile := newMemFile()
+	blockCountsFile := newMemFile()
 	metaFile := newMemFile()
 
 	w, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -758,7 +758,7 @@ func TestWALCrashBeforeCommit(t *testing.T) {
 	// "Restart": create a new WAL which should discard incomplete journal.
 	w2, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)

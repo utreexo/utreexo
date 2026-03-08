@@ -29,7 +29,7 @@ import (
 // File indices in the journal:
 //
 //	0 = main hash file     (cachedRWS)
-//	1 = addIndex file      (cachedRWS)
+//	1 = block counts file  (cachedRWS)
 //	2 = meta file          (cachedRWS)
 //	    Bytes  0-31: recordMode (byte 0), zero-padded
 //	    Bytes 32-63: numLeaves (bytes 32-39, LE), zero-padded
@@ -55,7 +55,7 @@ import (
 // and can be read from there after recovery or normal startup.
 type wal struct {
 	journal    io.ReadWriteSeeker
-	cached     [3]*cachedRWS // [0]=main, [1]=addIndex, [2]=meta
+	cached     [3]*cachedRWS // [0]=main, [1]=blockCounts, [2]=meta
 	bitmap     *deletedBitmap
 	bitmapFile forestFile
 	onFlush    func([32]byte) error
@@ -90,7 +90,7 @@ type walFile struct {
 // newWAL creates a wal coordinating writes across the given underlying files.
 // bitmapFile is the deleted-positions bitmap (not wrapped in cachedRWS — its
 // dirty words are tracked by the in-memory deletedBitmap instead).
-// files must be exactly 3 walFiles: [0]=main, [1]=addIndex, [2]=meta.
+// files must be exactly 3 walFiles: [0]=main, [1]=blockCounts, [2]=meta.
 // After recovery the bitmap is loaded from the underlying file and accessible
 // via Bitmap(). Use Cached(i) to get the cachedRWS for file i.
 func newWAL(journal io.ReadWriteSeeker, bitmapFile forestFile, files ...walFile) (*wal, error) {
@@ -99,7 +99,7 @@ func newWAL(journal io.ReadWriteSeeker, bitmapFile forestFile, files ...walFile)
 	}
 
 	// Build the underlying array used for journal recovery.
-	// Indices match journal fileIdx: 0=main, 1=addIndex, 2=meta, 3=bitmap.
+	// Indices match journal fileIdx: 0=main, 1=blockCounts, 2=meta, 3=bitmap.
 	underlying := make([]forestFile, 4)
 	for i, f := range files {
 		underlying[i] = f.File
@@ -136,7 +136,7 @@ func newWAL(journal io.ReadWriteSeeker, bitmapFile forestFile, files ...walFile)
 }
 
 // Cached returns the cachedRWS for the i-th file.
-// Indices: 0=main, 1=addIndex, 2=meta.
+// Indices: 0=main, 1=blockCounts, 2=meta.
 func (w *wal) Cached(i int) *cachedRWS {
 	return w.cached[i]
 }

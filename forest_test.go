@@ -655,13 +655,13 @@ func TestForestNoFlushBeforeWAL(t *testing.T) {
 	journal := newMemFile()
 	underlyingFile := newMemFile()
 	underlyingDelFile := newMemFile()
-	underlyingAddIdxFile := newMemFile()
+	underlyingBlockCountsFile := newMemFile()
 	underlyingMetaFile := newMemFile()
 
 	// WAL wraps files in cachedRWS (except bitmap) so writes are buffered.
 	w, err := newWAL(journal, underlyingDelFile,
 		walFile{File: underlyingFile, EntrySize: 32},
-		walFile{File: underlyingAddIdxFile, EntrySize: 4},
+		walFile{File: underlyingBlockCountsFile, EntrySize: 4},
 		walFile{File: underlyingMetaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -703,8 +703,8 @@ func TestForestNoFlushBeforeWAL(t *testing.T) {
 		"main file should be untouched before Flush")
 	require.Equal(t, 0, len(underlyingDelFile.data),
 		"bitmap file should be untouched before Flush")
-	require.Equal(t, 0, len(underlyingAddIdxFile.data),
-		"addIndex file should be untouched before Flush")
+	require.Equal(t, 0, len(underlyingBlockCountsFile.data),
+		"block counts file should be untouched before Flush")
 
 	// Flush through WAL.
 	require.NoError(t, w.Flush([32]byte{}))
@@ -714,15 +714,15 @@ func TestForestNoFlushBeforeWAL(t *testing.T) {
 		"main file should have data after Flush")
 	require.NotEqual(t, 0, len(underlyingDelFile.data),
 		"bitmap file should have data after Flush")
-	require.NotEqual(t, 0, len(underlyingAddIdxFile.data),
-		"addIndex file should have data after Flush")
+	require.NotEqual(t, 0, len(underlyingBlockCountsFile.data),
+		"block counts file should have data after Flush")
 
 	// Restart a new forest from the flushed underlying files.
 	tmpDir2 := t.TempDir()
 	bitmap2, err := loadDeletedBitmap(underlyingDelFile)
 	require.NoError(t, err)
 	forest2, err := newForest(
-		underlyingFile, underlyingAddIdxFile, underlyingMetaFile, bitmap2,
+		underlyingFile, underlyingBlockCountsFile, underlyingMetaFile, bitmap2,
 		tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
 	)
 	require.NoError(t, err)
@@ -739,12 +739,12 @@ func TestForestCrashRecovery(t *testing.T) {
 	journal := newMemFile()
 	mainFile := newMemFile()
 	delFile := newMemFile()
-	addIdxFile := newMemFile()
+	blockCountsFile := newMemFile()
 	metaFile := newMemFile()
 
 	w, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -788,7 +788,7 @@ func TestForestCrashRecovery(t *testing.T) {
 	preRecoveryBitmap, err := loadDeletedBitmap(delFile)
 	require.NoError(t, err)
 	preRecoveryForest, err := newForest(
-		mainFile, addIdxFile, metaFile, preRecoveryBitmap,
+		mainFile, blockCountsFile, metaFile, preRecoveryBitmap,
 		tmpDir2+"/ctrl", tmpDir2+"/slots", 16,
 	)
 	require.NoError(t, err)
@@ -798,7 +798,7 @@ func TestForestCrashRecovery(t *testing.T) {
 	// ---- "Restart": new WAL recovers from journal ----
 	w2, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -828,12 +828,12 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	journal := newMemFile()
 	mainFile := newMemFile()
 	delFile := newMemFile()
-	addIdxFile := newMemFile()
+	blockCountsFile := newMemFile()
 	metaFile := newMemFile()
 
 	w, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -875,7 +875,7 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	// "Restart": new WAL should discard the incomplete journal.
 	w2, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -944,12 +944,12 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 	journal := newMemFile()
 	mainFile := newMemFile()
 	delFile := newMemFile()
-	addIdxFile := newMemFile()
+	blockCountsFile := newMemFile()
 	metaFile := newMemFile()
 
 	w, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -1011,7 +1011,7 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 	// Restart: new WAL + new tmpDir forces Swiss Table rebuild.
 	w2, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
