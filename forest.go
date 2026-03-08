@@ -30,7 +30,7 @@ const (
 	// File names used by OpenForest within the dbpath directory.
 	forestDataFileName        = "forest_data.dat"         // main hash data, 32 bytes per position
 	forestDeletedFileName     = "forest_deleted.dat"      // deleted-leaf bitmap, 8 bytes per word
-	forestAddIndexFileName    = "forest_addindex.dat"     // add-batch index per leaf, 4 bytes each
+	forestBlockCountsFileName = "forest_blockcounts.dat"  // per-block add count, 4 bytes each
 	forestJournalFileName     = "forest_journal.dat"      // WAL journal for crash recovery
 	forestMetaFileName        = "forest_meta.dat"         // recordMode + numLeaves + consistency hash
 	forestPosMapCtrlFileName  = "forest_posmap_ctrl.dat"  // Swiss Table control bytes, mmap'd
@@ -207,11 +207,11 @@ func (b *deletedBitmap) count() int {
 type Forest struct {
 	mu sync.RWMutex // protects all fields below
 
-	file         forestFile
-	addIndexFile forestFile // stores int32 addIndex at offset pos*4
-	metaFile     forestFile // stores recordMode (bytes 0-31) + consistency hash (bytes 32-63)
-	NumLeaves    uint64
-	forestRows   uint8 // Fixed maximum rows for stable position mapping
+	file            forestFile
+	blockCountsFile forestFile // stores uint32 add-count per block, 4 bytes each
+	metaFile        forestFile // stores recordMode (bytes 0-31) + consistency hash (bytes 32-63)
+	NumLeaves       uint64
+	forestRows      uint8 // Fixed maximum rows for stable position mapping
 
 	// positionMap maps leaf hashes to packed (addIndex, position) values.
 	// Upper 17 bits = addIndex (index within Modify batch), lower 47 bits = position.
@@ -237,26 +237,82 @@ type Forest struct {
 	closers []io.Closer
 }
 
+// readBlockCounts reads all uint32 entries from a block counts file
+// and returns them as a slice.
+func readBlockCounts(file io.ReadSeeker) ([]uint32, error) {
+	size, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+	if size == 0 {
+		return nil, nil
+	}
+	if size%4 != 0 {
+		return nil, fmt.Errorf("block counts file size %d is not a multiple of 4", size)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, size)
+	if _, err := io.ReadFull(file.(io.Reader), buf); err != nil {
+		return nil, err
+	}
+	n := size / 4
+	counts := make([]uint32, n)
+	for i := range counts {
+		counts[i] = binary.LittleEndian.Uint32(buf[i*4:])
+	}
+	return counts, nil
+}
+
 // newForest creates a new Forest backed by the given file.
 // The file should be an io.ReadWriteSeeker (e.g., *os.File).
-// addIndexFile stores the addIndex for each leaf; its size determines numLeaves (size / 4).
+// blockCountsFile stores the uint32 add-count per block; numLeaves is derived
+// from the cumulative sum of all block counts.
 // metaFile stores recordMode (bytes 0-31), numLeaves (bytes 32-63), and consistency hash (bytes 64-95).
 // bitmap tracks deleted leaf positions; pass nil for a fresh forest. When using a WAL,
 // the bitmap is loaded by the WAL after recovery and passed here. For non-WAL usage,
 // load it with loadDeletedBitmap.
 // posMapCtrlPath and posMapSlotsPath are file paths for the Swiss Table position map.
 // forestRows sets the maximum tree height (determines max leaves = 2^forestRows).
-func newForest(file forestFile, addIndexFile, metaFile forestFile, bitmap *deletedBitmap, posMapCtrlPath, posMapSlotsPath string, forestRows uint8) (*Forest, error) {
-	if file == nil || addIndexFile == nil || metaFile == nil {
+func newForest(file forestFile, blockCountsFile, metaFile forestFile, bitmap *deletedBitmap, posMapCtrlPath, posMapSlotsPath string, forestRows uint8) (*Forest, error) {
+	if file == nil || blockCountsFile == nil || metaFile == nil {
 		return nil, fmt.Errorf("one of the given files are nil")
 	}
 
-	// Derive numLeaves from addIndexFile size (each leaf stores a 4-byte int32).
-	addIdxSize, err := addIndexFile.Seek(0, io.SeekEnd)
-	if err != nil {
-		return nil, fmt.Errorf("get addIndexFile size: %w", err)
+	f := &Forest{
+		file:            file,
+		blockCountsFile: blockCountsFile,
+		metaFile:        metaFile,
+		forestRows:      forestRows,
 	}
-	numLeaves := uint64(addIdxSize / 4)
+
+	// Load metadata (recordMode + WAL-protected numLeaves).
+	if err := f.loadMetadata(); err != nil {
+		return nil, fmt.Errorf("load metadata: %w", err)
+	}
+
+	// Reconcile block counts file with WAL-protected numLeaves.
+	// After undo-without-flush crashes, the block counts file may have
+	// stale entries at the end (one per undo). Remove entries from the
+	// end until the sum no longer exceeds numLeaves.
+	counts, err := readBlockCounts(blockCountsFile)
+	if err != nil {
+		return nil, fmt.Errorf("read blockCountsFile: %w", err)
+	}
+	var blockTotal uint64
+	for _, c := range counts {
+		blockTotal += uint64(c)
+	}
+	for len(counts) > 0 && blockTotal > f.NumLeaves {
+		blockTotal -= uint64(counts[len(counts)-1])
+		counts = counts[:len(counts)-1]
+	}
+	if truncater, ok := blockCountsFile.(interface{ Truncate(int64) error }); ok {
+		if err := truncater.Truncate(int64(len(counts)) * 4); err != nil {
+			return nil, fmt.Errorf("trim block counts: %w", err)
+		}
+	}
 
 	// Read consistency hash from metaFile (bytes 64-95, written atomically by WAL).
 	// Zero hash on first run or if metaFile is empty.
@@ -266,30 +322,18 @@ func newForest(file forestFile, addIndexFile, metaFile forestFile, bitmap *delet
 
 	// Create Swiss Table for position map. Size based on numLeaves (will resize if needed).
 	// Use a minimum of 1<<16 to avoid excessive early resizes on a fresh database.
-	expectedEntries := max(numLeaves, 1<<16)
+	expectedEntries := max(f.NumLeaves, 1<<16)
 	posMap, needsRebuild, err := swisstable.NewSwissPositionMap(posMapCtrlPath, posMapSlotsPath, expectedEntries, consistencyHash, file, positionMask)
 	if err != nil {
 		return nil, fmt.Errorf("create position map: %w", err)
 	}
 
 	if bitmap == nil {
-		bitmap = newDeletedBitmap(numLeaves)
+		bitmap = newDeletedBitmap(f.NumLeaves)
 	}
 
-	f := &Forest{
-		file:                 file,
-		addIndexFile:         addIndexFile,
-		metaFile:             metaFile,
-		NumLeaves:            numLeaves,
-		forestRows:           forestRows,
-		positionMap:          posMap,
-		deletedLeafPositions: bitmap,
-	}
-
-	// Load metadata (recordMode)
-	if err := f.loadMetadata(); err != nil {
-		return nil, fmt.Errorf("load metadata: %w", err)
-	}
+	f.positionMap = posMap
+	f.deletedLeafPositions = bitmap
 
 	// Rebuild positionMap only if needed (new file or hash mismatch)
 	if needsRebuild {
@@ -336,7 +380,7 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 	fileNames := []string{
 		forestDataFileName,
 		forestDeletedFileName,
-		forestAddIndexFileName,
+		forestBlockCountsFileName,
 		forestJournalFileName,
 		forestMetaFileName,
 	}
@@ -353,7 +397,7 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 		files = append(files, f)
 	}
 
-	dataFile, deletedFile, addIndexFile, journalFile, metaFile := files[0], files[1], files[2], files[3], files[4]
+	dataFile, deletedFile, blockCountsFile, journalFile, metaFile := files[0], files[1], files[2], files[3], files[4]
 	closers := make([]io.Closer, len(files))
 	for i, f := range files {
 		closers[i] = f
@@ -371,24 +415,22 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 		return nil, fmt.Errorf("truncate data file: %w", err)
 	}
 
-	// Split memory budget proportionally by entry size so caches fill
-	// at similar rates. Entry sizes: data=32, addIndex=4, meta=32.
-	// When maxCacheMemory is 0 each walFile gets the WAL default (64MB).
+	// The block counts file is tiny (~4 bytes per block, ~3.6 MB at 900K blocks)
+	// so it doesn't need a significant cache budget. Allocate the full memory
+	// budget to the data file cache. Meta and block counts use WAL defaults.
 	const (
-		dataEntrySize     = 32
-		addIndexEntrySize = 4
-		metaEntrySize     = 32
-		totalEntrySize    = dataEntrySize + addIndexEntrySize // meta is tiny, use WAL default
+		dataEntrySize        = 32
+		blockCountsEntrySize = 4
+		metaEntrySize        = 32
 	)
-	var dataCacheBytes, addIndexCacheBytes int64
+	var dataCacheBytes int64
 	if o.maxCacheMemory > 0 {
-		dataCacheBytes = o.maxCacheMemory * dataEntrySize / totalEntrySize
-		addIndexCacheBytes = o.maxCacheMemory * addIndexEntrySize / totalEntrySize
+		dataCacheBytes = o.maxCacheMemory
 	}
 
 	wal, err := newWAL(journalFile, deletedFile,
 		walFile{File: dataFile, EntrySize: dataEntrySize, MaxCacheBytes: dataCacheBytes},
-		walFile{File: addIndexFile, EntrySize: addIndexEntrySize, MaxCacheBytes: addIndexCacheBytes},
+		walFile{File: blockCountsFile, EntrySize: blockCountsEntrySize},
 		walFile{File: metaFile, EntrySize: metaEntrySize},
 	)
 	if err != nil {
@@ -464,11 +506,18 @@ func (f *Forest) Close(bestHash [32]byte) error {
 	return firstErr
 }
 
-// rebuildPositionMap reads all leaf hashes and addIndices in parallel bulk reads
-// and populates the positionMap, skipping deleted positions.
+// rebuildPositionMap reads all leaf hashes in batches and populates the
+// positionMap. The addIndex for each leaf is derived from the block counts
+// file using a linear scan (sequential access pattern).
 func (f *Forest) rebuildPositionMap() error {
 	if f.NumLeaves == 0 {
 		return nil
+	}
+
+	// Load block counts from file into a local slice.
+	blockAdds, err := readBlockCounts(f.blockCountsFile)
+	if err != nil {
+		return fmt.Errorf("read block counts: %w", err)
 	}
 
 	const batchSize = 4096 // entries per batch
@@ -478,81 +527,67 @@ func (f *Forest) rebuildPositionMap() error {
 		data []byte
 	}
 
-	// done is closed on any error to signal producer goroutines to exit.
+	// done is closed on any error to signal the producer goroutine to exit.
 	done := make(chan struct{})
 	defer close(done)
 
-	// readBatches reads fixed-size entries from r in batches, sending them on
-	// ch. It closes ch when finished and respects done for early cancellation.
-	readBatches := func(r io.ReadWriteSeeker, entrySize uint64, ch chan<- batch) error {
-		defer close(ch)
+	hashCh := make(chan batch, 4)
+	hashErrCh := make(chan error, 1)
 
-		if _, err := r.Seek(0, io.SeekStart); err != nil {
-			return err
+	go func() {
+		defer close(hashCh)
+
+		if _, err := f.file.Seek(0, io.SeekStart); err != nil {
+			hashErrCh <- err
+			return
 		}
 
 		for pos := uint64(0); pos < f.NumLeaves; pos += batchSize {
 			n := min(uint64(batchSize), f.NumLeaves-pos)
 
-			buf := make([]byte, n*entrySize)
-			if _, err := io.ReadFull(r, buf); err != nil {
-				return err
+			buf := make([]byte, n*32)
+			if _, err := io.ReadFull(f.file, buf); err != nil {
+				hashErrCh <- err
+				return
 			}
 
 			select {
-			case ch <- batch{pos: pos, size: n, data: buf}:
+			case hashCh <- batch{pos: pos, size: n, data: buf}:
 			case <-done:
-				return nil
+				hashErrCh <- nil
+				return
 			}
 		}
-		return nil
-	}
+		hashErrCh <- nil
+	}()
 
-	hashCh := make(chan batch, 4)
-	addIdxCh := make(chan batch, 4)
-	hashErrCh := make(chan error, 1)
-	addIdxErrCh := make(chan error, 1)
+	// Linear scan: advance blockIdx as leafPos crosses block boundaries.
+	blockIdx := 0
+	blockStart := uint64(0)
 
-	go func() { hashErrCh <- readBatches(f.file, 32, hashCh) }()
-	go func() { addIdxErrCh <- readBatches(f.addIndexFile, 4, addIdxCh) }()
-
-	// Consumer: process batches as they arrive.
 	for hashBatch := range hashCh {
-		addIdxBatch, ok := <-addIdxCh
-		if !ok {
-			if err := <-addIdxErrCh; err != nil {
-				return fmt.Errorf("read addIndex: %w", err)
-			}
-			return fmt.Errorf("addIdx channel closed early")
-		}
-		if hashBatch.pos != addIdxBatch.pos || hashBatch.size != addIdxBatch.size {
-			return fmt.Errorf("batch mismatch: hash pos=%d size=%d, addIdx pos=%d size=%d",
-				hashBatch.pos, hashBatch.size, addIdxBatch.pos, addIdxBatch.size)
-		}
-
 		for i := uint64(0); i < hashBatch.size; i++ {
 			leafPos := hashBatch.pos + i
+
+			// Advance to the block containing leafPos.
+			for blockIdx < len(blockAdds) && blockStart+uint64(blockAdds[blockIdx]) <= leafPos {
+				blockStart += uint64(blockAdds[blockIdx])
+				blockIdx++
+			}
+			addIndex := int32(leafPos - blockStart)
 
 			var hash Hash
 			copy(hash[:], hashBatch.data[i*32:])
 
-			addIndex := int32(binary.LittleEndian.Uint32(addIdxBatch.data[i*4:]))
 			if err := f.positionMap.Set(hash, packPosIndex(leafPos, addIndex)); err != nil {
 				return fmt.Errorf("positionMap.Set at %d: %w", leafPos, err)
 			}
 		}
 	}
 
-	// hashCh is closed — check the hash reader for errors.
+	// Check the hash reader for errors.
 	if err := <-hashErrCh; err != nil {
 		return fmt.Errorf("read hashes: %w", err)
-	}
-
-	// Drain any remaining addIdx batches and check for errors.
-	for range addIdxCh {
-	}
-	if err := <-addIdxErrCh; err != nil {
-		return fmt.Errorf("read addIndex: %w", err)
 	}
 
 	return nil
@@ -693,32 +728,12 @@ func (f *Forest) writeHash(position uint64, hash Hash) error {
 	return nil
 }
 
-// readAddIndex reads the addIndex for the leaf at the given position.
-func (f *Forest) readAddIndex(pos uint64) (int32, error) {
-	offset := int64(pos * 4)
-	_, err := f.addIndexFile.Seek(offset, io.SeekStart)
-	if err != nil {
-		return 0, err
-	}
-
-	var addIndex int32
-	err = binary.Read(f.addIndexFile, binary.LittleEndian, &addIndex)
-	if err != nil {
-		return 0, err
-	}
-
-	return addIndex, nil
-}
-
-// writeAddIndex writes the addIndex for the leaf at the given position.
-func (f *Forest) writeAddIndex(pos uint64, addIndex int32) error {
-	offset := int64(pos * 4)
-	_, err := f.addIndexFile.Seek(offset, io.SeekStart)
-	if err != nil {
+// appendBlockCount appends a block's add count to the block counts file.
+func (f *Forest) appendBlockCount(count uint32) error {
+	if _, err := f.blockCountsFile.Seek(0, io.SeekEnd); err != nil {
 		return err
 	}
-
-	return binary.Write(f.addIndexFile, binary.LittleEndian, addIndex)
+	return binary.Write(f.blockCountsFile, binary.LittleEndian, count)
 }
 
 // add adds a single leaf to the forest.
@@ -734,12 +749,6 @@ func (f *Forest) add(hash Hash, addIndex int32) error {
 		err := f.writeHash(f.NumLeaves, hash)
 		if err != nil {
 			return fmt.Errorf("write leaf: %w", err)
-		}
-
-		// Write the addIndex
-		err = f.writeAddIndex(f.NumLeaves, addIndex)
-		if err != nil {
-			return fmt.Errorf("write addIndex: %w", err)
 		}
 	}
 
@@ -1123,6 +1132,13 @@ func (f *Forest) undoInternal(numAdds uint64, delHashes []Hash) error {
 	}
 	f.NumLeaves -= numAdds
 
+	// Persist the decremented numLeaves through the WAL-protected meta file.
+	// The stale block counts entry is left on disk; it will be trimmed on
+	// the next startup if a crash occurs before the next flush.
+	if err := f.saveMetadata(); err != nil {
+		return fmt.Errorf("save metadata: %w", err)
+	}
+
 	// Step 2: Look up deleted positions from positionMap
 	delPositions := make([]uint64, len(delHashes))
 	for i, hash := range delHashes {
@@ -1353,6 +1369,13 @@ func (f *Forest) Modify(adds []Leaf, delHashes []Hash, _ Proof) error {
 		}
 	}
 
+	if err := f.appendBlockCount(uint32(len(adds))); err != nil {
+		return fmt.Errorf("append block count: %w", err)
+	}
+	if err := f.saveMetadata(); err != nil {
+		return fmt.Errorf("save metadata: %w", err)
+	}
+
 	return nil
 }
 
@@ -1398,6 +1421,13 @@ func (f *Forest) ModifyAndReturnTTLs(adds []Leaf, delHashes []Hash, _ Proof) ([]
 		}
 	}
 
+	if err := f.appendBlockCount(uint32(len(adds))); err != nil {
+		return nil, fmt.Errorf("append block count: %w", err)
+	}
+	if err := f.saveMetadata(); err != nil {
+		return nil, fmt.Errorf("save metadata: %w", err)
+	}
+
 	return addIndexes, nil
 }
 
@@ -1439,18 +1469,16 @@ func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, error) {
 			return nil, fmt.Errorf("write leaf: %w", err)
 		}
 
-		// Write the addIndex
-		err = f.writeAddIndex(f.NumLeaves, int32(i))
-		if err != nil {
-			return nil, fmt.Errorf("write addIndex: %w", err)
-		}
-
 		f.NumLeaves++
+	}
+
+	if err := f.appendBlockCount(uint32(len(adds))); err != nil {
+		return nil, fmt.Errorf("append block count: %w", err)
 	}
 
 	f.recordMode = true
 	if err := f.saveMetadata(); err != nil {
-		return nil, fmt.Errorf("save record mode: %w", err)
+		return nil, fmt.Errorf("save metadata: %w", err)
 	}
 	return addIndexes, nil
 }
@@ -1513,7 +1541,7 @@ func (f *Forest) HashAll() error {
 
 	f.recordMode = false
 	if err := f.saveMetadata(); err != nil {
-		return fmt.Errorf("save record mode: %w", err)
+		return fmt.Errorf("save metadata: %w", err)
 	}
 
 	return nil
