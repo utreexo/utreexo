@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/utreexo/utreexo/internal/mmapfile"
 	"github.com/utreexo/utreexo/internal/swisstable"
 	"golang.org/x/exp/slices"
 )
@@ -415,6 +416,18 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 		return nil, fmt.Errorf("truncate data file: %w", err)
 	}
 
+	// On unix this memory-maps the data file for faster I/O; on other
+	// platforms it falls back to the raw *os.File. The file has been
+	// pre-sized above and is never resized, so the mapping is stable.
+	dataFF, err := mmapfile.Open(dataFile, totalSize)
+	if err != nil {
+		for _, c := range closers {
+			c.Close()
+		}
+		return nil, fmt.Errorf("open data file: %w", err)
+	}
+	closers[0] = dataFF
+
 	// The block counts file is tiny (~4 bytes per block, ~3.6 MB at 900K blocks)
 	// so it doesn't need a significant cache budget. Allocate the full memory
 	// budget to the data file cache. Meta and block counts use WAL defaults.
@@ -429,7 +442,7 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 	}
 
 	wal, err := newWAL(journalFile, deletedFile,
-		walFile{File: dataFile, EntrySize: dataEntrySize, MaxCacheBytes: dataCacheBytes},
+		walFile{File: dataFF, EntrySize: dataEntrySize, MaxCacheBytes: dataCacheBytes},
 		walFile{File: blockCountsFile, EntrySize: blockCountsEntrySize},
 		walFile{File: metaFile, EntrySize: metaEntrySize},
 	)
