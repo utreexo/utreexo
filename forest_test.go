@@ -1165,3 +1165,85 @@ func TestOpenForest(t *testing.T) {
 		})
 	}
 }
+
+// TestForestBlockCountsReconciliation verifies that newForest trims stale
+// block-count entries when the block counts file sum exceeds the
+// WAL-protected numLeaves in metaFile. This can happen after an
+// undo-without-flush crash.
+func TestForestBlockCountsReconciliation(t *testing.T) {
+	tests := []struct {
+		name           string
+		numLeaves      uint64
+		blockCounts    []uint32 // initial block counts file contents
+		expectedCounts []uint32 // block counts after reconciliation
+	}{
+		{
+			name:           "one stale entry",
+			numLeaves:      10,
+			blockCounts:    []uint32{5, 5, 3},
+			expectedCounts: []uint32{5, 5},
+		},
+		{
+			name:           "two stale entries",
+			numLeaves:      5,
+			blockCounts:    []uint32{5, 5, 3},
+			expectedCounts: []uint32{5},
+		},
+		{
+			name:           "no stale entries",
+			numLeaves:      13,
+			blockCounts:    []uint32{5, 5, 3},
+			expectedCounts: []uint32{5, 5, 3},
+		},
+		{
+			name:           "fresh database",
+			numLeaves:      0,
+			blockCounts:    nil,
+			expectedCounts: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// -- metaFile: recordMode (32 zero bytes) + numLeaves as LE uint64 in a 32-byte entry --
+			metaFile := newMemFile()
+			var metaBuf [64]byte
+			// bytes 0-31: recordMode (all zeros = not record mode)
+			// bytes 32-39: numLeaves as LE uint64
+			binary.LittleEndian.PutUint64(metaBuf[32:], tc.numLeaves)
+			metaFile.Write(metaBuf[:])
+
+			// -- blockCountsFile: uint32 LE entries --
+			blockCountsFile := newMemFile()
+			for _, c := range tc.blockCounts {
+				binary.Write(blockCountsFile, binary.LittleEndian, c)
+			}
+
+			// -- mainFile: write 32-byte hashes for each leaf so rebuildPositionMap can read them --
+			mainFile := newMemFile()
+			for i := uint64(0); i < tc.numLeaves; i++ {
+				h := testHashFromInt(int(i))
+				mainFile.Write(h[:])
+			}
+
+			// Call newForest which triggers reconciliation and rebuildPositionMap.
+			tmpDir := t.TempDir()
+			forest, err := newForest(
+				mainFile, blockCountsFile, metaFile, nil,
+				tmpDir+"/ctrl", tmpDir+"/slots", 10,
+			)
+			require.NoError(t, err)
+			require.Equal(t, tc.numLeaves, forest.NumLeaves)
+
+			// Read back block counts and verify they were trimmed.
+			got, err := readBlockCounts(blockCountsFile)
+			require.NoError(t, err)
+
+			if tc.expectedCounts == nil {
+				require.Empty(t, got, "expected no block counts")
+			} else {
+				require.Equal(t, tc.expectedCounts, got)
+			}
+		})
+	}
+}
