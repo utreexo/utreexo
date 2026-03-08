@@ -348,17 +348,14 @@ func (w *wal) Discard() error {
 	return nil
 }
 
-// FlushNeeded returns true if any cached file has exceeded its memory threshold.
+// FlushNeeded returns true if the main data file cache has exceeded its
+// memory threshold. The block counts and meta caches are excluded because
+// they are tiny and never need to trigger a flush on their own.
 // Dirty bitmap words are not considered here because they are tiny (just word
 // indices) and will be written to the journal when a flush is triggered by a
 // cachedRWS overflow.
 func (w *wal) FlushNeeded() bool {
-	for _, c := range w.cached {
-		if c.FlushNeeded() {
-			return true
-		}
-	}
-	return false
+	return w.cached[0].FlushNeeded()
 }
 
 // parseEntries decodes journal entries from a byte slice.
