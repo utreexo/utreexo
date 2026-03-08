@@ -935,6 +935,60 @@ func TestForestVerifyDeletedLeaf(t *testing.T) {
 	}
 }
 
+// TestForestRebuildPositionMap verifies that rebuildPositionMap produces
+// the same positionMap entries as the original Modify calls. It builds a
+// forest over multiple blocks with varying add counts (including an empty
+// block), snapshots every leaf's packed (addIndex, position) value, then
+// clears and rebuilds the positionMap and checks all entries match.
+func TestForestRebuildPositionMap(t *testing.T) {
+	forest := newTestForest(t, 20)
+	sc := newSimChainWithSeed(0x12, 0x34)
+
+	// Run 10,000 blocks with adds and deletes.
+	for range 10_000 {
+		adds, _, delHashes := sc.NextBlock(5)
+		err := forest.Modify(adds, delHashes, Proof{})
+		require.NoError(t, err)
+	}
+
+	// Snapshot every leaf's packed value before rebuild.
+	type leafEntry struct {
+		hash   Hash
+		packed uint64
+	}
+	allLeaves := make([]leafEntry, 0, forest.NumLeaves)
+	for pos := uint64(0); pos < forest.NumLeaves; pos++ {
+		hash, err := forest.readHash(pos)
+		require.NoError(t, err)
+		packed, found, err := forest.positionMap.Get(hash)
+		require.NoError(t, err)
+		require.True(t, found, "leaf at pos %d not found before rebuild", pos)
+		allLeaves = append(allLeaves, leafEntry{hash: hash, packed: packed})
+	}
+
+	// Clear positionMap and rebuild.
+	for _, le := range allLeaves {
+		_, err := forest.positionMap.Delete(le.hash)
+		require.NoError(t, err)
+	}
+	require.Equal(t, uint64(0), forest.positionMap.Count(), "positionMap should be empty after clearing")
+
+	err := forest.rebuildPositionMap()
+	require.NoError(t, err)
+
+	// Verify every leaf has the same packed value as before.
+	require.Equal(t, uint64(len(allLeaves)), forest.positionMap.Count(),
+		"positionMap count mismatch after rebuild")
+	for _, le := range allLeaves {
+		got, found, err := forest.positionMap.Get(le.hash)
+		require.NoError(t, err)
+		require.True(t, found, "leaf not found after rebuild")
+		require.Equal(t, le.packed, got,
+			"packed value mismatch for leaf pos=%d addIndex=%d",
+			unpackPos(le.packed), unpackIndex(le.packed))
+	}
+}
+
 // TestForestUndoAfterRebuild verifies that Undo works correctly after
 // restarting a Forest with a fresh Swiss Table (forcing positionMap rebuild).
 // This catches bugs where the rebuilt positionMap is missing state needed
