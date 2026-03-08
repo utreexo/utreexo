@@ -358,8 +358,8 @@ func getLowestRoot(numLeaves uint64, totalRows uint8) uint8 {
 // 1. Which subtree a node is in.
 // 2. The height from node to its tree top (which is the bitfield length).
 // 3. The L/R bitfield to descend to the node.
-func DetectOffset(position uint64, numLeaves uint64) (uint8, uint8, uint64, error) {
-	tRows := int(TreeRows(numLeaves))
+func DetectOffset(position uint64, numLeaves uint64, totalRows uint8) (uint8, uint8, uint64, error) {
+	tRows := int(totalRows)
 	// nr = target node row
 	nr := DetectRow(position, uint8(tRows))
 

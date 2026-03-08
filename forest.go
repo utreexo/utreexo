@@ -982,7 +982,7 @@ func (f *Forest) getHash(pos uint64) Hash {
 	if pos >= maxPosition(TreeRows(f.NumLeaves)) {
 		return empty
 	}
-	tree, branchLen, _, err := DetectOffset(pos, f.NumLeaves)
+	tree, branchLen, _, err := DetectOffset(pos, f.NumLeaves, TreeRows(f.NumLeaves))
 	if err != nil {
 		return empty
 	}
