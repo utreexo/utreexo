@@ -604,7 +604,7 @@ func (v *view) undoDeletion(createIndex []int32, undoInfo undoInfo, ingestIns in
 		updateHashInfo, insertDelInfo := undoInfo.pop()
 		if updateHashInfo != nil {
 			if updateHashInfo.isRoot {
-				tree, _, _, err := DetectOffset(updateHashInfo.rootPos, v.numLeaves)
+				tree, _, _, err := DetectOffset(updateHashInfo.rootPos, v.numLeaves, v.totalRows)
 				if err != nil {
 					return err
 				}
@@ -1924,7 +1924,7 @@ func (m *MapPollard) getHashesByPositions(positions []uint64) ([]Hash, error) {
 
 	hashes := make([]Hash, 0, len(positions))
 	for _, pos := range positions {
-		tree, branchLen, bits, err := DetectOffset(pos, m.NumLeaves)
+		tree, branchLen, bits, err := DetectOffset(pos, m.NumLeaves, m.TotalRows)
 		if err != nil {
 			return nil, err
 		}

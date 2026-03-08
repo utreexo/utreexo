@@ -131,7 +131,7 @@ func (p *Pollard) getNode(pos uint64) (n, sibling, parent *polNode, err error) {
 		return nil, nil, nil,
 			fmt.Errorf("position %d does not exist in tree of %d leaves", pos, p.NumLeaves)
 	}
-	tree, branchLen, bits, err := DetectOffset(pos, p.NumLeaves)
+	tree, branchLen, bits, err := DetectOffset(pos, p.NumLeaves, TreeRows(p.NumLeaves))
 	if err != nil {
 		return nil, nil, nil, err
 	}

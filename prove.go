@@ -1298,8 +1298,8 @@ func getNewPositions(blockTargets []uint64, slice hashAndPos, numLeaves uint64, 
 			}
 
 			// If these positions are in different subtrees, continue.
-			subtree, _, _, _ := DetectOffset(target, numLeaves)
-			subtree1, _, _, _ := DetectOffset(nextPos, numLeaves)
+			subtree, _, _, _ := DetectOffset(target, numLeaves, totalRows)
+			subtree1, _, _, _ := DetectOffset(nextPos, numLeaves, totalRows)
 			if subtree != subtree1 {
 				continue
 			}
@@ -1495,8 +1495,8 @@ func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestro
 			}
 
 			// If these positions are in different subtrees, continue.
-			subtree, _, _, _ := DetectOffset(target, numLeaves)
-			subtree1, _, _, _ := DetectOffset(destroyed, numLeaves-numAdds)
+			subtree, _, _, _ := DetectOffset(target, numLeaves, forestRows)
+			subtree1, _, _, _ := DetectOffset(destroyed, numLeaves-numAdds, prevForestRows)
 			if subtree != subtree1 {
 				continue
 			}
@@ -1510,8 +1510,8 @@ func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestro
 				continue
 			}
 			// If these positions are in different subtrees, continue.
-			subtree, _, _, _ := DetectOffset(target, numLeaves)
-			subtree1, _, _, _ := DetectOffset(destroyed, numLeaves-numAdds)
+			subtree, _, _, _ := DetectOffset(target, numLeaves, forestRows)
+			subtree1, _, _, _ := DetectOffset(destroyed, numLeaves-numAdds, prevForestRows)
 			if subtree != subtree1 {
 				continue
 			}
@@ -1538,8 +1538,8 @@ func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestro
 			for i := 0; i < proofWithPos.Len(); i++ {
 				target := proofWithPos.positions[i]
 				// If these positions are in different subtrees, continue.
-				subtree, _, _, _ := DetectOffset(destroyed, numLeaves)
-				subtree1, _, _, _ := DetectOffset(target, numLeaves)
+				subtree, _, _, _ := DetectOffset(destroyed, numLeaves, forestRows)
+				subtree1, _, _, _ := DetectOffset(target, numLeaves, forestRows)
 				if subtree == subtree1 || target == destroyed {
 					proofWithPos.Delete(i)
 				}
@@ -1548,8 +1548,8 @@ func (p *Proof) undoAdd(numAdds, numLeaves uint64, cachedHashes []Hash, toDestro
 			for i := 0; i < targetsWithHash.Len(); i++ {
 				target := targetsWithHash.positions[i]
 				// If these positions are in different subtrees, continue.
-				subtree, _, _, _ := DetectOffset(destroyed, numLeaves)
-				subtree1, _, _, _ := DetectOffset(target, numLeaves)
+				subtree, _, _, _ := DetectOffset(destroyed, numLeaves, forestRows)
+				subtree1, _, _, _ := DetectOffset(target, numLeaves, forestRows)
 				if subtree == subtree1 || target == destroyed {
 					targetsWithHash.Delete(i)
 				}
@@ -1643,8 +1643,8 @@ func (p *Proof) undoDel(blockTargets []uint64, blockHashes, cachedHashes []Hash,
 		// Look for the sibling in the cached targets.
 		for i, target := range targetsWithHashes.positions {
 			// If these positions are in different subtrees, continue.
-			subtree, _, _, _ := DetectOffset(target, numLeaves)
-			subtree1, _, _, _ := DetectOffset(blockTarget, numLeaves)
+			subtree, _, _, _ := DetectOffset(target, numLeaves, totalRows)
+			subtree1, _, _, _ := DetectOffset(blockTarget, numLeaves, totalRows)
 			if subtree != subtree1 {
 				continue
 			}
@@ -1662,8 +1662,8 @@ func (p *Proof) undoDel(blockTargets []uint64, blockHashes, cachedHashes []Hash,
 		// Look for the sibling in the proof hashes.
 		for i, target := range proofWithPos.positions {
 			// If these positions are in different subtrees, continue.
-			subtree, _, _, _ := DetectOffset(target, numLeaves)
-			subtree1, _, _, _ := DetectOffset(blockTarget, numLeaves)
+			subtree, _, _, _ := DetectOffset(target, numLeaves, totalRows)
+			subtree1, _, _, _ := DetectOffset(blockTarget, numLeaves, totalRows)
 			if subtree != subtree1 {
 				continue
 			}
@@ -2133,8 +2133,8 @@ func undoDel(totalRows uint8, positions, deleted []uint64, numLeaves uint64) []u
 
 		for j, pos := range positions {
 			// If these positions are in different subtrees, continue.
-			subtree, _, _, _ := DetectOffset(translatePos(deTwinedPos, totalRows, TreeRows(numLeaves)), numLeaves)
-			subtree1, _, _, _ := DetectOffset(translatePos(pos, totalRows, TreeRows(numLeaves)), numLeaves)
+			subtree, _, _, _ := DetectOffset(deTwinedPos, numLeaves, totalRows)
+			subtree1, _, _, _ := DetectOffset(pos, numLeaves, totalRows)
 			if subtree != subtree1 {
 				continue
 			}
@@ -2180,7 +2180,7 @@ func undoSingleAdd(totalRows uint8, positions, toDestroy []uint64, numLeaves uin
 
 	// We work our way down from the root that's being removed.
 	pos := numLeaves - 1
-	subtree, _, _, _ := DetectOffset(pos, numLeaves)
+	subtree, _, _, _ := DetectOffset(pos, numLeaves, TreeRows(numLeaves))
 	subtreeRows := subtreeRow(numLeaves, subtree)
 	pos = rootPosition(numLeaves, subtreeRows, totalRows)
 
