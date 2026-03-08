@@ -65,10 +65,6 @@ func TestCacheMap32(t *testing.T) {
 func TestCacheMap8(t *testing.T) {
 	cms := newCacheMap8(1024 * 1024)
 
-	if len(cms.maps) == 0 {
-		t.Fatal("expected at least one map")
-	}
-
 	if cms.entrySize() != 8 {
 		t.Fatalf("expected entrySize=8, got %d", cms.entrySize())
 	}
@@ -96,10 +92,6 @@ func TestCacheMap8(t *testing.T) {
 
 func TestCacheMap4(t *testing.T) {
 	cms := newCacheMap4(1024 * 1024)
-
-	if len(cms.maps) == 0 {
-		t.Fatal("expected at least one map")
-	}
 
 	if cms.entrySize() != 4 {
 		t.Fatalf("expected entrySize=4, got %d", cms.entrySize())

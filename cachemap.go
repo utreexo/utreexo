@@ -151,234 +151,129 @@ func (cms *cacheMap32) count() int {
 	return total
 }
 
-// cacheMap8 stores 8-byte entries (uint64 positions).
+// cacheMapBudget returns the largest map hint whose allocation fits within
+// maxBytes for a map with the given key and value sizes.
+func cacheMapBudget(maxBytes int64, keySize, valueSize int) int {
+	hint := sizehelper.HintForMapMemory(int(maxBytes), keySize, valueSize)
+	// HintForMapMemory returns the smallest hint that allocates >= maxBytes.
+	// We want the largest hint that fits within maxBytes.
+	if hint > 0 && int64(sizehelper.MapMemory(hint, keySize, valueSize)) > maxBytes {
+		hint--
+	}
+	if hint < 1 {
+		hint = 1
+	}
+	return hint
+}
+
+// cacheMap8 stores 8-byte entries (uint64 positions) in a single Go map.
 type cacheMap8 struct {
-	maps       []map[int64][8]byte
-	overflow   map[int64][8]byte
-	maxEntries []int
+	m      map[int64][8]byte
+	budget int
 }
 
 func newCacheMap8(maxBytes int64) *cacheMap8 {
 	if maxBytes <= 0 {
 		maxBytes = defaultMaxCacheMemory
 	}
-
-	hints, _ := sizehelper.CalcNumEntries(8, 8, maxBytes)
-
-	cms := &cacheMap8{
-		overflow: make(map[int64][8]byte),
+	budget := cacheMapBudget(maxBytes, 8, 8)
+	return &cacheMap8{
+		m:      make(map[int64][8]byte, budget),
+		budget: budget,
 	}
-	if len(hints) == 0 {
-		cms.maps = []map[int64][8]byte{make(map[int64][8]byte, 1)}
-		cms.maxEntries = []int{1}
-		return cms
-	}
-	for _, hint := range hints {
-		cms.maps = append(cms.maps, make(map[int64][8]byte, hint))
-		cms.maxEntries = append(cms.maxEntries, hint)
-	}
-	return cms
 }
 
 func (cms *cacheMap8) entrySize() int { return 8 }
 
 func (cms *cacheMap8) get(offset int64) ([]byte, bool) {
-	for _, m := range cms.maps {
-		if data, ok := m[offset]; ok {
-			return data[:], true
-		}
-	}
-	if data, ok := cms.overflow[offset]; ok {
+	if data, ok := cms.m[offset]; ok {
 		return data[:], true
 	}
 	return nil, false
 }
 
 func (cms *cacheMap8) put8(offset int64, data [8]byte) {
-	for _, m := range cms.maps {
-		if _, ok := m[offset]; ok {
-			m[offset] = data
-			return
-		}
-	}
-	if _, ok := cms.overflow[offset]; ok {
-		cms.overflow[offset] = data
-		return
-	}
-	for i, m := range cms.maps {
-		if len(m) < cms.maxEntries[i] {
-			m[offset] = data
-			return
-		}
-	}
-	cms.overflow[offset] = data
+	cms.m[offset] = data
 }
 
 func (cms *cacheMap8) delete(offset int64) {
-	for _, m := range cms.maps {
-		if _, ok := m[offset]; ok {
-			delete(m, offset)
-			return
-		}
-	}
-	delete(cms.overflow, offset)
+	delete(cms.m, offset)
 }
 
 func (cms *cacheMap8) deleteAbove(size int64) {
-	for _, m := range cms.maps {
-		for offset := range m {
-			if offset >= size {
-				delete(m, offset)
-			}
-		}
-	}
-	for offset := range cms.overflow {
+	for offset := range cms.m {
 		if offset >= size {
-			delete(cms.overflow, offset)
+			delete(cms.m, offset)
 		}
 	}
 }
 
 func (cms *cacheMap8) clear() {
-	for _, m := range cms.maps {
-		clear(m)
-	}
-	clear(cms.overflow)
+	clear(cms.m)
 }
 
 func (cms *cacheMap8) forEach(fn func(offset int64, data []byte)) {
-	for _, m := range cms.maps {
-		for offset, data := range m {
-			fn(offset, data[:])
-		}
-	}
-	for offset, data := range cms.overflow {
+	for offset, data := range cms.m {
 		fn(offset, data[:])
 	}
 }
 
-func (cms *cacheMap8) overflowed() bool { return len(cms.overflow) > 0 }
+func (cms *cacheMap8) overflowed() bool { return len(cms.m) > cms.budget }
 
-func (cms *cacheMap8) count() int {
-	total := len(cms.overflow)
-	for _, m := range cms.maps {
-		total += len(m)
-	}
-	return total
-}
+func (cms *cacheMap8) count() int { return len(cms.m) }
 
-// cacheMap4 stores 4-byte entries (int32 addIndex).
+// cacheMap4 stores 4-byte entries (int32 addIndex) in a single Go map.
 type cacheMap4 struct {
-	maps       []map[int64][4]byte
-	overflow   map[int64][4]byte
-	maxEntries []int
+	m      map[int64][4]byte
+	budget int
 }
 
 func newCacheMap4(maxBytes int64) *cacheMap4 {
 	if maxBytes <= 0 {
 		maxBytes = defaultMaxCacheMemory
 	}
-
-	hints, _ := sizehelper.CalcNumEntries(8, 4, maxBytes)
-
-	cms := &cacheMap4{
-		overflow: make(map[int64][4]byte),
+	budget := cacheMapBudget(maxBytes, 8, 4)
+	return &cacheMap4{
+		m:      make(map[int64][4]byte, budget),
+		budget: budget,
 	}
-	if len(hints) == 0 {
-		cms.maps = []map[int64][4]byte{make(map[int64][4]byte, 1)}
-		cms.maxEntries = []int{1}
-		return cms
-	}
-	for _, hint := range hints {
-		cms.maps = append(cms.maps, make(map[int64][4]byte, hint))
-		cms.maxEntries = append(cms.maxEntries, hint)
-	}
-	return cms
 }
 
 func (cms *cacheMap4) entrySize() int { return 4 }
 
 func (cms *cacheMap4) get(offset int64) ([]byte, bool) {
-	for _, m := range cms.maps {
-		if data, ok := m[offset]; ok {
-			return data[:], true
-		}
-	}
-	if data, ok := cms.overflow[offset]; ok {
+	if data, ok := cms.m[offset]; ok {
 		return data[:], true
 	}
 	return nil, false
 }
 
 func (cms *cacheMap4) put4(offset int64, data [4]byte) {
-	for _, m := range cms.maps {
-		if _, ok := m[offset]; ok {
-			m[offset] = data
-			return
-		}
-	}
-	if _, ok := cms.overflow[offset]; ok {
-		cms.overflow[offset] = data
-		return
-	}
-	for i, m := range cms.maps {
-		if len(m) < cms.maxEntries[i] {
-			m[offset] = data
-			return
-		}
-	}
-	cms.overflow[offset] = data
+	cms.m[offset] = data
 }
 
 func (cms *cacheMap4) delete(offset int64) {
-	for _, m := range cms.maps {
-		if _, ok := m[offset]; ok {
-			delete(m, offset)
-			return
-		}
-	}
-	delete(cms.overflow, offset)
+	delete(cms.m, offset)
 }
 
 func (cms *cacheMap4) deleteAbove(size int64) {
-	for _, m := range cms.maps {
-		for offset := range m {
-			if offset >= size {
-				delete(m, offset)
-			}
-		}
-	}
-	for offset := range cms.overflow {
+	for offset := range cms.m {
 		if offset >= size {
-			delete(cms.overflow, offset)
+			delete(cms.m, offset)
 		}
 	}
 }
 
 func (cms *cacheMap4) clear() {
-	for _, m := range cms.maps {
-		clear(m)
-	}
-	clear(cms.overflow)
+	clear(cms.m)
 }
 
 func (cms *cacheMap4) forEach(fn func(offset int64, data []byte)) {
-	for _, m := range cms.maps {
-		for offset, data := range m {
-			fn(offset, data[:])
-		}
-	}
-	for offset, data := range cms.overflow {
+	for offset, data := range cms.m {
 		fn(offset, data[:])
 	}
 }
 
-func (cms *cacheMap4) overflowed() bool { return len(cms.overflow) > 0 }
+func (cms *cacheMap4) overflowed() bool { return len(cms.m) > cms.budget }
 
-func (cms *cacheMap4) count() int {
-	total := len(cms.overflow)
-	for _, m := range cms.maps {
-		total += len(m)
-	}
-	return total
-}
+func (cms *cacheMap4) count() int { return len(cms.m) }
