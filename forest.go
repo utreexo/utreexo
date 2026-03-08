@@ -32,7 +32,7 @@ const (
 	forestDeletedFileName     = "forest_deleted.dat"      // deleted-leaf bitmap, 8 bytes per word
 	forestAddIndexFileName    = "forest_addindex.dat"     // add-batch index per leaf, 4 bytes each
 	forestJournalFileName     = "forest_journal.dat"      // WAL journal for crash recovery
-	forestMetaFileName        = "forest_meta.dat"         // recordMode + consistency hash
+	forestMetaFileName        = "forest_meta.dat"         // recordMode + numLeaves + consistency hash
 	forestPosMapCtrlFileName  = "forest_posmap_ctrl.dat"  // Swiss Table control bytes, mmap'd
 	forestPosMapSlotsFileName = "forest_posmap_slots.dat" // Swiss Table slot values, mmap'd
 )
@@ -240,7 +240,7 @@ type Forest struct {
 // newForest creates a new Forest backed by the given file.
 // The file should be an io.ReadWriteSeeker (e.g., *os.File).
 // addIndexFile stores the addIndex for each leaf; its size determines numLeaves (size / 4).
-// metaFile stores recordMode (bytes 0-31) and consistency hash (bytes 32-63).
+// metaFile stores recordMode (bytes 0-31), numLeaves (bytes 32-63), and consistency hash (bytes 64-95).
 // bitmap tracks deleted leaf positions; pass nil for a fresh forest. When using a WAL,
 // the bitmap is loaded by the WAL after recovery and passed here. For non-WAL usage,
 // load it with loadDeletedBitmap.
@@ -258,10 +258,10 @@ func newForest(file forestFile, addIndexFile, metaFile forestFile, bitmap *delet
 	}
 	numLeaves := uint64(addIdxSize / 4)
 
-	// Read consistency hash from metaFile (bytes 32-63, written atomically by WAL).
+	// Read consistency hash from metaFile (bytes 64-95, written atomically by WAL).
 	// Zero hash on first run or if metaFile is empty.
 	var consistencyHash [32]byte
-	metaFile.Seek(32, io.SeekStart)
+	metaFile.Seek(bestHashOffset, io.SeekStart)
 	metaFile.Read(consistencyHash[:])
 
 	// Create Swiss Table for position map. Size based on numLeaves (will resize if needed).
@@ -558,43 +558,58 @@ func (f *Forest) rebuildPositionMap() error {
 	return nil
 }
 
-// loadMetadata reads recordMode from metaFile (bytes 0-31, padded).
+// loadMetadata reads recordMode (bytes 0-31) and numLeaves (bytes 32-63)
+// from the metaFile. Each field occupies one 32-byte entry.
 func (f *Forest) loadMetadata() error {
 	_, err := f.metaFile.Seek(0, io.SeekStart)
 	if err != nil {
 		return err
 	}
-	var buf [32]byte
-	n, err := f.metaFile.Read(buf[:])
-	if err != nil && err != io.EOF {
+	var buf [64]byte
+	_, err = f.metaFile.Read(buf[:])
+	if err == io.EOF {
+		// Fresh database, no metadata yet.
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	if n >= 1 {
-		f.recordMode = buf[0] != 0
+	f.recordMode = buf[0] != 0
+	if metaLeaves := binary.LittleEndian.Uint64(buf[32:]); metaLeaves > 0 {
+		f.NumLeaves = metaLeaves
 	}
 	return nil
 }
 
-// saveRecordMode writes the recordMode to metaFile (bytes 0-31, padded).
-func (f *Forest) saveRecordMode() error {
+// saveMetadata writes recordMode (bytes 0-31) and numLeaves (bytes 32-63)
+// to the metaFile. Each field is written as a separate 32-byte entry to
+// match the cachedRWS entry size. Both writes go through the WAL-protected
+// cachedRWS, so they are crash-safe.
+func (f *Forest) saveMetadata() error {
 	_, err := f.metaFile.Seek(0, io.SeekStart)
 	if err != nil {
 		return err
 	}
 
-	var buf [32]byte
+	var recordModeBuf [32]byte
 	if f.recordMode {
-		buf[0] = 1
+		recordModeBuf[0] = 1
 	}
-	_, err = f.metaFile.Write(buf[:])
+	if _, err := f.metaFile.Write(recordModeBuf[:]); err != nil {
+		return err
+	}
+
+	var numLeavesBuf [32]byte
+	binary.LittleEndian.PutUint64(numLeavesBuf[:], f.NumLeaves)
+	_, err = f.metaFile.Write(numLeavesBuf[:])
 	return err
 }
 
-// ReadConsistencyHash reads the consistency hash from metaFile (bytes 32-63).
+// ReadConsistencyHash reads the consistency hash from metaFile (bytes 64-95).
 // The hash is written atomically by WAL.Flush().
 func (f *Forest) ReadConsistencyHash() ([32]byte, error) {
 	var hash [32]byte
-	_, err := f.metaFile.Seek(32, io.SeekStart)
+	_, err := f.metaFile.Seek(bestHashOffset, io.SeekStart)
 	if err != nil {
 		return hash, err
 	}
@@ -1434,7 +1449,7 @@ func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, error) {
 	}
 
 	f.recordMode = true
-	if err := f.saveRecordMode(); err != nil {
+	if err := f.saveMetadata(); err != nil {
 		return nil, fmt.Errorf("save record mode: %w", err)
 	}
 	return addIndexes, nil
@@ -1497,7 +1512,7 @@ func (f *Forest) HashAll() error {
 	}
 
 	f.recordMode = false
-	if err := f.saveRecordMode(); err != nil {
+	if err := f.saveMetadata(); err != nil {
 		return fmt.Errorf("save record mode: %w", err)
 	}
 

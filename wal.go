@@ -31,11 +31,14 @@ import (
 //	0 = main hash file     (cachedRWS)
 //	1 = addIndex file      (cachedRWS)
 //	2 = meta file          (cachedRWS)
+//	    Bytes  0-31: recordMode (byte 0), zero-padded
+//	    Bytes 32-63: numLeaves (bytes 32-39, LE), zero-padded
+//	    Bytes 64-95: consistency hash (written by WAL.Flush)
 //	3 = deleted bitmap file (dirty words from deletedBitmap)
 //
 // Flush sequence:
 //  1. Collect entries from cachedRWS caches + dirty bitmap words
-//  2. Add consistency hash entry (file 2, offset 32)
+//  2. Add consistency hash entry (file 2, offset 64)
 //  3. Write bestHash + entries + CRC32 checksum to journal
 //  4. Sync journal
 //  5. Apply entries to underlying files (including consistency hash)
@@ -48,7 +51,7 @@ import (
 //  2. Clear journal
 //  3. Load bitmap from recovered underlying file
 //
-// The consistency hash is written to file 2 (metaFile) at offset 32,
+// The consistency hash is written to file 2 (metaFile) at offset 64,
 // and can be read from there after recovery or normal startup.
 type wal struct {
 	journal    io.ReadWriteSeeker
@@ -74,7 +77,7 @@ const (
 
 	metaFileIdx    = 2  // journal fileIdx for the metadata file
 	deletedFileIdx = 3  // journal fileIdx for the deleted bitmap file
-	bestHashOffset = 32 // byte offset of the consistency hash in the metadata file
+	bestHashOffset = 64 // byte offset of the consistency hash in the metadata file
 )
 
 // walFile represents an underlying file with its entry size and cache config.
@@ -151,7 +154,7 @@ func (w *wal) SetOnFlush(fn func([32]byte) error) {
 }
 
 // Flush atomically commits all cached writes through the journal.
-// The bestHash is written to metaFile (file index 2) at offset 32.
+// The bestHash is written to metaFile (file index 2) at offset 64.
 func (w *wal) Flush(bestHash [32]byte) error {
 	// Serialize entries directly from caches to avoid intermediate allocations.
 	entriesBuf := w.serializeEntries(bestHash)
