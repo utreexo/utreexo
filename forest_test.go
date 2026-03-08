@@ -655,13 +655,13 @@ func TestForestNoFlushBeforeWAL(t *testing.T) {
 	journal := newMemFile()
 	underlyingFile := newMemFile()
 	underlyingDelFile := newMemFile()
-	underlyingAddIdxFile := newMemFile()
+	underlyingBlockCountsFile := newMemFile()
 	underlyingMetaFile := newMemFile()
 
 	// WAL wraps files in cachedRWS (except bitmap) so writes are buffered.
 	w, err := newWAL(journal, underlyingDelFile,
 		walFile{File: underlyingFile, EntrySize: 32},
-		walFile{File: underlyingAddIdxFile, EntrySize: 4},
+		walFile{File: underlyingBlockCountsFile, EntrySize: 4},
 		walFile{File: underlyingMetaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -703,8 +703,8 @@ func TestForestNoFlushBeforeWAL(t *testing.T) {
 		"main file should be untouched before Flush")
 	require.Equal(t, 0, len(underlyingDelFile.data),
 		"bitmap file should be untouched before Flush")
-	require.Equal(t, 0, len(underlyingAddIdxFile.data),
-		"addIndex file should be untouched before Flush")
+	require.Equal(t, 0, len(underlyingBlockCountsFile.data),
+		"block counts file should be untouched before Flush")
 
 	// Flush through WAL.
 	require.NoError(t, w.Flush([32]byte{}))
@@ -714,15 +714,15 @@ func TestForestNoFlushBeforeWAL(t *testing.T) {
 		"main file should have data after Flush")
 	require.NotEqual(t, 0, len(underlyingDelFile.data),
 		"bitmap file should have data after Flush")
-	require.NotEqual(t, 0, len(underlyingAddIdxFile.data),
-		"addIndex file should have data after Flush")
+	require.NotEqual(t, 0, len(underlyingBlockCountsFile.data),
+		"block counts file should have data after Flush")
 
 	// Restart a new forest from the flushed underlying files.
 	tmpDir2 := t.TempDir()
 	bitmap2, err := loadDeletedBitmap(underlyingDelFile)
 	require.NoError(t, err)
 	forest2, err := newForest(
-		underlyingFile, underlyingAddIdxFile, underlyingMetaFile, bitmap2,
+		underlyingFile, underlyingBlockCountsFile, underlyingMetaFile, bitmap2,
 		tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
 	)
 	require.NoError(t, err)
@@ -739,12 +739,12 @@ func TestForestCrashRecovery(t *testing.T) {
 	journal := newMemFile()
 	mainFile := newMemFile()
 	delFile := newMemFile()
-	addIdxFile := newMemFile()
+	blockCountsFile := newMemFile()
 	metaFile := newMemFile()
 
 	w, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -788,7 +788,7 @@ func TestForestCrashRecovery(t *testing.T) {
 	preRecoveryBitmap, err := loadDeletedBitmap(delFile)
 	require.NoError(t, err)
 	preRecoveryForest, err := newForest(
-		mainFile, addIdxFile, metaFile, preRecoveryBitmap,
+		mainFile, blockCountsFile, metaFile, preRecoveryBitmap,
 		tmpDir2+"/ctrl", tmpDir2+"/slots", 16,
 	)
 	require.NoError(t, err)
@@ -798,7 +798,7 @@ func TestForestCrashRecovery(t *testing.T) {
 	// ---- "Restart": new WAL recovers from journal ----
 	w2, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -828,12 +828,12 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	journal := newMemFile()
 	mainFile := newMemFile()
 	delFile := newMemFile()
-	addIdxFile := newMemFile()
+	blockCountsFile := newMemFile()
 	metaFile := newMemFile()
 
 	w, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -875,7 +875,7 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	// "Restart": new WAL should discard the incomplete journal.
 	w2, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -935,6 +935,60 @@ func TestForestVerifyDeletedLeaf(t *testing.T) {
 	}
 }
 
+// TestForestRebuildPositionMap verifies that rebuildPositionMap produces
+// the same positionMap entries as the original Modify calls. It builds a
+// forest over multiple blocks with varying add counts (including an empty
+// block), snapshots every leaf's packed (addIndex, position) value, then
+// clears and rebuilds the positionMap and checks all entries match.
+func TestForestRebuildPositionMap(t *testing.T) {
+	forest := newTestForest(t, 20)
+	sc := newSimChainWithSeed(0x12, 0x34)
+
+	// Run 10,000 blocks with adds and deletes.
+	for range 10_000 {
+		adds, _, delHashes := sc.NextBlock(5)
+		err := forest.Modify(adds, delHashes, Proof{})
+		require.NoError(t, err)
+	}
+
+	// Snapshot every leaf's packed value before rebuild.
+	type leafEntry struct {
+		hash   Hash
+		packed uint64
+	}
+	allLeaves := make([]leafEntry, 0, forest.NumLeaves)
+	for pos := uint64(0); pos < forest.NumLeaves; pos++ {
+		hash, err := forest.readHash(pos)
+		require.NoError(t, err)
+		packed, found, err := forest.positionMap.Get(hash)
+		require.NoError(t, err)
+		require.True(t, found, "leaf at pos %d not found before rebuild", pos)
+		allLeaves = append(allLeaves, leafEntry{hash: hash, packed: packed})
+	}
+
+	// Clear positionMap and rebuild.
+	for _, le := range allLeaves {
+		_, err := forest.positionMap.Delete(le.hash)
+		require.NoError(t, err)
+	}
+	require.Equal(t, uint64(0), forest.positionMap.Count(), "positionMap should be empty after clearing")
+
+	err := forest.rebuildPositionMap()
+	require.NoError(t, err)
+
+	// Verify every leaf has the same packed value as before.
+	require.Equal(t, uint64(len(allLeaves)), forest.positionMap.Count(),
+		"positionMap count mismatch after rebuild")
+	for _, le := range allLeaves {
+		got, found, err := forest.positionMap.Get(le.hash)
+		require.NoError(t, err)
+		require.True(t, found, "leaf not found after rebuild")
+		require.Equal(t, le.packed, got,
+			"packed value mismatch for leaf pos=%d addIndex=%d",
+			unpackPos(le.packed), unpackIndex(le.packed))
+	}
+}
+
 // TestForestUndoAfterRebuild verifies that Undo works correctly after
 // restarting a Forest with a fresh Swiss Table (forcing positionMap rebuild).
 // This catches bugs where the rebuilt positionMap is missing state needed
@@ -944,12 +998,12 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 	journal := newMemFile()
 	mainFile := newMemFile()
 	delFile := newMemFile()
-	addIdxFile := newMemFile()
+	blockCountsFile := newMemFile()
 	metaFile := newMemFile()
 
 	w, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -1011,7 +1065,7 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 	// Restart: new WAL + new tmpDir forces Swiss Table rebuild.
 	w2, err := newWAL(journal, delFile,
 		walFile{File: mainFile, EntrySize: 32},
-		walFile{File: addIdxFile, EntrySize: 4},
+		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
 	)
 	require.NoError(t, err)
@@ -1108,6 +1162,88 @@ func TestOpenForest(t *testing.T) {
 
 			require.Equal(t, roots, forest2.GetRoots(),
 				"roots should match after reopen")
+		})
+	}
+}
+
+// TestForestBlockCountsReconciliation verifies that newForest trims stale
+// block-count entries when the block counts file sum exceeds the
+// WAL-protected numLeaves in metaFile. This can happen after an
+// undo-without-flush crash.
+func TestForestBlockCountsReconciliation(t *testing.T) {
+	tests := []struct {
+		name           string
+		numLeaves      uint64
+		blockCounts    []uint32 // initial block counts file contents
+		expectedCounts []uint32 // block counts after reconciliation
+	}{
+		{
+			name:           "one stale entry",
+			numLeaves:      10,
+			blockCounts:    []uint32{5, 5, 3},
+			expectedCounts: []uint32{5, 5},
+		},
+		{
+			name:           "two stale entries",
+			numLeaves:      5,
+			blockCounts:    []uint32{5, 5, 3},
+			expectedCounts: []uint32{5},
+		},
+		{
+			name:           "no stale entries",
+			numLeaves:      13,
+			blockCounts:    []uint32{5, 5, 3},
+			expectedCounts: []uint32{5, 5, 3},
+		},
+		{
+			name:           "fresh database",
+			numLeaves:      0,
+			blockCounts:    nil,
+			expectedCounts: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// -- metaFile: recordMode (32 zero bytes) + numLeaves as LE uint64 in a 32-byte entry --
+			metaFile := newMemFile()
+			var metaBuf [64]byte
+			// bytes 0-31: recordMode (all zeros = not record mode)
+			// bytes 32-39: numLeaves as LE uint64
+			binary.LittleEndian.PutUint64(metaBuf[32:], tc.numLeaves)
+			metaFile.Write(metaBuf[:])
+
+			// -- blockCountsFile: uint32 LE entries --
+			blockCountsFile := newMemFile()
+			for _, c := range tc.blockCounts {
+				binary.Write(blockCountsFile, binary.LittleEndian, c)
+			}
+
+			// -- mainFile: write 32-byte hashes for each leaf so rebuildPositionMap can read them --
+			mainFile := newMemFile()
+			for i := uint64(0); i < tc.numLeaves; i++ {
+				h := testHashFromInt(int(i))
+				mainFile.Write(h[:])
+			}
+
+			// Call newForest which triggers reconciliation and rebuildPositionMap.
+			tmpDir := t.TempDir()
+			forest, err := newForest(
+				mainFile, blockCountsFile, metaFile, nil,
+				tmpDir+"/ctrl", tmpDir+"/slots", 10,
+			)
+			require.NoError(t, err)
+			require.Equal(t, tc.numLeaves, forest.NumLeaves)
+
+			// Read back block counts and verify they were trimmed.
+			got, err := readBlockCounts(blockCountsFile)
+			require.NoError(t, err)
+
+			if tc.expectedCounts == nil {
+				require.Empty(t, got, "expected no block counts")
+			} else {
+				require.Equal(t, tc.expectedCounts, got)
+			}
 		})
 	}
 }
