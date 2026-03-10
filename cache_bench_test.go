@@ -13,16 +13,6 @@ type cacheFactory struct {
 }
 
 var cacheFactories = []cacheFactory{
-	{"Map", func(es int, mb int64) cacheStore {
-		switch es {
-		case 4:
-			return newCacheMap4(mb)
-		case 8:
-			return newCacheMap8(mb)
-		default:
-			return newCacheMap32(mb)
-		}
-	}},
 	{"Page", func(es int, mb int64) cacheStore {
 		return newPageCacheStore(es, mb)
 	}},
