@@ -5,6 +5,41 @@ import (
 	"io"
 )
 
+const (
+	// defaultMaxCacheMemory is 64MB per cachedRWS.
+	defaultMaxCacheMemory = 64 << 20
+)
+
+// cacheStore is the interface for underlying cache storage.
+type cacheStore interface {
+	// get retrieves the data at the given offset. Returns false if not found.
+	get(offset int64) ([]byte, bool)
+
+	// put stores data at the given offset. len(data) must equal entrySize().
+	put(offset int64, data []byte)
+
+	// delete removes the entry at the given offset.
+	delete(offset int64)
+
+	// deleteAbove removes all entries at offsets >= size (used for truncation).
+	deleteAbove(size int64)
+
+	// clear removes all entries from the cache.
+	clear()
+
+	// forEach iterates over all cached entries, calling fn for each.
+	forEach(fn func(offset int64, data []byte))
+
+	// overflowed returns true if the cache has exceeded its memory budget.
+	overflowed() bool
+
+	// count returns the total number of cached entries.
+	count() int
+
+	// entrySize returns the fixed size of each entry in bytes.
+	entrySize() int
+}
+
 // cachedRWS wraps an io.ReadWriteSeeker, buffering all writes in memory.
 // Reads check the buffer first (exact offset match), then fall through to
 // the underlying file on miss. This enables atomic modifications: call
@@ -34,25 +69,10 @@ func newCachedRWS(underlying forestFile, entrySize int, maxCacheBytes int64) (*c
 	if err != nil {
 		return nil, err
 	}
-	if maxCacheBytes <= 0 {
-		maxCacheBytes = defaultMaxCacheMemory
-	}
-
-	var cache cacheStore
-	switch entrySize {
-	case 4:
-		cache = newCacheMap4(maxCacheBytes)
-	case 8:
-		cache = newCacheMap8(maxCacheBytes)
-	case 32:
-		cache = newCacheMap32(maxCacheBytes)
-	default:
-		return nil, fmt.Errorf("unsupported entry size %d (must be 4, 8, or 32)", entrySize)
-	}
 
 	return &cachedRWS{
 		underlying: underlying,
-		cache:      cache,
+		cache:      newMmapCacheStore(entrySize, maxCacheBytes),
 		pos:        size,
 		maxWritten: size,
 		baseSize:   size,
@@ -108,25 +128,10 @@ func (c *cachedRWS) Read(p []byte) (int, error) {
 // Write stores data in the cache at the current position. The data length
 // must match the cache's entry size (4, 8, or 32 bytes).
 func (c *cachedRWS) Write(p []byte) (int, error) {
-	switch cache := c.cache.(type) {
-	case *cacheMap4:
-		if len(p) != 4 {
-			return 0, fmt.Errorf("expected 4 bytes, got %d", len(p))
-		}
-		cache.put4(c.pos, [4]byte(p))
-	case *cacheMap8:
-		if len(p) != 8 {
-			return 0, fmt.Errorf("expected 8 bytes, got %d", len(p))
-		}
-		cache.put8(c.pos, [8]byte(p))
-	case *cacheMap32:
-		if len(p) != 32 {
-			return 0, fmt.Errorf("expected 32 bytes, got %d", len(p))
-		}
-		cache.put32(c.pos, [32]byte(p))
-	default:
-		return 0, fmt.Errorf("unsupported cache type %T", c.cache)
+	if len(p) != c.cache.entrySize() {
+		return 0, fmt.Errorf("expected %d bytes, got %d", c.cache.entrySize(), len(p))
 	}
+	c.cache.put(c.pos, p)
 
 	n := len(p)
 	c.pos += int64(n)
