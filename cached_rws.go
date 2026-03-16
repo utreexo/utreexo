@@ -5,6 +5,39 @@ import (
 	"io"
 )
 
+const (
+	// defaultMaxCacheMemory is 64MB per cachedRWS.
+	defaultMaxCacheMemory = 64 << 20
+)
+
+// cacheStore is the interface for underlying cache storage.
+type cacheStore interface {
+	// get retrieves the data at the given offset. Returns false if not found.
+	get(offset int64) ([]byte, bool)
+
+	// delete removes the entry at the given offset.
+	delete(offset int64)
+
+	// deleteAbove removes all entries at offsets >= size (used for truncation).
+	deleteAbove(size int64)
+
+	// clear removes all entries from the cache.
+	clear()
+
+	// forEach iterates over all cached entries, calling fn for each.
+	forEach(fn func(offset int64, data []byte))
+
+	// overflowed returns true if entries have spilled into the overflow map,
+	// indicating the cache has exceeded its memory budget.
+	overflowed() bool
+
+	// count returns the total number of cached entries.
+	count() int
+
+	// entrySize returns the fixed size of each entry in bytes (4, 8, or 32).
+	entrySize() int
+}
+
 // cachedRWS wraps an io.ReadWriteSeeker, buffering all writes in memory.
 // Reads check the buffer first (exact offset match), then fall through to
 // the underlying file on miss. This enables atomic modifications: call
