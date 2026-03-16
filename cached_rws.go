@@ -13,7 +13,12 @@ const (
 // cacheStore is the interface for underlying cache storage.
 type cacheStore interface {
 	// get retrieves the data at the given offset. Returns false if not found.
+	// The returned slice aliases internal storage and must not be retained
+	// or modified by the caller.
 	get(offset int64) ([]byte, bool)
+
+	// put stores data at the given offset. len(data) must equal entrySize().
+	put(offset int64, data []byte)
 
 	// delete removes the entry at the given offset.
 	delete(offset int64)
@@ -141,25 +146,10 @@ func (c *cachedRWS) Read(p []byte) (int, error) {
 // Write stores data in the cache at the current position. The data length
 // must match the cache's entry size (4, 8, or 32 bytes).
 func (c *cachedRWS) Write(p []byte) (int, error) {
-	switch cache := c.cache.(type) {
-	case *cacheMap4:
-		if len(p) != 4 {
-			return 0, fmt.Errorf("expected 4 bytes, got %d", len(p))
-		}
-		cache.put4(c.pos, [4]byte(p))
-	case *cacheMap8:
-		if len(p) != 8 {
-			return 0, fmt.Errorf("expected 8 bytes, got %d", len(p))
-		}
-		cache.put8(c.pos, [8]byte(p))
-	case *cacheMap32:
-		if len(p) != 32 {
-			return 0, fmt.Errorf("expected 32 bytes, got %d", len(p))
-		}
-		cache.put32(c.pos, [32]byte(p))
-	default:
-		return 0, fmt.Errorf("unsupported cache type %T", c.cache)
+	if len(p) != c.cache.entrySize() {
+		return 0, fmt.Errorf("expected %d bytes, got %d", c.cache.entrySize(), len(p))
 	}
+	c.cache.put(c.pos, p)
 
 	n := len(p)
 	c.pos += int64(n)
