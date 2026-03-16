@@ -33,8 +33,9 @@ func newCacheMap32(maxBytes int64) *cacheMap32 {
 
 func (cms *cacheMap32) entrySize() int { return 32 }
 
-func (cms *cacheMap32) put(offset int64, data []byte) {
+func (cms *cacheMap32) put(offset int64, data []byte) error {
 	cms.put32(offset, [32]byte(data))
+	return nil
 }
 
 func (cms *cacheMap32) get(offset int64) ([]byte, bool) {
@@ -153,8 +154,9 @@ func newCacheMap8(maxBytes int64) *cacheMap8 {
 
 func (cms *cacheMap8) entrySize() int { return 8 }
 
-func (cms *cacheMap8) put(offset int64, data []byte) {
+func (cms *cacheMap8) put(offset int64, data []byte) error {
 	cms.put8(offset, [8]byte(data))
+	return nil
 }
 
 func (cms *cacheMap8) get(offset int64) ([]byte, bool) {
@@ -273,8 +275,9 @@ func newCacheMap4(maxBytes int64) *cacheMap4 {
 
 func (cms *cacheMap4) entrySize() int { return 4 }
 
-func (cms *cacheMap4) put(offset int64, data []byte) {
+func (cms *cacheMap4) put(offset int64, data []byte) error {
 	cms.put4(offset, [4]byte(data))
+	return nil
 }
 
 func (cms *cacheMap4) get(offset int64) ([]byte, bool) {

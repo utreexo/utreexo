@@ -18,7 +18,7 @@ type cacheStore interface {
 	get(offset int64) ([]byte, bool)
 
 	// put stores data at the given offset. len(data) must equal entrySize().
-	put(offset int64, data []byte)
+	put(offset int64, data []byte) error
 
 	// delete removes the entry at the given offset.
 	delete(offset int64)
@@ -149,7 +149,9 @@ func (c *cachedRWS) Write(p []byte) (int, error) {
 	if len(p) != c.cache.entrySize() {
 		return 0, fmt.Errorf("expected %d bytes, got %d", c.cache.entrySize(), len(p))
 	}
-	c.cache.put(c.pos, p)
+	if err := c.cache.put(c.pos, p); err != nil {
+		return 0, err
+	}
 
 	n := len(p)
 	c.pos += int64(n)

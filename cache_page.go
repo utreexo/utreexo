@@ -100,7 +100,7 @@ func (p *pageCacheStore) get(offset int64) ([]byte, bool) {
 }
 
 // put writes data into the cache at the given byte offset, allocating a page if needed.
-func (p *pageCacheStore) put(offset int64, data []byte) {
+func (p *pageCacheStore) put(offset int64, data []byte) error {
 	pageNum, slot := p.pageAndSlot(offset)
 	pg := p.getPage(pageNum)
 	start := slot * p.entrySize_
@@ -110,6 +110,7 @@ func (p *pageCacheStore) put(offset int64, data []byte) {
 		pg.count++
 		p.totalCount++
 	}
+	return nil
 }
 
 // delete removes the cached entry at the given byte offset. If the page becomes
