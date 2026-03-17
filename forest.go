@@ -1663,7 +1663,7 @@ func (f *Forest) fetchProofHashes(delHashes []Hash) ([]Hash, error) {
 		return nil, err
 	}
 
-	proofHashes := make([]Hash, 0, (len(targets) * int(f.forestRows+1)))
+	proofHashes := make([]Hash, 0, (len(targets) * int(TreeRows(f.NumLeaves)+1)))
 	for row := uint8(0); row <= f.forestRows; row++ {
 		for i := 0; i < len(targets); i++ {
 			calcPos := targets[i].calcPos
