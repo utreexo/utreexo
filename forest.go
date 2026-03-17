@@ -101,7 +101,16 @@ func newDeletedBitmap(numLeaves uint64) *deletedBitmap {
 func (b *deletedBitmap) set(pos uint64) {
 	word := pos / 64
 	if word >= uint64(len(b.bits)) {
-		newBits := make([]uint64, word+1)
+		// Double the capacity to amortize growth. During IBD, NumLeaves
+		// increases every block and newly-added leaves may be deleted in
+		// the same block, so positions steadily exceed the initial size.
+		// Without doubling, every new high-water position would copy the
+		// entire bitmap (O(n²) total).
+		newLen := max(
+			uint64(len(b.bits))*2, // amortized doubling
+			max(64, word+1),       // floor of 64 words; at least enough for the requested position
+		)
+		newBits := make([]uint64, newLen)
 		copy(newBits, b.bits)
 		b.bits = newBits
 	}
@@ -1654,7 +1663,7 @@ func (f *Forest) fetchProofHashes(delHashes []Hash) ([]Hash, error) {
 		return nil, err
 	}
 
-	proofHashes := make([]Hash, 0, (len(targets) * int(f.forestRows+1)))
+	proofHashes := make([]Hash, 0, (len(targets) * int(TreeRows(f.NumLeaves)+1)))
 	for row := uint8(0); row <= f.forestRows; row++ {
 		for i := 0; i < len(targets); i++ {
 			calcPos := targets[i].calcPos

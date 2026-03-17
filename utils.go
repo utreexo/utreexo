@@ -19,10 +19,10 @@ func parentHash(l, r Hash) Hash {
 		return l
 	}
 
-	h := sha512.New512_256()
-	h.Write(l[:])
-	h.Write(r[:])
-	return *((*Hash)(h.Sum(nil)))
+	var buf [64]byte
+	copy(buf[:32], l[:])
+	copy(buf[32:], r[:])
+	return sha512.Sum512_256(buf[:])
 }
 
 // LeftChild gives you the position of the left child. The least significant
