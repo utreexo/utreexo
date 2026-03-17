@@ -32,14 +32,13 @@ type cacheStore interface {
 	// forEach iterates over all cached entries, calling fn for each.
 	forEach(fn func(offset int64, data []byte))
 
-	// overflowed returns true if entries have spilled into the overflow map,
-	// indicating the cache has exceeded its memory budget.
+	// overflowed returns true if the cache has exceeded its memory budget.
 	overflowed() bool
 
 	// count returns the total number of cached entries.
 	count() int
 
-	// entrySize returns the fixed size of each entry in bytes (4, 8, or 32).
+	// entrySize returns the fixed size of each entry in bytes.
 	entrySize() int
 }
 
@@ -65,7 +64,7 @@ type cachedRWS struct {
 // It seeks to the end of the underlying file to determine its current size,
 // which is needed for correct SeekEnd behavior (e.g. append patterns).
 // entrySize specifies the fixed record size (4, 8, or 32 bytes).
-// maxCacheBytes sets the threshold for signaling that a flush is needed.
+// maxCacheBytes controls when overflowed() signals that a flush is needed.
 // If maxCacheBytes is 0, defaultMaxCacheMemory is used.
 func newCachedRWS(underlying forestFile, entrySize int, maxCacheBytes int64) (*cachedRWS, error) {
 	size, err := underlying.Seek(0, io.SeekEnd)
@@ -76,16 +75,9 @@ func newCachedRWS(underlying forestFile, entrySize int, maxCacheBytes int64) (*c
 		maxCacheBytes = defaultMaxCacheMemory
 	}
 
-	var cache cacheStore
-	switch entrySize {
-	case 4:
-		cache = newCacheMap4(maxCacheBytes)
-	case 8:
-		cache = newCacheMap8(maxCacheBytes)
-	case 32:
-		cache = newCacheMap32(maxCacheBytes)
-	default:
-		return nil, fmt.Errorf("unsupported entry size %d (must be 4, 8, or 32)", entrySize)
+	cache, err := newMmapCacheStore(entrySize, maxCacheBytes)
+	if err != nil {
+		return nil, err
 	}
 
 	return &cachedRWS{
@@ -217,8 +209,7 @@ func (c *cachedRWS) Discard() {
 	c.pos = 0
 }
 
-// FlushNeeded returns true if the cache has exceeded its memory threshold
-// (i.e., entries have spilled into the overflow map).
+// FlushNeeded returns true if the cache has exceeded its memory threshold.
 func (c *cachedRWS) FlushNeeded() bool {
 	return c.cache.overflowed()
 }

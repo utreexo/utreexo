@@ -8,8 +8,8 @@ import "github.com/utreexo/utreexo/internal/mmapcache"
 // interface used by cachedRWS.
 type mmapCacheStore struct{ s *mmapcache.Store }
 
-func newMmapCacheStore(entrySize int, regionSize int64, maxBytes int64) (*mmapCacheStore, error) {
-	s, err := mmapcache.New(entrySize, regionSize, maxBytes)
+func newMmapCacheStore(entrySize int, maxBytes int64) (*mmapCacheStore, error) {
+	s, err := mmapcache.New(entrySize, maxBytes)
 	if err != nil {
 		return nil, err
 	}
