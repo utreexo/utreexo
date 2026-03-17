@@ -40,6 +40,9 @@ type cacheStore interface {
 
 	// entrySize returns the fixed size of each entry in bytes.
 	entrySize() int
+
+	// close releases any resources held by the cache (e.g. mmap regions).
+	close()
 }
 
 // cachedRWS wraps an io.ReadWriteSeeker, buffering all writes in memory.
@@ -207,6 +210,11 @@ func (c *cachedRWS) Discard() {
 	c.cache.clear()
 	c.maxWritten = c.baseSize
 	c.pos = 0
+}
+
+// Close releases resources held by the cache (e.g. mmap regions).
+func (c *cachedRWS) Close() {
+	c.cache.close()
 }
 
 // FlushNeeded returns true if the cache has exceeded its memory threshold.

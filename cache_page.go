@@ -186,3 +186,6 @@ func (p *pageCacheStore) overflowed() bool {
 func (p *pageCacheStore) count() int {
 	return p.totalCount
 }
+
+// close is a no-op for the page-based cache (no external resources to release).
+func (p *pageCacheStore) close() {}

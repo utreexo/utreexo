@@ -506,6 +506,7 @@ func (f *Forest) Close(bestHash [32]byte) error {
 		if err := f.wal.Flush(bestHash); err != nil {
 			firstErr = err
 		}
+		f.wal.Close()
 	}
 	if err := f.positionMap.Close(); err != nil && firstErr == nil {
 		firstErr = err

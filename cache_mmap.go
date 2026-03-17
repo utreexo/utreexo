@@ -25,3 +25,4 @@ func (m *mmapCacheStore) forEach(fn func(int64, []byte))      { m.s.ForEach(fn) 
 func (m *mmapCacheStore) overflowed() bool                    { return m.s.Overflowed() }
 func (m *mmapCacheStore) count() int                          { return m.s.Count() }
 func (m *mmapCacheStore) entrySize() int                      { return m.s.EntrySize() }
+func (m *mmapCacheStore) close()                              { m.s.Close() }

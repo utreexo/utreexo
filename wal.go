@@ -153,6 +153,13 @@ func (w *wal) SetOnFlush(fn func([32]byte) error) {
 	w.onFlush = fn
 }
 
+// Close releases resources held by the cached stores (e.g. mmap regions).
+func (w *wal) Close() {
+	for _, c := range w.cached {
+		c.Close()
+	}
+}
+
 // Flush atomically commits all cached writes through the journal.
 // The bestHash is written to metaFile (file index 2) at offset 64.
 func (w *wal) Flush(bestHash [32]byte) error {
