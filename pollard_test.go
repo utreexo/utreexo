@@ -878,8 +878,6 @@ func FuzzUndo(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, startLeaves uint8, modifyAdds uint8, delCount uint8) {
-		t.Parallel()
-
 		fuzzUndo(t, &Pollard{}, startLeaves, modifyAdds, delCount)
 		fuzzUndo(t, &MapPollard{}, startLeaves, modifyAdds, delCount)
 		fuzzUndo(t, &Forest{}, startLeaves, modifyAdds, delCount)
