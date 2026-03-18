@@ -16,9 +16,11 @@ const bitsPerWord = 64
 
 // maxRegionSize is the virtual address space allocated for the data region.
 // With MAP_ANONYMOUS|MAP_NORESERVE only touched pages consume physical memory,
-// so this can be very large without cost. 1 TB is well within the 128 TB
-// user-space limit on 64-bit Linux.
-const maxRegionSize = 1 << 40 // 1 TB
+// so this can be very large without cost. On 64-bit platforms the value is
+// 1 TB (well within the 128 TB user-space limit); on 32-bit it is 1 GB.
+//
+// NOTE: 32-bit support is untested and may fail at runtime.
+const maxRegionSize = 1 << (30 + 10*(^uint(0)>>63))
 
 // Store is an mmap-backed cache for fixed-size entries.
 type Store struct {
