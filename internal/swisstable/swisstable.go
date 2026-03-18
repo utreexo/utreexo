@@ -536,9 +536,23 @@ func (m *SwissPositionMap) resize() error {
 	// the old and new mmaps share the same underlying file (MAP_SHARED),
 	// so clearing stale ctrl bytes in the new mmap would also zero the
 	// overlapping region visible through the old mmap.
-	oldCtrl := make([]byte, oldNumSlots)
+	//
+	// We use anonymous mmap regions instead of Go heap allocations
+	// (make([]byte, …)) so the memory is managed by the kernel, not Go's
+	// GC. This avoids multi-GB GC pressure during repeated resizes; each
+	// Munmap returns the pages to the OS immediately.
+	oldCtrl, err := mmapAnon(int(oldNumSlots))
+	if err != nil {
+		return fmt.Errorf("resize alloc oldCtrl: %w", err)
+	}
+	defer munmapAnon(oldCtrl)
 	copy(oldCtrl, m.ctrl)
-	oldSlots := make([]byte, oldNumSlots*8)
+
+	oldSlots, err := mmapAnon(int(oldNumSlots) * 8)
+	if err != nil {
+		return fmt.Errorf("resize alloc oldSlots: %w", err)
+	}
+	defer munmapAnon(oldSlots)
 	copy(oldSlots, m.slots)
 
 	// Invalidate consistency hash before modifying files. If the process
