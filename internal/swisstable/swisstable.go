@@ -27,6 +27,7 @@ import (
 	"io"
 	"math/bits"
 	"os"
+	"slices"
 	"syscall"
 )
 
@@ -555,6 +556,28 @@ func (m *SwissPositionMap) resize() error {
 	defer munmapAnon(oldSlots)
 	copy(oldSlots, m.slots)
 
+	// Collect all occupied packed slot values and sort by data file
+	// position so that hash reads are sequential rather than random.
+	// Sequential access benefits from OS readahead and is orders of
+	// magnitude faster than random 32-byte reads across a multi-GB file.
+	entries := make([]uint64, 0, m.count)
+	for i, c := range oldCtrl {
+		if c&ctrlFull != 0 {
+			entries = append(entries, binary.LittleEndian.Uint64(oldSlots[i*8:]))
+		}
+	}
+	posMask := m.posMask
+	slices.SortFunc(entries, func(a, b uint64) int {
+		ap, bp := a&posMask, b&posMask
+		if ap < bp {
+			return -1
+		}
+		if ap > bp {
+			return 1
+		}
+		return 0
+	})
+
 	// Invalidate consistency hash before modifying files. If the process
 	// crashes during resize, the zero header ensures rebuild on restart.
 	// Write through the fd (not the mmap) so that File.Sync is guaranteed
@@ -607,31 +630,28 @@ func (m *SwissPositionMap) resize() error {
 	// lookups.
 	clear(newCtrl)
 
-	// Rehash into the new mmaps WITHOUT updating m's fields. On failure we
-	// restore the old ctrl/slots from saved copies so the map remains usable
-	// for the current session. The zeroed consistency hash ensures a full
-	// rebuild on restart.
-	var count uint64
-	for i, c := range oldCtrl {
-		if c&ctrlFull != 0 {
-			packed := binary.LittleEndian.Uint64(oldSlots[i*8:])
-			var hash [32]byte
-			pos := int64((packed & m.posMask) * 32)
-			if _, err := m.dataFile.ReadAt(hash[:], pos); err != nil {
-				copy(m.ctrl, oldCtrl)
-				copy(m.slots, oldSlots)
-				syscall.Munmap(newCtrlMmap)
-				syscall.Munmap(newSlotsMmap)
-				return fmt.Errorf("resize rehash read: %w", err)
-			}
-			if err := rehashInsert(newCtrl, newSlots, newNumGroups, hash, packed); err != nil {
-				copy(m.ctrl, oldCtrl)
-				copy(m.slots, oldSlots)
-				syscall.Munmap(newCtrlMmap)
-				syscall.Munmap(newSlotsMmap)
-				return fmt.Errorf("resize rehash: %w", err)
-			}
-			count++
+	// Rehash into the new mmaps WITHOUT updating m's fields. Entries are
+	// iterated in sorted position order so hash reads are sequential. On
+	// failure we restore the old ctrl/slots from saved copies so the map
+	// remains usable for the current session. The zeroed consistency hash
+	// ensures a full rebuild on restart.
+	restoreOld := func() {
+		copy(m.ctrl, oldCtrl)
+		copy(m.slots, oldSlots)
+		syscall.Munmap(newCtrlMmap)
+		syscall.Munmap(newSlotsMmap)
+	}
+
+	for _, packed := range entries {
+		var hash [32]byte
+		pos := int64((packed & posMask) * 32)
+		if _, err := m.dataFile.ReadAt(hash[:], pos); err != nil {
+			restoreOld()
+			return fmt.Errorf("resize rehash read: %w", err)
+		}
+		if err := rehashInsert(newCtrl, newSlots, newNumGroups, hash, packed); err != nil {
+			restoreOld()
+			return fmt.Errorf("resize rehash: %w", err)
 		}
 	}
 
@@ -645,7 +665,7 @@ func (m *SwissPositionMap) resize() error {
 	m.slots = newSlots
 	m.numSlots = newNumSlots
 	m.numGroups = newNumGroups
-	m.count = count
+	m.count = uint64(len(entries))
 
 	syscall.Munmap(oldCtrlMmap)
 	syscall.Munmap(oldSlotsMmap)
