@@ -28,8 +28,11 @@ type SwissPositionMap struct {
 // On non-unix platforms this always returns needsRebuild=true since the
 // map is not persisted.
 func NewSwissPositionMap(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHash [32]byte, dataFile io.ReaderAt, posMask uint64) (*SwissPositionMap, bool, error) {
+	// Cap the presize hint to avoid multi-GB allocation on platforms
+	// where this in-memory fallback is used. The map grows as needed.
+	hint := min(expectedEntries, 1<<16)
 	return &SwissPositionMap{
-		m:        make(map[miniHash]uint64, expectedEntries),
+		m:        make(map[miniHash]uint64, hint),
 		dataFile: dataFile,
 	}, true, nil
 }
