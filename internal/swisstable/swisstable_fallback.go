@@ -78,3 +78,30 @@ func (m *SwissPositionMap) Close() error {
 func (m *SwissPositionMap) SetConsistencyHash(hash [32]byte) error {
 	return nil
 }
+
+// RebuildEntry holds a hash and packed value for bulk insertion.
+type RebuildEntry struct {
+	hash   [32]byte
+	packed uint64
+}
+
+// PrepareEntry computes a RebuildEntry for bulk rebuild.
+func (m *SwissPositionMap) PrepareEntry(hash [32]byte, packed uint64) RebuildEntry {
+	return RebuildEntry{
+		hash:   hash,
+		packed: packed,
+	}
+}
+
+// PrepareRebuild clears the map for a fresh bulk rebuild.
+func (m *SwissPositionMap) PrepareRebuild() {
+	clear(m.m)
+}
+
+// InsertBatch inserts a batch of entries into the map.
+func (m *SwissPositionMap) InsertBatch(entries []RebuildEntry) error {
+	for _, e := range entries {
+		m.m[mini(e.hash)] = e.packed
+	}
+	return nil
+}

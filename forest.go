@@ -584,6 +584,14 @@ func (f *Forest) rebuildPositionMap() error {
 		hashErrCh <- nil
 	}()
 
+	// Collect entries into a fixed-size buffer, then sort by group and
+	// insert each chunk for sequential ctrl/slots access (TLB-friendly).
+	// The chunk size caps memory at ~256MB regardless of NumLeaves.
+	const rebuildChunkSize = 1 << 24 // ~16M entries × 16 bytes = 256MB
+	entries := make([]swisstable.RebuildEntry, 0, min(f.NumLeaves, rebuildChunkSize))
+
+	f.positionMap.PrepareRebuild()
+
 	// Linear scan: advance blockIdx as leafPos crosses block boundaries.
 	blockIdx := 0
 	blockStart := uint64(0)
@@ -602,9 +610,21 @@ func (f *Forest) rebuildPositionMap() error {
 			var hash Hash
 			copy(hash[:], hashBatch.data[i*32:])
 
-			if err := f.positionMap.Set(hash, packPosIndex(leafPos, addIndex)); err != nil {
-				return fmt.Errorf("positionMap.Set at %d: %w", leafPos, err)
+			entries = append(entries, f.positionMap.PrepareEntry(hash, packPosIndex(leafPos, addIndex)))
+
+			if len(entries) >= rebuildChunkSize {
+				if err := f.positionMap.InsertBatch(entries); err != nil {
+					return fmt.Errorf("insert batch at pos %d: %w", leafPos, err)
+				}
+				entries = entries[:0]
 			}
+		}
+	}
+
+	// Flush remaining entries.
+	if len(entries) > 0 {
+		if err := f.positionMap.InsertBatch(entries); err != nil {
+			return fmt.Errorf("insert final batch: %w", err)
 		}
 	}
 

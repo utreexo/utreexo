@@ -497,6 +497,70 @@ func (m *SwissPositionMap) clearSlot(i uint64) {
 // Internal: Resize
 // ----------------------------------------------------------------------------
 
+// RebuildEntry holds precomputed hash components for sorted bulk insertion.
+type RebuildEntry struct {
+	group  uint32 // H1 % numGroups
+	h2     byte   // H2 fingerprint (with ctrlFull bit set)
+	packed uint64 // packed position + addIndex
+}
+
+// PrepareEntry computes the group and H2 from a hash for bulk rebuild.
+func (m *SwissPositionMap) PrepareEntry(hash [32]byte, packed uint64) RebuildEntry {
+	h1, h2 := splitHash(hash)
+	return RebuildEntry{
+		group:  uint32(h1 % m.numGroups),
+		h2:     h2,
+		packed: packed,
+	}
+}
+
+// PrepareRebuild clears the table for a fresh bulk rebuild. Must be called
+// before InsertBatch when the table may contain stale data or tombstones.
+func (m *SwissPositionMap) PrepareRebuild() {
+	clear(m.ctrl)
+	m.count = 0
+}
+
+// InsertBatch sorts entries by group and inserts them for sequential ctrl/slots
+// access. Call PrepareRebuild once before the first InsertBatch. The entries
+// slice is sorted in place.
+func (m *SwissPositionMap) InsertBatch(entries []RebuildEntry) error {
+	slices.SortFunc(entries, func(a, b RebuildEntry) int {
+		if a.group < b.group {
+			return -1
+		}
+		if a.group > b.group {
+			return 1
+		}
+		return 0
+	})
+
+	for _, e := range entries {
+		if err := rehashInsertPrecomputed(m.ctrl, m.slots, m.numGroups, uint64(e.group), e.h2, e.packed); err != nil {
+			return err
+		}
+	}
+
+	m.count += uint64(len(entries))
+	return nil
+}
+
+// rehashInsertPrecomputed inserts a precomputed entry into explicit ctrl/slots
+// buffers. Like rehashInsert but skips splitHash since H1 group and H2 are
+// already computed.
+func rehashInsertPrecomputed(ctrl []byte, slots []byte, numGroups uint64, startGroup uint64, h2 byte, packed uint64) error {
+	for i := range numGroups {
+		base := ((startGroup + i) % numGroups) * groupSize
+		if avail := matchEmpty(ctrl[base : base+groupSize]); avail != 0 {
+			slot := base + uint64(bits.TrailingZeros16(avail))
+			ctrl[slot] = h2
+			binary.LittleEndian.PutUint64(slots[slot*8:], packed)
+			return nil
+		}
+	}
+	return fmt.Errorf("swiss table rehash precomputed: no slot available (groups=%d)", numGroups)
+}
+
 // rehashInsert inserts a hash->packed mapping into explicit ctrl/slots buffers.
 // It skips duplicate checking because it is only used during resize where the
 // target table is known to be empty. This also avoids depending on m's fields,
