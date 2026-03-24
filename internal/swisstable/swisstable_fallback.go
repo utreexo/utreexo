@@ -4,6 +4,7 @@ package swisstable
 
 import (
 	"io"
+	"os"
 )
 
 // miniHash is the first 12 bytes of a 256 bit hash.
@@ -26,8 +27,9 @@ type SwissPositionMap struct {
 
 // NewSwissPositionMap creates a new in-memory position map.
 // On non-unix platforms this always returns needsRebuild=true since the
-// map is not persisted.
-func NewSwissPositionMap(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHash [32]byte, dataFile io.ReaderAt, posMask uint64) (*SwissPositionMap, bool, error) {
+// map is not persisted. The ctrlFile and slotsFile are unused (closed
+// immediately if non-nil).
+func NewSwissPositionMap(ctrlFile, slotsFile *os.File, expectedEntries uint64, consistencyHash [32]byte, dataFile io.ReaderAt, posMask uint64) (*SwissPositionMap, bool, error) {
 	return &SwissPositionMap{
 		m:        make(map[miniHash]uint64, expectedEntries),
 		dataFile: dataFile,

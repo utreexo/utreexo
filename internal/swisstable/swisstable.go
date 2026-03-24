@@ -57,8 +57,6 @@ type SwissPositionMap struct {
 	// File handles for mmap
 	ctrlFile  *os.File
 	slotsFile *os.File
-	ctrlPath  string
-	slotsPath string
 
 	// Table sizing
 	numSlots  uint64
@@ -90,12 +88,14 @@ type SwissPositionMap struct {
 // Returns the map and a bool indicating if rebuild is needed (consistency hash mismatch).
 // Pass a zero hash to force rebuild. posMask is applied to packed values to
 // extract the leaf position for hash verification against dataFile.
-func NewSwissPositionMap(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHash [32]byte, dataFile io.ReaderAt, posMask uint64) (*SwissPositionMap, bool, error) {
+// The caller must open ctrlFile and slotsFile before calling this function;
+// the SwissPositionMap takes ownership and will close them in Close().
+func NewSwissPositionMap(ctrlFile, slotsFile *os.File, expectedEntries uint64, consistencyHash [32]byte, dataFile io.ReaderAt, posMask uint64) (*SwissPositionMap, bool, error) {
 	if dataFile == nil {
 		return nil, false, fmt.Errorf("dataFile must not be nil")
 	}
 
-	ctrlFile, slotsFile, ctrlMmap, slotsBytes, numSlots, needsRebuild, err := openFiles(ctrlPath, slotsPath, expectedEntries, consistencyHash)
+	ctrlMmap, slotsBytes, numSlots, needsRebuild, err := openFiles(ctrlFile, slotsFile, expectedEntries, consistencyHash)
 	if err != nil {
 		return nil, false, err
 	}
@@ -121,8 +121,6 @@ func NewSwissPositionMap(ctrlPath, slotsPath string, expectedEntries uint64, con
 		slots:        slots,
 		ctrlFile:     ctrlFile,
 		slotsFile:    slotsFile,
-		ctrlPath:     ctrlPath,
-		slotsPath:    slotsPath,
 		numSlots:     numSlots,
 		numGroups:    numSlots / groupSize,
 		dataFile:     dataFile,
@@ -137,36 +135,22 @@ func NewSwissPositionMap(ctrlPath, slotsPath string, expectedEntries uint64, con
 	return m, needsRebuild, nil
 }
 
-// openFiles opens and mmaps the ctrl and slots files, wiping both if either
+// openFiles mmaps the ctrl and slots files, wiping both if either
 // are inconsistent. Returns the actual numSlots and needsRebuild=true if files
 // were wiped (hash mismatch, size mismatch, or zero consistency hash).
 // expectedEntries is only used to size new files when rebuilding; consistent
 // files are reused at their on-disk size regardless of expectedEntries.
-func openFiles(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHash [32]byte) (
-	ctrlFile, slotsFile *os.File, ctrlMmap, slotsBytes []byte, numSlots uint64, needsRebuild bool, err error) {
-
-	// Open both files.
-	ctrlFile, err = os.OpenFile(ctrlPath, os.O_RDWR|os.O_CREATE, 0644)
-	if err != nil {
-		return nil, nil, nil, nil, 0, false, fmt.Errorf("open ctrl: %w", err)
-	}
-	slotsFile, err = os.OpenFile(slotsPath, os.O_RDWR|os.O_CREATE, 0644)
-	if err != nil {
-		ctrlFile.Close()
-		return nil, nil, nil, nil, 0, false, fmt.Errorf("open slots: %w", err)
-	}
+// The caller must open the files before calling this function.
+func openFiles(ctrlFile, slotsFile *os.File, expectedEntries uint64, consistencyHash [32]byte) (
+	ctrlMmap, slotsBytes []byte, numSlots uint64, needsRebuild bool, err error) {
 
 	ctrlFi, err := ctrlFile.Stat()
 	if err != nil {
-		ctrlFile.Close()
-		slotsFile.Close()
-		return nil, nil, nil, nil, 0, false, err
+		return nil, nil, 0, false, err
 	}
 	slotsFi, err := slotsFile.Stat()
 	if err != nil {
-		ctrlFile.Close()
-		slotsFile.Close()
-		return nil, nil, nil, nil, 0, false, err
+		return nil, nil, 0, false, err
 	}
 
 	needsRebuild = true
@@ -207,14 +191,10 @@ func openFiles(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHa
 			{slotsFile, slotsSize, "slots"},
 		} {
 			if err := wipe.f.Truncate(0); err != nil {
-				ctrlFile.Close()
-				slotsFile.Close()
-				return nil, nil, nil, nil, 0, false, fmt.Errorf("truncate %s: %w", wipe.name, err)
+				return nil, nil, 0, false, fmt.Errorf("truncate %s: %w", wipe.name, err)
 			}
 			if err := wipe.f.Truncate(wipe.size); err != nil {
-				ctrlFile.Close()
-				slotsFile.Close()
-				return nil, nil, nil, nil, 0, false, fmt.Errorf("extend %s: %w", wipe.name, err)
+				return nil, nil, 0, false, fmt.Errorf("extend %s: %w", wipe.name, err)
 			}
 		}
 	}
@@ -225,20 +205,16 @@ func openFiles(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHa
 	ctrlMmap, err = syscall.Mmap(int(ctrlFile.Fd()), 0, int(ctrlSize),
 		syscall.PROT_READ|syscall.PROT_WRITE, mmapFlags)
 	if err != nil {
-		ctrlFile.Close()
-		slotsFile.Close()
-		return nil, nil, nil, nil, 0, false, fmt.Errorf("mmap ctrl: %w", err)
+		return nil, nil, 0, false, fmt.Errorf("mmap ctrl: %w", err)
 	}
 	slotsBytes, err = syscall.Mmap(int(slotsFile.Fd()), 0, int(slotsSize),
 		syscall.PROT_READ|syscall.PROT_WRITE, mmapFlags)
 	if err != nil {
 		syscall.Munmap(ctrlMmap)
-		ctrlFile.Close()
-		slotsFile.Close()
-		return nil, nil, nil, nil, 0, false, fmt.Errorf("mmap slots: %w", err)
+		return nil, nil, 0, false, fmt.Errorf("mmap slots: %w", err)
 	}
 
-	return ctrlFile, slotsFile, ctrlMmap, slotsBytes, numSlots, needsRebuild, nil
+	return ctrlMmap, slotsBytes, numSlots, needsRebuild, nil
 }
 
 // roundUpGroupSize rounds n up to the nearest multiple of groupSize.
