@@ -27,7 +27,6 @@ import (
 	"io"
 	"math/bits"
 	"os"
-	"slices"
 	"syscall"
 )
 
@@ -128,6 +127,11 @@ func NewSwissPositionMap(ctrlPath, slotsPath string, expectedEntries uint64, con
 // files are reused at their on-disk size regardless of expectedEntries.
 func openFiles(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHash [32]byte) (
 	ctrlFile, slotsFile *os.File, ctrlMmap, slotsBytes []byte, numSlots uint64, needsRebuild bool, err error) {
+
+	// Remove stale temp files from a previous resize that was interrupted
+	// by a crash. These are harmless but waste disk space.
+	os.Remove(ctrlPath + ".resize")
+	os.Remove(slotsPath + ".resize")
 
 	// Open both files.
 	ctrlFile, err = os.OpenFile(ctrlPath, os.O_RDWR|os.O_CREATE, 0644)
@@ -517,6 +521,29 @@ func rehashInsert(ctrl []byte, slots []byte, numGroups uint64, hash [32]byte, pa
 	return fmt.Errorf("swiss table rehash: no slot available (groups=%d)", numGroups)
 }
 
+// cleanupResizeFiles is a helper that unmaps, closes, and removes temporary
+// resize files. Any nil arguments are skipped.
+func cleanupResizeFiles(ctrlMmap, slotsMmap []byte, ctrlFile, slotsFile *os.File, ctrlPath, slotsPath string) {
+	if ctrlMmap != nil {
+		syscall.Munmap(ctrlMmap)
+	}
+	if slotsMmap != nil {
+		syscall.Munmap(slotsMmap)
+	}
+	if ctrlFile != nil {
+		ctrlFile.Close()
+	}
+	if slotsFile != nil {
+		slotsFile.Close()
+	}
+	if ctrlPath != "" {
+		os.Remove(ctrlPath)
+	}
+	if slotsPath != "" {
+		os.Remove(slotsPath)
+	}
+}
+
 // resize doubles the table and rehashes all entries.
 //
 // This operation is not crash-safe in isolation. If the process crashes
@@ -524,59 +551,14 @@ func rehashInsert(ctrl []byte, slots []byte, numGroups uint64, hash [32]byte, pa
 // hash is invalidated before resizing so that a crash triggers a full rebuild
 // from the data file on restart.
 //
-// Rehashing is performed into the new mmaps without updating m's fields first.
-// Only after a successful rehash does the swap occur. On failure the old
-// ctrl/slots are restored from saved copies so the map remains usable for the
-// current session. The zeroed consistency hash ensures rebuild on restart.
+// Rehashing uses separate temporary files for the new table so that old and
+// new mmaps are backed by different files. This allows reading directly from
+// the old mmaps during rehash without any heap copies of the old data. On
+// success the temp files are renamed over the originals. On failure the old
+// mmaps are still intact so the map remains usable for the current session.
 func (m *SwissPositionMap) resize() error {
-	oldNumSlots := m.numSlots
-	newNumSlots := oldNumSlots * 2
+	newNumSlots := m.numSlots * 2
 	newNumGroups := newNumSlots / groupSize
-
-	// Copy old data before remapping. Both copies are necessary because
-	// the old and new mmaps share the same underlying file (MAP_SHARED),
-	// so clearing stale ctrl bytes in the new mmap would also zero the
-	// overlapping region visible through the old mmap.
-	//
-	// We use anonymous mmap regions instead of Go heap allocations
-	// (make([]byte, …)) so the memory is managed by the kernel, not Go's
-	// GC. This avoids multi-GB GC pressure during repeated resizes; each
-	// Munmap returns the pages to the OS immediately.
-	oldCtrl, err := mmapAnon(int(oldNumSlots))
-	if err != nil {
-		return fmt.Errorf("resize alloc oldCtrl: %w", err)
-	}
-	defer munmapAnon(oldCtrl)
-	copy(oldCtrl, m.ctrl)
-
-	oldSlots, err := mmapAnon(int(oldNumSlots) * 8)
-	if err != nil {
-		return fmt.Errorf("resize alloc oldSlots: %w", err)
-	}
-	defer munmapAnon(oldSlots)
-	copy(oldSlots, m.slots)
-
-	// Collect all occupied packed slot values and sort by data file
-	// position so that hash reads are sequential rather than random.
-	// Sequential access benefits from OS readahead and is orders of
-	// magnitude faster than random 32-byte reads across a multi-GB file.
-	entries := make([]uint64, 0, m.count)
-	for i, c := range oldCtrl {
-		if c&ctrlFull != 0 {
-			entries = append(entries, binary.LittleEndian.Uint64(oldSlots[i*8:]))
-		}
-	}
-	posMask := m.posMask
-	slices.SortFunc(entries, func(a, b uint64) int {
-		ap, bp := a&posMask, b&posMask
-		if ap < bp {
-			return -1
-		}
-		if ap > bp {
-			return 1
-		}
-		return 0
-	})
 
 	// Invalidate consistency hash before modifying files. If the process
 	// crashes during resize, the zero header ensures rebuild on restart.
@@ -596,79 +578,105 @@ func (m *SwissPositionMap) resize() error {
 		return fmt.Errorf("resize fsync slots: %w", err)
 	}
 
-	// Extend files (both include header)
+	// Create temporary files for the new table. Using separate files means
+	// old and new mmaps don't share an underlying file, so we can read
+	// directly from the old mmaps during rehash with zero heap copies.
+	newCtrlPath := m.ctrlPath + ".resize"
+	newSlotsPath := m.slotsPath + ".resize"
+
+	newCtrlFile, err := os.OpenFile(newCtrlPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("resize create ctrl temp: %w", err)
+	}
+	newSlotsFile, err := os.OpenFile(newSlotsPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		newCtrlFile.Close()
+		os.Remove(newCtrlPath)
+		return fmt.Errorf("resize create slots temp: %w", err)
+	}
+
 	newCtrlFileSize := int64(fileHeaderSize + newNumSlots)
-	if err := m.ctrlFile.Truncate(newCtrlFileSize); err != nil {
-		return fmt.Errorf("resize ctrl: %w", err)
-	}
 	newSlotsFileSize := int64(fileHeaderSize + newNumSlots*8)
-	if err := m.slotsFile.Truncate(newSlotsFileSize); err != nil {
-		return fmt.Errorf("resize slots: %w", err)
+
+	if err := newCtrlFile.Truncate(newCtrlFileSize); err != nil {
+		cleanupResizeFiles(nil, nil, newCtrlFile, newSlotsFile, newCtrlPath, newSlotsPath)
+		return fmt.Errorf("resize truncate ctrl temp: %w", err)
+	}
+	if err := newSlotsFile.Truncate(newSlotsFileSize); err != nil {
+		cleanupResizeFiles(nil, nil, newCtrlFile, newSlotsFile, newCtrlPath, newSlotsPath)
+		return fmt.Errorf("resize truncate slots temp: %w", err)
 	}
 
-	// Remap (both mmaps include header).
-	// If the second mmap fails, unmap the first to avoid a leak.
-	newCtrlMmap, err := syscall.Mmap(int(m.ctrlFile.Fd()), 0, int(newCtrlFileSize),
+	// Mmap the temp files. Truncate zero-fills new files, so ctrl bytes
+	// start as ctrlEmpty (0x00) — no explicit clear needed.
+	newCtrlMmap, err := syscall.Mmap(int(newCtrlFile.Fd()), 0, int(newCtrlFileSize),
 		syscall.PROT_READ|syscall.PROT_WRITE, mmapFlags)
 	if err != nil {
-		return fmt.Errorf("resize ctrl mmap: %w", err)
+		cleanupResizeFiles(nil, nil, newCtrlFile, newSlotsFile, newCtrlPath, newSlotsPath)
+		return fmt.Errorf("resize ctrl temp mmap: %w", err)
 	}
-	newSlotsMmap, err := syscall.Mmap(int(m.slotsFile.Fd()), 0, int(newSlotsFileSize),
+	newSlotsMmap, err := syscall.Mmap(int(newSlotsFile.Fd()), 0, int(newSlotsFileSize),
 		syscall.PROT_READ|syscall.PROT_WRITE, mmapFlags)
 	if err != nil {
-		syscall.Munmap(newCtrlMmap)
-		return fmt.Errorf("resize slots mmap: %w", err)
+		cleanupResizeFiles(newCtrlMmap, nil, newCtrlFile, newSlotsFile, newCtrlPath, newSlotsPath)
+		return fmt.Errorf("resize slots temp mmap: %w", err)
 	}
 
-	// Slice past headers.
 	newCtrl := newCtrlMmap[fileHeaderSize:]
 	newSlots := newSlotsMmap[fileHeaderSize:]
 
-	// Clear stale ctrl bytes from the old table. Truncate only zero-fills
-	// the extension; the overlapping region retains old ctrlFull/ctrlDeleted
-	// bytes that would appear as ghost entries to rehashInsert and later
-	// lookups.
-	clear(newCtrl)
-
-	// Rehash into the new mmaps WITHOUT updating m's fields. Entries are
-	// iterated in sorted position order so hash reads are sequential. On
-	// failure we restore the old ctrl/slots from saved copies so the map
-	// remains usable for the current session. The zeroed consistency hash
-	// ensures a full rebuild on restart.
-	restoreOld := func() {
-		copy(m.ctrl, oldCtrl)
-		copy(m.slots, oldSlots)
-		syscall.Munmap(newCtrlMmap)
-		syscall.Munmap(newSlotsMmap)
-	}
-
-	for _, packed := range entries {
-		var hash [32]byte
-		pos := int64((packed & posMask) * 32)
-		if _, err := m.dataFile.ReadAt(hash[:], pos); err != nil {
-			restoreOld()
-			return fmt.Errorf("resize rehash read: %w", err)
-		}
-		if err := rehashInsert(newCtrl, newSlots, newNumGroups, hash, packed); err != nil {
-			restoreOld()
-			return fmt.Errorf("resize rehash: %w", err)
+	// Rehash directly from old mmaps into new mmaps. Since they are backed
+	// by different files, there is no interference — no heap copies needed.
+	var count uint64
+	for i, c := range m.ctrl {
+		if c&ctrlFull != 0 {
+			packed := m.getSlot(uint64(i))
+			var hash [32]byte
+			pos := int64((packed & m.posMask) * 32)
+			if _, err := m.dataFile.ReadAt(hash[:], pos); err != nil {
+				cleanupResizeFiles(newCtrlMmap, newSlotsMmap, newCtrlFile, newSlotsFile, newCtrlPath, newSlotsPath)
+				return fmt.Errorf("resize rehash read: %w", err)
+			}
+			if err := rehashInsert(newCtrl, newSlots, newNumGroups, hash, packed); err != nil {
+				cleanupResizeFiles(newCtrlMmap, newSlotsMmap, newCtrlFile, newSlotsFile, newCtrlPath, newSlotsPath)
+				return fmt.Errorf("resize rehash: %w", err)
+			}
+			count++
 		}
 	}
 
-	// Rehash succeeded — swap to new state and unmap old mmaps.
-	oldCtrlMmap := m.ctrlMmap
-	oldSlotsMmap := m.slotsMmap
+	// Rehash succeeded. Unmap and close old files, then swap to new state.
+	// After unmapping, the struct holds stale pointers so we must update
+	// state unconditionally before doing anything else (including renames
+	// that could fail and return early).
+	syscall.Munmap(m.ctrlMmap)
+	syscall.Munmap(m.slotsMmap)
+	m.ctrlFile.Close()
+	m.slotsFile.Close()
 
+	m.ctrlFile = newCtrlFile
+	m.slotsFile = newSlotsFile
 	m.ctrlMmap = newCtrlMmap
 	m.ctrl = newCtrl
 	m.slotsMmap = newSlotsMmap
 	m.slots = newSlots
 	m.numSlots = newNumSlots
 	m.numGroups = newNumGroups
-	m.count = uint64(len(entries))
+	m.count = count
 
-	syscall.Munmap(oldCtrlMmap)
-	syscall.Munmap(oldSlotsMmap)
+	// Rename temp files over originals. On failure the new mmaps remain
+	// valid (backed by the temp files which still exist), and the zeroed
+	// consistency hash ensures rebuild on restart. Update paths so that
+	// Close and SetConsistencyHash target the correct files.
+	if err := os.Rename(newCtrlPath, m.ctrlPath); err != nil {
+		m.ctrlPath = newCtrlPath
+		m.slotsPath = newSlotsPath
+		return fmt.Errorf("resize rename ctrl: %w", err)
+	}
+	if err := os.Rename(newSlotsPath, m.slotsPath); err != nil {
+		m.slotsPath = newSlotsPath
+		return fmt.Errorf("resize rename slots: %w", err)
+	}
 
 	return nil
 }
