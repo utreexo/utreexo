@@ -451,8 +451,8 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 		dataCacheBytes = o.maxCacheMemory
 	}
 
-	// Open posmap files early so they can be passed to newForest (which
-	// takes ownership via the SwissPositionMap).
+	// Open posmap files early so the WAL can replay entries to them during
+	// recovery. The SwissPositionMap will mmap these files after recovery.
 	ctrlPath := filepath.Join(dbpath, forestPosMapCtrlFileName)
 	slotsPath := filepath.Join(dbpath, forestPosMapSlotsFileName)
 	posMapCtrlFile, err := os.OpenFile(ctrlPath, os.O_RDWR|os.O_CREATE, 0600)
@@ -471,7 +471,7 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 		return nil, fmt.Errorf("open posmap slots: %w", err)
 	}
 
-	wal, err := newWAL(journalFile, deletedFile,
+	wal, err := newWAL(journalFile, deletedFile, posMapCtrlFile, posMapSlotsFile,
 		walFile{File: dataFF, EntrySize: dataEntrySize, MaxCacheBytes: dataCacheBytes},
 		walFile{File: blockCountsFile, EntrySize: blockCountsEntrySize},
 		walFile{File: metaFile, EntrySize: metaEntrySize},
@@ -500,9 +500,8 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 		return nil, fmt.Errorf("create forest: %w", err)
 	}
 
-	wal.SetOnFlush(func(hash [32]byte) error {
-		return f.SyncPositionMap(hash)
-	})
+	// Register posmap with WAL for overlay serialization/apply/clear.
+	wal.SetPosMap(f.positionMap)
 
 	f.wal = wal
 	f.closers = closers

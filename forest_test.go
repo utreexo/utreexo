@@ -682,7 +682,7 @@ func TestForestNoFlushBeforeWAL(t *testing.T) {
 	underlyingMetaFile := newMemFile()
 
 	// WAL wraps files in cachedRWS (except bitmap) so writes are buffered.
-	w, err := newWAL(journal, underlyingDelFile,
+	w, err := newWAL(journal, underlyingDelFile, nil, nil,
 		walFile{File: underlyingFile, EntrySize: 32},
 		walFile{File: underlyingBlockCountsFile, EntrySize: 4},
 		walFile{File: underlyingMetaFile, EntrySize: 32},
@@ -767,7 +767,7 @@ func TestForestCrashRecovery(t *testing.T) {
 	blockCountsFile := newMemFile()
 	metaFile := newMemFile()
 
-	w, err := newWAL(journal, delFile,
+	w, err := newWAL(journal, delFile, nil, nil,
 		walFile{File: mainFile, EntrySize: 32},
 		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
@@ -823,7 +823,7 @@ func TestForestCrashRecovery(t *testing.T) {
 		"underlying files should still reflect block 200")
 
 	// ---- "Restart": new WAL recovers from journal ----
-	w2, err := newWAL(journal, delFile,
+	w2, err := newWAL(journal, delFile, nil, nil,
 		walFile{File: mainFile, EntrySize: 32},
 		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
@@ -859,7 +859,7 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	blockCountsFile := newMemFile()
 	metaFile := newMemFile()
 
-	w, err := newWAL(journal, delFile,
+	w, err := newWAL(journal, delFile, nil, nil,
 		walFile{File: mainFile, EntrySize: 32},
 		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
@@ -902,7 +902,7 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	require.NoError(t, w.crashBeforeCommit())
 
 	// "Restart": new WAL should discard the incomplete journal.
-	w2, err := newWAL(journal, delFile,
+	w2, err := newWAL(journal, delFile, nil, nil,
 		walFile{File: mainFile, EntrySize: 32},
 		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
@@ -1031,7 +1031,7 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 	blockCountsFile := newMemFile()
 	metaFile := newMemFile()
 
-	w, err := newWAL(journal, delFile,
+	w, err := newWAL(journal, delFile, nil, nil,
 		walFile{File: mainFile, EntrySize: 32},
 		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
@@ -1094,7 +1094,7 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 	require.NoError(t, w.Flush([32]byte{}))
 
 	// Restart: new WAL + new tmpDir forces Swiss Table rebuild.
-	w2, err := newWAL(journal, delFile,
+	w2, err := newWAL(journal, delFile, nil, nil,
 		walFile{File: mainFile, EntrySize: 32},
 		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
