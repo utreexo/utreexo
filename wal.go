@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+
+	"github.com/utreexo/utreexo/internal/swisstable"
 )
 
 // wal coordinates crash-safe writes across cachedRWS instances and a
@@ -35,16 +37,18 @@ import (
 //	    Bytes 32-63: numLeaves (bytes 32-39, LE), zero-padded
 //	    Bytes 64-95: consistency hash (written by WAL.Flush)
 //	3 = deleted bitmap file (dirty words from deletedBitmap)
+//	4 = posmap ctrl file   (position map overlay ctrl bytes)
+//	5 = posmap slots file  (position map overlay slot values)
 //
 // Flush sequence:
-//  1. Collect entries from cachedRWS caches + dirty bitmap words
-//  2. Add consistency hash entry (file 2, offset 64)
+//  1. Collect entries from cachedRWS caches + dirty bitmap words + posmap overlay
+//  2. Add consistency hash entries (meta file + posmap ctrl/slots headers)
 //  3. Write bestHash + entries + CRC32 checksum to journal
 //  4. Sync journal
-//  5. Apply entries to underlying files (including consistency hash)
-//  6. Sync underlying files
+//  5. Apply entries to underlying files (including posmap and consistency hashes)
+//  6. Sync underlying files (including posmap ctrl/slots)
 //  7. Clear journal (write totalLen=0, sync)
-//  8. Reset cachedRWS caches + clear bitmap dirty tracking
+//  8. Reset cachedRWS caches + clear bitmap dirty tracking + clear posmap overlay
 //
 // Recovery (in newWAL):
 //  1. Read journal; if valid checksum found, replay entries to underlying
@@ -58,7 +62,7 @@ type wal struct {
 	cached     [3]*cachedRWS // [0]=main, [1]=blockCounts, [2]=meta
 	bitmap     *deletedBitmap
 	bitmapFile forestFile
-	onFlush    func([32]byte) error
+	posMap *swisstable.SwissPositionMap // nil until SetPosMap is called
 }
 
 // journalEntry represents a single write operation in the WAL journal.
@@ -75,8 +79,10 @@ const (
 	entryHeaderSize     = 13 // 1 (fileIdx) + 8 (offset) + 4 (dataLen)
 	journalMinSize      = journalHeaderSize + journalHashSize + journalChecksumSize
 
-	metaFileIdx    = 2  // journal fileIdx for the metadata file
-	deletedFileIdx = 3  // journal fileIdx for the deleted bitmap file
+	metaFileIdx         = 2  // journal fileIdx for the metadata file
+	deletedFileIdx      = 3  // journal fileIdx for the deleted bitmap file
+	posMapCtrlFileIdx   = 4  // journal fileIdx for posmap ctrl file
+	posMapSlotsFileIdx  = 5  // journal fileIdx for posmap slots file
 	bestHashOffset = 64 // byte offset of the consistency hash in the metadata file
 )
 
@@ -90,21 +96,30 @@ type walFile struct {
 // newWAL creates a wal coordinating writes across the given underlying files.
 // bitmapFile is the deleted-positions bitmap (not wrapped in cachedRWS — its
 // dirty words are tracked by the in-memory deletedBitmap instead).
+// posMapCtrlFile and posMapSlotsFile are the position map files used for
+// WAL recovery (may be nil if no position map is used).
 // files must be exactly 3 walFiles: [0]=main, [1]=blockCounts, [2]=meta.
 // After recovery the bitmap is loaded from the underlying file and accessible
 // via Bitmap(). Use Cached(i) to get the cachedRWS for file i.
-func newWAL(journal io.ReadWriteSeeker, bitmapFile forestFile, files ...walFile) (*wal, error) {
+func newWAL(journal io.ReadWriteSeeker, bitmapFile forestFile, posMapCtrlFile, posMapSlotsFile forestFile, files ...walFile) (*wal, error) {
 	if len(files) != 3 {
 		return nil, fmt.Errorf("wal requires exactly 3 files, got %d", len(files))
 	}
 
 	// Build the underlying array used for journal recovery.
-	// Indices match journal fileIdx: 0=main, 1=blockCounts, 2=meta, 3=bitmap.
-	underlying := make([]forestFile, 4)
+	// Indices match journal fileIdx: 0=main, 1=blockCounts, 2=meta, 3=bitmap,
+	// 4=posmap ctrl, 5=posmap slots.
+	underlying := make([]forestFile, 6)
 	for i, f := range files {
 		underlying[i] = f.File
 	}
 	underlying[deletedFileIdx] = bitmapFile
+	if posMapCtrlFile != nil {
+		underlying[posMapCtrlFileIdx] = posMapCtrlFile
+	}
+	if posMapSlotsFile != nil {
+		underlying[posMapSlotsFileIdx] = posMapSlotsFile
+	}
 
 	w := &wal{
 		journal:    journal,
@@ -135,6 +150,12 @@ func newWAL(journal io.ReadWriteSeeker, bitmapFile forestFile, files ...walFile)
 	return w, nil
 }
 
+// SetPosMap registers the position map for WAL integration. Must be called
+// after the SwissPositionMap is created (which happens after WAL recovery).
+func (w *wal) SetPosMap(pm *swisstable.SwissPositionMap) {
+	w.posMap = pm
+}
+
 // Cached returns the cachedRWS for the i-th file.
 // Indices: 0=main, 1=blockCounts, 2=meta.
 func (w *wal) Cached(i int) *cachedRWS {
@@ -145,12 +166,6 @@ func (w *wal) Cached(i int) *cachedRWS {
 // The bitmap tracks dirty words which are serialized during Flush.
 func (w *wal) Bitmap() *deletedBitmap {
 	return w.bitmap
-}
-
-// SetOnFlush registers a callback that runs after each successful Flush.
-// The callback receives the bestHash that was flushed.
-func (w *wal) SetOnFlush(fn func([32]byte) error) {
-	w.onFlush = fn
 }
 
 // Close releases resources held by the cached stores (e.g. mmap regions).
@@ -206,7 +221,7 @@ func (w *wal) Flush(bestHash [32]byte) error {
 		return fmt.Errorf("wal apply: %w", err)
 	}
 
-	// Sync underlying files (including bitmap file).
+	// Sync underlying files (including bitmap file and posmap files).
 	for i, c := range w.cached {
 		if err := syncFile(c.underlying); err != nil {
 			return fmt.Errorf("wal sync file %d: %w", i, err)
@@ -214,6 +229,11 @@ func (w *wal) Flush(bestHash [32]byte) error {
 	}
 	if err := syncFile(w.bitmapFile); err != nil {
 		return fmt.Errorf("wal sync bitmap file: %w", err)
+	}
+	if w.posMap != nil {
+		if err := w.posMap.SyncFiles(); err != nil {
+			return fmt.Errorf("wal sync posmap files: %w", err)
+		}
 	}
 
 	// Clear journal.
@@ -231,17 +251,17 @@ func (w *wal) Flush(bestHash [32]byte) error {
 	// Clear bitmap dirty tracking.
 	w.bitmap.clearDirty()
 
-	if w.onFlush != nil {
-		if err := w.onFlush(bestHash); err != nil {
-			return fmt.Errorf("wal onFlush: %w", err)
-		}
+	// Clear posmap overlay — mmap now reflects the flushed data.
+	if w.posMap != nil {
+		w.posMap.ClearPending()
 	}
 
 	return nil
 }
 
-// serializeEntries encodes journal entries directly from caches and the
-// dirty bitmap into a byte slice. Includes the bestHash entry for metaFile.
+// serializeEntries encodes journal entries directly from caches, the dirty
+// bitmap, and the posmap overlay into a byte slice. Includes the bestHash
+// entries for metaFile and posmap file headers.
 func (w *wal) serializeEntries(bestHash [32]byte) []byte {
 	// Pre-calculate total size.
 	size := 0
@@ -252,6 +272,13 @@ func (w *wal) serializeEntries(bestHash [32]byte) []byte {
 	size += len(w.bitmap.dirtyWords) * (entryHeaderSize + 8)
 	// Add bestHash entry for metaFile.
 	size += entryHeaderSize + 32
+	// Add posmap overlay entries + consistency hash entries.
+	if w.posMap != nil {
+		size += len(w.posMap.PendingCtrlOverlay()) * (entryHeaderSize + 1)
+		size += len(w.posMap.PendingSlotsOverlay()) * (entryHeaderSize + 8)
+		// Two consistency hash entries for posmap ctrl and slots headers.
+		size += 2 * (entryHeaderSize + 32)
+	}
 
 	buf := make([]byte, 0, size)
 
@@ -274,17 +301,48 @@ func (w *wal) serializeEntries(bestHash [32]byte) []byte {
 		buf = append(buf, data...)
 	})
 
+	// Serialize posmap overlay entries.
+	if w.posMap != nil {
+		w.posMap.ForEachPendingCtrl(func(fileOffset int64, value byte) {
+			buf = append(buf, posMapCtrlFileIdx)
+			buf = binary.LittleEndian.AppendUint64(buf, uint64(fileOffset))
+			buf = binary.LittleEndian.AppendUint32(buf, 1)
+			buf = append(buf, value)
+		})
+		w.posMap.ForEachPendingSlot(func(fileOffset int64, value uint64) {
+			buf = append(buf, posMapSlotsFileIdx)
+			buf = binary.LittleEndian.AppendUint64(buf, uint64(fileOffset))
+			buf = binary.LittleEndian.AppendUint32(buf, 8)
+			buf = binary.LittleEndian.AppendUint64(buf, value)
+		})
+	}
+
 	// Add bestHash entry for metaFile.
 	buf = append(buf, metaFileIdx)
 	buf = binary.LittleEndian.AppendUint64(buf, bestHashOffset)
 	buf = binary.LittleEndian.AppendUint32(buf, 32)
 	buf = append(buf, bestHash[:]...)
 
+	// Add consistency hash entries for posmap file headers. These are
+	// written last so that on recovery, the posmap data entries are
+	// applied before the commit marker.
+	if w.posMap != nil {
+		buf = append(buf, posMapCtrlFileIdx)
+		buf = binary.LittleEndian.AppendUint64(buf, 0) // offset 0 = header
+		buf = binary.LittleEndian.AppendUint32(buf, 32)
+		buf = append(buf, bestHash[:]...)
+
+		buf = append(buf, posMapSlotsFileIdx)
+		buf = binary.LittleEndian.AppendUint64(buf, 0) // offset 0 = header
+		buf = binary.LittleEndian.AppendUint32(buf, 32)
+		buf = append(buf, bestHash[:]...)
+	}
+
 	return buf
 }
 
-// applyFromCaches writes cached entries and dirty bitmap words directly to
-// underlying files. Includes the bestHash entry.
+// applyFromCaches writes cached entries, dirty bitmap words, and posmap
+// overlay to underlying files. Includes the bestHash entries.
 func (w *wal) applyFromCaches(bestHash [32]byte) error {
 	for i, c := range w.cached {
 		var applyErr error
@@ -325,6 +383,19 @@ func (w *wal) applyFromCaches(bestHash [32]byte) error {
 		return bitmapErr
 	}
 
+	// Apply posmap overlay entries and consistency hash to posmap files.
+	// We write the consistency hash via ApplyConsistencyHash (simple fd
+	// writes without syncing) rather than SetConsistencyHash, because
+	// Flush already syncs all posmap files after this returns.
+	if w.posMap != nil {
+		if err := w.posMap.ApplyPending(); err != nil {
+			return fmt.Errorf("posmap apply: %w", err)
+		}
+		if err := w.posMap.ApplyConsistencyHash(bestHash); err != nil {
+			return fmt.Errorf("posmap consistency hash: %w", err)
+		}
+	}
+
 	// Write bestHash to metaFile at bestHashOffset.
 	metaFile := w.cached[metaFileIdx].underlying
 	if _, err := metaFile.Seek(bestHashOffset, io.SeekStart); err != nil {
@@ -339,7 +410,7 @@ func (w *wal) applyFromCaches(bestHash [32]byte) error {
 
 // Discard drops all pending writes without committing.
 // The in-memory bitmap is reloaded from the underlying file to revert
-// any mutations from the discarded block.
+// any mutations from the discarded block. The posmap overlay is also reverted.
 func (w *wal) Discard() error {
 	for _, c := range w.cached {
 		c.Discard()
@@ -352,6 +423,12 @@ func (w *wal) Discard() error {
 		return fmt.Errorf("wal discard: reload bitmap: %w", err)
 	}
 	w.bitmap = bitmap
+
+	// Revert posmap overlay — the mmap still has the pre-overlay data.
+	if w.posMap != nil {
+		w.posMap.DiscardPending()
+	}
+
 	return nil
 }
 
@@ -395,10 +472,12 @@ func parseEntries(buf []byte) ([]journalEntry, error) {
 }
 
 // applyEntries writes each entry to the appropriate underlying file.
+// Unknown file indices are skipped for forward compatibility (older code
+// replaying a journal with newer file indices).
 func applyEntries(entries []journalEntry, underlying []forestFile) error {
 	for _, e := range entries {
-		if int(e.fileIdx) >= len(underlying) {
-			return fmt.Errorf("wal: fileIdx %d out of range (have %d files)", e.fileIdx, len(underlying))
+		if int(e.fileIdx) >= len(underlying) || underlying[e.fileIdx] == nil {
+			continue // skip unknown/nil file indices
 		}
 		f := underlying[e.fileIdx]
 		if _, err := f.Seek(e.offset, io.SeekStart); err != nil {

@@ -4,6 +4,7 @@ package swisstable
 
 import (
 	"io"
+	"os"
 )
 
 // miniHash is the first 12 bytes of a 256 bit hash.
@@ -26,8 +27,9 @@ type SwissPositionMap struct {
 
 // NewSwissPositionMap creates a new in-memory position map.
 // On non-unix platforms this always returns needsRebuild=true since the
-// map is not persisted.
-func NewSwissPositionMap(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHash [32]byte, dataFile io.ReaderAt, posMask uint64) (*SwissPositionMap, bool, error) {
+// map is not persisted. The ctrlFile and slotsFile are unused (closed
+// immediately if non-nil).
+func NewSwissPositionMap(ctrlFile, slotsFile *os.File, expectedEntries uint64, consistencyHash [32]byte, dataFile io.ReaderAt, posMask uint64) (*SwissPositionMap, bool, error) {
 	return &SwissPositionMap{
 		m:        make(map[miniHash]uint64, expectedEntries),
 		dataFile: dataFile,
@@ -78,3 +80,57 @@ func (m *SwissPositionMap) Close() error {
 func (m *SwissPositionMap) SetConsistencyHash(hash [32]byte) error {
 	return nil
 }
+
+// RebuildEntry holds a hash and packed value for bulk insertion.
+type RebuildEntry struct {
+	hash   [32]byte
+	packed uint64
+}
+
+// PrepareEntry computes a RebuildEntry for bulk rebuild.
+func (m *SwissPositionMap) PrepareEntry(hash [32]byte, packed uint64) RebuildEntry {
+	return RebuildEntry{
+		hash:   hash,
+		packed: packed,
+	}
+}
+
+// PrepareRebuild clears the map for a fresh bulk rebuild.
+func (m *SwissPositionMap) PrepareRebuild() {
+	clear(m.m)
+}
+
+// InsertBatch inserts a batch of entries into the map.
+func (m *SwissPositionMap) InsertBatch(entries []RebuildEntry) error {
+	for _, e := range entries {
+		m.m[mini(e.hash)] = e.packed
+	}
+	return nil
+}
+
+// ApplyConsistencyHash is a no-op on non-unix platforms.
+func (m *SwissPositionMap) ApplyConsistencyHash(hash [32]byte) error { return nil }
+
+// PendingCtrlOverlay returns nil on non-unix platforms (no overlay).
+func (m *SwissPositionMap) PendingCtrlOverlay() map[uint64]byte { return nil }
+
+// PendingSlotsOverlay returns nil on non-unix platforms (no overlay).
+func (m *SwissPositionMap) PendingSlotsOverlay() map[uint64]uint64 { return nil }
+
+// ForEachPendingCtrl is a no-op on non-unix platforms.
+func (m *SwissPositionMap) ForEachPendingCtrl(fn func(fileOffset int64, value byte)) {}
+
+// ForEachPendingSlot is a no-op on non-unix platforms.
+func (m *SwissPositionMap) ForEachPendingSlot(fn func(fileOffset int64, value uint64)) {}
+
+// ApplyPending is a no-op on non-unix platforms.
+func (m *SwissPositionMap) ApplyPending() error { return nil }
+
+// SyncFiles is a no-op on non-unix platforms.
+func (m *SwissPositionMap) SyncFiles() error { return nil }
+
+// ClearPending is a no-op on non-unix platforms.
+func (m *SwissPositionMap) ClearPending() {}
+
+// DiscardPending is a no-op on non-unix platforms.
+func (m *SwissPositionMap) DiscardPending() {}

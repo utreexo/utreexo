@@ -429,6 +429,15 @@ func TestSwissPositionMapBasic(t *testing.T) {
 	}
 }
 
+// openTestFile creates a temporary file and registers cleanup.
+func openTestFile(t *testing.T, name string) *os.File {
+	t.Helper()
+	f, err := os.OpenFile(t.TempDir()+"/"+name, os.O_RDWR|os.O_CREATE, 0644)
+	require.NoError(t, err)
+	t.Cleanup(func() { f.Close() })
+	return f
+}
+
 // newTestSwissMap creates a SwissPositionMap backed by temp files with the
 // given number of test hashes written to the data file.
 func newTestSwissMap(t *testing.T, numEntries int, capacity uint64) (*SwissPositionMap, [][32]byte) {
@@ -446,8 +455,10 @@ func newTestSwissMap(t *testing.T, numEntries int, capacity uint64) (*SwissPosit
 	}
 	dataFile.Seek(0, 0)
 
+	ctrlFile := openTestFile(t, "ctrl")
+	slotsFile := openTestFile(t, "slots")
 	m, _, err := NewSwissPositionMap(
-		t.TempDir()+"/ctrl", t.TempDir()+"/slots",
+		ctrlFile, slotsFile,
 		capacity, [32]byte{}, dataFile, testPositionMask,
 	)
 	require.NoError(t, err)
@@ -471,11 +482,18 @@ func TestSwissPositionMapConsistency(t *testing.T) {
 		}
 		dataFile.Seek(0, 0)
 
-		m, _, err := NewSwissPositionMap(ctrlPath, slotsPath, 100, [32]byte{}, dataFile, testPositionMask)
+		ctrlFile, err := os.OpenFile(ctrlPath, os.O_RDWR|os.O_CREATE, 0644)
+		require.NoError(t, err)
+		slotsFile, err := os.OpenFile(slotsPath, os.O_RDWR|os.O_CREATE, 0644)
+		require.NoError(t, err)
+		m, _, err := NewSwissPositionMap(ctrlFile, slotsFile, 100, [32]byte{}, dataFile, testPositionMask)
 		require.NoError(t, err)
 		for i, h := range hashes {
 			require.NoError(t, m.Set(h, uint64(i)))
 		}
+		// Apply overlay to files so SetConsistencyHash validates on reopen.
+		require.NoError(t, m.ApplyPending())
+		m.ClearPending()
 		require.NoError(t, m.SetConsistencyHash(savedHash))
 		m.Close()
 		dataFile.Close()
@@ -577,7 +595,11 @@ func TestSwissPositionMapConsistency(t *testing.T) {
 			require.NoError(t, err)
 			defer dataFile.Close()
 
-			m, needsRebuild, err := NewSwissPositionMap(ctrlPath, slotsPath, tc.expectedEntries, tc.reopenHash, dataFile, testPositionMask)
+			ctrlFile, err := os.OpenFile(ctrlPath, os.O_RDWR|os.O_CREATE, 0644)
+			require.NoError(t, err)
+			slotsFile, err := os.OpenFile(slotsPath, os.O_RDWR|os.O_CREATE, 0644)
+			require.NoError(t, err)
+			m, needsRebuild, err := NewSwissPositionMap(ctrlFile, slotsFile, tc.expectedEntries, tc.reopenHash, dataFile, testPositionMask)
 			require.NoError(t, err)
 			defer m.Close()
 
@@ -588,7 +610,9 @@ func TestSwissPositionMapConsistency(t *testing.T) {
 }
 
 func TestSwissPositionMapNilDataFile(t *testing.T) {
-	_, _, err := NewSwissPositionMap(t.TempDir()+"/ctrl", t.TempDir()+"/slots", 10, [32]byte{}, nil, testPositionMask)
+	ctrlFile := openTestFile(t, "ctrl")
+	slotsFile := openTestFile(t, "slots")
+	_, _, err := NewSwissPositionMap(ctrlFile, slotsFile, 10, [32]byte{}, nil, testPositionMask)
 	require.Error(t, err)
 }
 
@@ -605,6 +629,7 @@ func TestSwissPositionMapResizeConsistencyHash(t *testing.T) {
 	require.Greater(t, m.numSlots, initialSlots, "should have resized")
 
 	// SetConsistencyHash after resize must not panic and must not error.
+	// After resize, overlay is cleared and data is in the mmap.
 	var setErr error
 	require.NotPanics(t, func() {
 		setErr = m.SetConsistencyHash([32]byte{0xAB})
@@ -653,7 +678,9 @@ func TestSwissPositionMapConcurrentGet(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	m, _, err := NewSwissPositionMap(t.TempDir()+"/ctrl", t.TempDir()+"/slots", dataSlots, [32]byte{}, dataFile, testPositionMask)
+	ctrlFile := openTestFile(t, "ctrl")
+	slotsFile := openTestFile(t, "slots")
+	m, _, err := NewSwissPositionMap(ctrlFile, slotsFile, dataSlots, [32]byte{}, dataFile, testPositionMask)
 	require.NoError(t, err)
 	defer m.Close()
 
@@ -736,10 +763,9 @@ func BenchmarkMatchH2(b *testing.B) {
 
 func BenchmarkSwissGet(b *testing.B) {
 	tmpDir := b.TempDir()
-	dataPath := tmpDir + "/data"
 
 	// Create data file with 10k hashes
-	dataFile, _ := os.Create(dataPath)
+	dataFile, _ := os.Create(tmpDir + "/data")
 	numEntries := 10000
 	hashes := make([][32]byte, numEntries)
 	for i := range numEntries {
@@ -748,7 +774,9 @@ func BenchmarkSwissGet(b *testing.B) {
 	}
 	dataFile.Seek(0, 0)
 
-	m, _, _ := NewSwissPositionMap(tmpDir+"/ctrl", tmpDir+"/slots", uint64(numEntries), [32]byte{}, dataFile, testPositionMask)
+	ctrlFile, _ := os.OpenFile(tmpDir+"/ctrl", os.O_RDWR|os.O_CREATE, 0644)
+	slotsFile, _ := os.OpenFile(tmpDir+"/slots", os.O_RDWR|os.O_CREATE, 0644)
+	m, _, _ := NewSwissPositionMap(ctrlFile, slotsFile, uint64(numEntries), [32]byte{}, dataFile, testPositionMask)
 	defer m.Close()
 
 	for i, h := range hashes {
@@ -763,9 +791,8 @@ func BenchmarkSwissGet(b *testing.B) {
 
 func BenchmarkSwissSet(b *testing.B) {
 	tmpDir := b.TempDir()
-	dataPath := tmpDir + "/data"
 
-	dataFile, _ := os.Create(dataPath)
+	dataFile, _ := os.Create(tmpDir + "/data")
 	numEntries := b.N
 	if numEntries > 100000 {
 		numEntries = 100000
@@ -778,7 +805,9 @@ func BenchmarkSwissSet(b *testing.B) {
 	}
 	dataFile.Seek(0, 0)
 
-	m, _, _ := NewSwissPositionMap(tmpDir+"/ctrl", tmpDir+"/slots", uint64(numEntries), [32]byte{}, dataFile, testPositionMask)
+	ctrlFile, _ := os.OpenFile(tmpDir+"/ctrl", os.O_RDWR|os.O_CREATE, 0644)
+	slotsFile, _ := os.OpenFile(tmpDir+"/slots", os.O_RDWR|os.O_CREATE, 0644)
+	m, _, _ := NewSwissPositionMap(ctrlFile, slotsFile, uint64(numEntries), [32]byte{}, dataFile, testPositionMask)
 	defer m.Close()
 
 	b.ResetTimer()

@@ -6,12 +6,30 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+// openPosMapTestFiles opens ctrl and slots files for testing.
+func openPosMapTestFiles(t testing.TB, dir string) (*os.File, *os.File) {
+	t.Helper()
+	ctrlFile, err := os.OpenFile(filepath.Join(dir, "ctrl"), os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ctrlFile.Close() })
+	slotsFile, err := os.OpenFile(filepath.Join(dir, "slots"), os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { slotsFile.Close() })
+	return ctrlFile, slotsFile
+}
 
 // testHashFromInt creates a deterministic hash from an integer for testing.
 func testHashFromInt(n int) Hash {
@@ -135,9 +153,10 @@ func compareRoots(t *testing.T, forest *Forest, pollard Pollard, context string)
 func newTestForest(t *testing.T, forestRows uint8) *Forest {
 	t.Helper()
 	tmpDir := t.TempDir()
+	ctrlFile, slotsFile := openPosMapTestFiles(t, tmpDir)
 	forest, err := newForest(
 		newMemFile(), newMemFile(), newMemFile(), nil,
-		tmpDir+"/ctrl", tmpDir+"/slots",
+		ctrlFile, slotsFile,
 		forestRows,
 	)
 	require.NoError(t, err)
@@ -426,7 +445,8 @@ func FuzzForestChain(f *testing.F) {
 
 		memFile := newMemFile()
 		tmpDir := t.TempDir()
-		forest, err := newForest(memFile, newMemFile(), newMemFile(), nil, tmpDir+"/ctrl", tmpDir+"/slots", 16)
+		ctrlFile, slotsFile := openPosMapTestFiles(t, tmpDir)
+		forest, err := newForest(memFile, newMemFile(), newMemFile(), nil, ctrlFile, slotsFile, 16)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -511,14 +531,16 @@ func FuzzForestRecord(f *testing.F) {
 
 		// Forest using normal Modify
 		tmpDir1 := t.TempDir()
-		modifyForest, err := newForest(newMemFile(), newMemFile(), newMemFile(), nil, tmpDir1+"/ctrl", tmpDir1+"/slots", 16)
+		ctrlFile1, slotsFile1 := openPosMapTestFiles(t, tmpDir1)
+		modifyForest, err := newForest(newMemFile(), newMemFile(), newMemFile(), nil, ctrlFile1, slotsFile1, 16)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		// Forest using Record + HashAll
 		tmpDir2 := t.TempDir()
-		recordForest, err := newForest(newMemFile(), newMemFile(), newMemFile(), nil, tmpDir2+"/ctrl", tmpDir2+"/slots", 16)
+		ctrlFile2, slotsFile2 := openPosMapTestFiles(t, tmpDir2)
+		recordForest, err := newForest(newMemFile(), newMemFile(), newMemFile(), nil, ctrlFile2, slotsFile2, 16)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -622,7 +644,8 @@ func FuzzTreeBuilding(f *testing.F) {
 
 		memFile := newMemFile()
 		tmpDir := t.TempDir()
-		forest, err := newForest(memFile, newMemFile(), newMemFile(), nil, tmpDir+"/ctrl", tmpDir+"/slots", 17)
+		ctrlFile, slotsFile := openPosMapTestFiles(t, tmpDir)
+		forest, err := newForest(memFile, newMemFile(), newMemFile(), nil, ctrlFile, slotsFile, 17)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -659,7 +682,7 @@ func TestForestNoFlushBeforeWAL(t *testing.T) {
 	underlyingMetaFile := newMemFile()
 
 	// WAL wraps files in cachedRWS (except bitmap) so writes are buffered.
-	w, err := newWAL(journal, underlyingDelFile,
+	w, err := newWAL(journal, underlyingDelFile, nil, nil,
 		walFile{File: underlyingFile, EntrySize: 32},
 		walFile{File: underlyingBlockCountsFile, EntrySize: 4},
 		walFile{File: underlyingMetaFile, EntrySize: 32},
@@ -668,7 +691,8 @@ func TestForestNoFlushBeforeWAL(t *testing.T) {
 
 	// Create forest backed by the WAL.
 	tmpDir := t.TempDir()
-	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10)
+	ctrlFile, slotsFile := openPosMapTestFiles(t, tmpDir)
+	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), ctrlFile, slotsFile, 10)
 	require.NoError(t, err)
 
 	// Reference pollard for correctness comparison.
@@ -721,9 +745,10 @@ func TestForestNoFlushBeforeWAL(t *testing.T) {
 	tmpDir2 := t.TempDir()
 	bitmap2, err := loadDeletedBitmap(underlyingDelFile)
 	require.NoError(t, err)
+	ctrlFile2, slotsFile2 := openPosMapTestFiles(t, tmpDir2)
 	forest2, err := newForest(
 		underlyingFile, underlyingBlockCountsFile, underlyingMetaFile, bitmap2,
-		tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
+		ctrlFile2, slotsFile2, 10,
 	)
 	require.NoError(t, err)
 	require.Equal(t, forest.GetRoots(), forest2.GetRoots(),
@@ -742,7 +767,7 @@ func TestForestCrashRecovery(t *testing.T) {
 	blockCountsFile := newMemFile()
 	metaFile := newMemFile()
 
-	w, err := newWAL(journal, delFile,
+	w, err := newWAL(journal, delFile, nil, nil,
 		walFile{File: mainFile, EntrySize: 32},
 		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
@@ -750,7 +775,8 @@ func TestForestCrashRecovery(t *testing.T) {
 	require.NoError(t, err)
 
 	tmpDir := t.TempDir()
-	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 16)
+	ctrlFile, slotsFile := openPosMapTestFiles(t, tmpDir)
+	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), ctrlFile, slotsFile, 16)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -785,18 +811,19 @@ func TestForestCrashRecovery(t *testing.T) {
 
 	// Underlying files still only have block-200 data.
 	tmpDir2 := t.TempDir()
+	ctrlFile2, slotsFile2 := openPosMapTestFiles(t, tmpDir2)
 	preRecoveryBitmap, err := loadDeletedBitmap(delFile)
 	require.NoError(t, err)
 	preRecoveryForest, err := newForest(
 		mainFile, blockCountsFile, metaFile, preRecoveryBitmap,
-		tmpDir2+"/ctrl", tmpDir2+"/slots", 16,
+		ctrlFile2, slotsFile2, 16,
 	)
 	require.NoError(t, err)
 	require.Equal(t, block200Roots, preRecoveryForest.GetRoots(),
 		"underlying files should still reflect block 200")
 
 	// ---- "Restart": new WAL recovers from journal ----
-	w2, err := newWAL(journal, delFile,
+	w2, err := newWAL(journal, delFile, nil, nil,
 		walFile{File: mainFile, EntrySize: 32},
 		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
@@ -804,9 +831,10 @@ func TestForestCrashRecovery(t *testing.T) {
 	require.NoError(t, err)
 
 	tmpDir3 := t.TempDir()
+	ctrlFile3, slotsFile3 := openPosMapTestFiles(t, tmpDir3)
 	recoveredForest, err := newForest(
 		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Bitmap(),
-		tmpDir3+"/ctrl", tmpDir3+"/slots", 16,
+		ctrlFile3, slotsFile3, 16,
 	)
 	require.NoError(t, err)
 	require.Equal(t, block400Roots, recoveredForest.GetRoots(),
@@ -831,7 +859,7 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	blockCountsFile := newMemFile()
 	metaFile := newMemFile()
 
-	w, err := newWAL(journal, delFile,
+	w, err := newWAL(journal, delFile, nil, nil,
 		walFile{File: mainFile, EntrySize: 32},
 		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
@@ -839,7 +867,8 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	require.NoError(t, err)
 
 	tmpDir := t.TempDir()
-	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 16)
+	ctrlFile, slotsFile := openPosMapTestFiles(t, tmpDir)
+	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), ctrlFile, slotsFile, 16)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -873,7 +902,7 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	require.NoError(t, w.crashBeforeCommit())
 
 	// "Restart": new WAL should discard the incomplete journal.
-	w2, err := newWAL(journal, delFile,
+	w2, err := newWAL(journal, delFile, nil, nil,
 		walFile{File: mainFile, EntrySize: 32},
 		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
@@ -882,9 +911,10 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 
 	// Forest should be back at the block-200 state.
 	tmpDir2 := t.TempDir()
+	ctrlFile2, slotsFile2 := openPosMapTestFiles(t, tmpDir2)
 	recoveredForest, err := newForest(
 		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Bitmap(),
-		tmpDir2+"/ctrl", tmpDir2+"/slots", 16,
+		ctrlFile2, slotsFile2, 16,
 	)
 	require.NoError(t, err)
 	require.Equal(t, savedRoots, recoveredForest.GetRoots(),
@@ -1001,7 +1031,7 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 	blockCountsFile := newMemFile()
 	metaFile := newMemFile()
 
-	w, err := newWAL(journal, delFile,
+	w, err := newWAL(journal, delFile, nil, nil,
 		walFile{File: mainFile, EntrySize: 32},
 		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
@@ -1009,9 +1039,10 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 	require.NoError(t, err)
 
 	tmpDir1 := t.TempDir()
+	ctrlFile1, slotsFile1 := openPosMapTestFiles(t, tmpDir1)
 	forest, err := newForest(
 		w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(),
-		tmpDir1+"/ctrl", tmpDir1+"/slots", 10,
+		ctrlFile1, slotsFile1, 10,
 	)
 	require.NoError(t, err)
 
@@ -1063,7 +1094,7 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 	require.NoError(t, w.Flush([32]byte{}))
 
 	// Restart: new WAL + new tmpDir forces Swiss Table rebuild.
-	w2, err := newWAL(journal, delFile,
+	w2, err := newWAL(journal, delFile, nil, nil,
 		walFile{File: mainFile, EntrySize: 32},
 		walFile{File: blockCountsFile, EntrySize: 4},
 		walFile{File: metaFile, EntrySize: 32},
@@ -1071,9 +1102,10 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 	require.NoError(t, err)
 
 	tmpDir2 := t.TempDir()
+	ctrlFile2, slotsFile2 := openPosMapTestFiles(t, tmpDir2)
 	forest2, err := newForest(
 		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Bitmap(),
-		tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
+		ctrlFile2, slotsFile2, 10,
 	)
 	require.NoError(t, err)
 
@@ -1228,9 +1260,10 @@ func TestForestBlockCountsReconciliation(t *testing.T) {
 
 			// Call newForest which triggers reconciliation and rebuildPositionMap.
 			tmpDir := t.TempDir()
+			ctrlFile, slotsFile := openPosMapTestFiles(t, tmpDir)
 			forest, err := newForest(
 				mainFile, blockCountsFile, metaFile, nil,
-				tmpDir+"/ctrl", tmpDir+"/slots", 10,
+				ctrlFile, slotsFile, 10,
 			)
 			require.NoError(t, err)
 			require.Equal(t, tc.numLeaves, forest.NumLeaves)
@@ -1245,5 +1278,63 @@ func TestForestBlockCountsReconciliation(t *testing.T) {
 				require.Equal(t, tc.expectedCounts, got)
 			}
 		})
+	}
+}
+
+func BenchmarkForestRebuildPositionMap(b *testing.B) {
+	for _, numLeaves := range []uint64{250_000, 5_000_000} {
+		b.Run(fmt.Sprintf("leaves_%dK", numLeaves/1000), func(b *testing.B) {
+			benchForestRebuild(b, numLeaves)
+		})
+	}
+}
+
+// benchForestRebuild builds a forest with the given number of leaves by
+// writing hashes directly to the data file (much faster than calling Modify
+// for millions of entries), then benchmarks rebuildPositionMap.
+func benchForestRebuild(b *testing.B, numLeaves uint64) {
+	b.Helper()
+
+	// Write deterministic hashes directly into the data file.
+	dataFile := newMemFile()
+	buf := make([]byte, numLeaves*32)
+	for i := uint64(0); i < numLeaves; i++ {
+		h := testHashFromInt(int(i))
+		copy(buf[i*32:], h[:])
+	}
+	dataFile.data = buf
+
+	// Create block counts: one block with all leaves.
+	blockCountsFile := newMemFile()
+	var countBuf [4]byte
+	binary.LittleEndian.PutUint32(countBuf[:], uint32(numLeaves))
+	blockCountsFile.Write(countBuf[:])
+
+	// Create metadata with numLeaves.
+	metaFile := newMemFile()
+	var metaBuf [64]byte
+	binary.LittleEndian.PutUint64(metaBuf[32:], numLeaves)
+	metaFile.Write(metaBuf[:])
+
+	tmpDir := b.TempDir()
+	ctrlFile, slotsFile := openPosMapTestFiles(b, tmpDir)
+	forest, err := newForest(
+		dataFile, blockCountsFile, metaFile, nil,
+		ctrlFile, slotsFile,
+		48,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer forest.Close([32]byte{})
+
+	b.Logf("NumLeaves: %d", forest.NumLeaves)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		if err := forest.rebuildPositionMap(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

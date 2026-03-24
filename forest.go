@@ -283,9 +283,10 @@ func readBlockCounts(file io.ReadSeeker) ([]uint32, error) {
 // bitmap tracks deleted leaf positions; pass nil for a fresh forest. When using a WAL,
 // the bitmap is loaded by the WAL after recovery and passed here. For non-WAL usage,
 // load it with loadDeletedBitmap.
-// posMapCtrlPath and posMapSlotsPath are file paths for the Swiss Table position map.
+// posMapCtrlFile and posMapSlotsFile are already-opened file handles for the Swiss Table
+// position map. The SwissPositionMap takes ownership and will close them.
 // forestRows sets the maximum tree height (determines max leaves = 2^forestRows).
-func newForest(file forestFile, blockCountsFile, metaFile forestFile, bitmap *deletedBitmap, posMapCtrlPath, posMapSlotsPath string, forestRows uint8) (*Forest, error) {
+func newForest(file forestFile, blockCountsFile, metaFile forestFile, bitmap *deletedBitmap, posMapCtrlFile, posMapSlotsFile *os.File, forestRows uint8) (*Forest, error) {
 	if file == nil || blockCountsFile == nil || metaFile == nil {
 		return nil, fmt.Errorf("one of the given files are nil")
 	}
@@ -333,7 +334,7 @@ func newForest(file forestFile, blockCountsFile, metaFile forestFile, bitmap *de
 	// Create Swiss Table for position map. Size based on numLeaves (will resize if needed).
 	// Use a minimum of 1<<16 to avoid excessive early resizes on a fresh database.
 	expectedEntries := max(f.NumLeaves, 1<<16)
-	posMap, needsRebuild, err := swisstable.NewSwissPositionMap(posMapCtrlPath, posMapSlotsPath, expectedEntries, consistencyHash, file, positionMask)
+	posMap, needsRebuild, err := swisstable.NewSwissPositionMap(posMapCtrlFile, posMapSlotsFile, expectedEntries, consistencyHash, file, positionMask)
 	if err != nil {
 		return nil, fmt.Errorf("create position map: %w", err)
 	}
@@ -450,37 +451,57 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 		dataCacheBytes = o.maxCacheMemory
 	}
 
-	wal, err := newWAL(journalFile, deletedFile,
+	// Open posmap files early so the WAL can replay entries to them during
+	// recovery. The SwissPositionMap will mmap these files after recovery.
+	ctrlPath := filepath.Join(dbpath, forestPosMapCtrlFileName)
+	slotsPath := filepath.Join(dbpath, forestPosMapSlotsFileName)
+	posMapCtrlFile, err := os.OpenFile(ctrlPath, os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		for _, c := range closers {
+			c.Close()
+		}
+		return nil, fmt.Errorf("open posmap ctrl: %w", err)
+	}
+	posMapSlotsFile, err := os.OpenFile(slotsPath, os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		posMapCtrlFile.Close()
+		for _, c := range closers {
+			c.Close()
+		}
+		return nil, fmt.Errorf("open posmap slots: %w", err)
+	}
+
+	wal, err := newWAL(journalFile, deletedFile, posMapCtrlFile, posMapSlotsFile,
 		walFile{File: dataFF, EntrySize: dataEntrySize, MaxCacheBytes: dataCacheBytes},
 		walFile{File: blockCountsFile, EntrySize: blockCountsEntrySize},
 		walFile{File: metaFile, EntrySize: metaEntrySize},
 	)
 	if err != nil {
+		posMapCtrlFile.Close()
+		posMapSlotsFile.Close()
 		for _, c := range closers {
 			c.Close()
 		}
 		return nil, fmt.Errorf("create wal: %w", err)
 	}
 
-	ctrlPath := filepath.Join(dbpath, forestPosMapCtrlFileName)
-	slotsPath := filepath.Join(dbpath, forestPosMapSlotsFileName)
-
 	f, err := newForest(
 		wal.Cached(0), wal.Cached(1), wal.Cached(2),
 		wal.Bitmap(),
-		ctrlPath, slotsPath,
+		posMapCtrlFile, posMapSlotsFile,
 		defaultForestRows,
 	)
 	if err != nil {
+		posMapCtrlFile.Close()
+		posMapSlotsFile.Close()
 		for _, c := range closers {
 			c.Close()
 		}
 		return nil, fmt.Errorf("create forest: %w", err)
 	}
 
-	wal.SetOnFlush(func(hash [32]byte) error {
-		return f.SyncPositionMap(hash)
-	})
+	// Register posmap with WAL for overlay serialization/apply/clear.
+	wal.SetPosMap(f.positionMap)
 
 	f.wal = wal
 	f.closers = closers

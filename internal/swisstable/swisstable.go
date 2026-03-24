@@ -46,7 +46,7 @@ const (
 //
 // It is NOT safe for concurrent use. Callers must synchronize access
 // when multiple goroutines may call Get, Set, or Delete concurrently.
-// Concurrent read-only access (Get) is safe.
+// Concurrent read-only access (Get) is safe when no overlay entries exist.
 type SwissPositionMap struct {
 	// Mmap'd data
 	ctrlMmap  []byte // full mmap including header
@@ -57,8 +57,6 @@ type SwissPositionMap struct {
 	// File handles for mmap
 	ctrlFile  *os.File
 	slotsFile *os.File
-	ctrlPath  string
-	slotsPath string
 
 	// Table sizing
 	numSlots  uint64
@@ -70,6 +68,16 @@ type SwissPositionMap struct {
 
 	// Entry count
 	count uint64
+
+	// Write overlay: pending changes not yet flushed to disk.
+	// During normal operation, Set/Delete write here instead of the mmap.
+	// On flush, the WAL journals these entries and applies them to the
+	// underlying files via fd writes. The mmap (MAP_SHARED) then reflects
+	// the new data through the shared page cache.
+	ctrlOverlay  map[uint64]byte
+	slotsOverlay map[uint64]uint64
+	dirtyGroups  map[uint64]struct{} // groups with overlay entries (fast path)
+	baseCount    uint64              // count from on-disk/mmap state (for DiscardPending)
 }
 
 // ----------------------------------------------------------------------------
@@ -80,12 +88,14 @@ type SwissPositionMap struct {
 // Returns the map and a bool indicating if rebuild is needed (consistency hash mismatch).
 // Pass a zero hash to force rebuild. posMask is applied to packed values to
 // extract the leaf position for hash verification against dataFile.
-func NewSwissPositionMap(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHash [32]byte, dataFile io.ReaderAt, posMask uint64) (*SwissPositionMap, bool, error) {
+// The caller must open ctrlFile and slotsFile before calling this function;
+// the SwissPositionMap takes ownership and will close them in Close().
+func NewSwissPositionMap(ctrlFile, slotsFile *os.File, expectedEntries uint64, consistencyHash [32]byte, dataFile io.ReaderAt, posMask uint64) (*SwissPositionMap, bool, error) {
 	if dataFile == nil {
 		return nil, false, fmt.Errorf("dataFile must not be nil")
 	}
 
-	ctrlFile, slotsFile, ctrlMmap, slotsBytes, numSlots, needsRebuild, err := openFiles(ctrlPath, slotsPath, expectedEntries, consistencyHash)
+	ctrlMmap, slotsBytes, numSlots, needsRebuild, err := openFiles(ctrlFile, slotsFile, expectedEntries, consistencyHash)
 	if err != nil {
 		return nil, false, err
 	}
@@ -94,63 +104,53 @@ func NewSwissPositionMap(ctrlPath, slotsPath string, expectedEntries uint64, con
 	ctrl := ctrlMmap[fileHeaderSize:]
 	slots := slotsBytes[fileHeaderSize:]
 
-	m := &SwissPositionMap{
-		ctrlMmap:  ctrlMmap,
-		ctrl:      ctrl,
-		slotsMmap: slotsBytes,
-		slots:     slots,
-		ctrlFile:  ctrlFile,
-		slotsFile: slotsFile,
-		ctrlPath:  ctrlPath,
-		slotsPath: slotsPath,
-		numSlots:  numSlots,
-		numGroups: numSlots / groupSize,
-		dataFile:  dataFile,
-		posMask:   posMask,
-	}
-
+	var count uint64
 	// Restore count from existing data if not rebuilding
 	if !needsRebuild {
 		for _, c := range ctrl {
 			if c&ctrlFull != 0 {
-				m.count++
+				count++
 			}
 		}
+	}
+
+	m := &SwissPositionMap{
+		ctrlMmap:     ctrlMmap,
+		ctrl:         ctrl,
+		slotsMmap:    slotsBytes,
+		slots:        slots,
+		ctrlFile:     ctrlFile,
+		slotsFile:    slotsFile,
+		numSlots:     numSlots,
+		numGroups:    numSlots / groupSize,
+		dataFile:     dataFile,
+		posMask:      posMask,
+		count:        count,
+		ctrlOverlay:  make(map[uint64]byte),
+		slotsOverlay: make(map[uint64]uint64),
+		dirtyGroups:  make(map[uint64]struct{}),
+		baseCount:    count,
 	}
 
 	return m, needsRebuild, nil
 }
 
-// openFiles opens and mmaps the ctrl and slots files, wiping both if either
+// openFiles mmaps the ctrl and slots files, wiping both if either
 // are inconsistent. Returns the actual numSlots and needsRebuild=true if files
 // were wiped (hash mismatch, size mismatch, or zero consistency hash).
 // expectedEntries is only used to size new files when rebuilding; consistent
 // files are reused at their on-disk size regardless of expectedEntries.
-func openFiles(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHash [32]byte) (
-	ctrlFile, slotsFile *os.File, ctrlMmap, slotsBytes []byte, numSlots uint64, needsRebuild bool, err error) {
-
-	// Open both files.
-	ctrlFile, err = os.OpenFile(ctrlPath, os.O_RDWR|os.O_CREATE, 0644)
-	if err != nil {
-		return nil, nil, nil, nil, 0, false, fmt.Errorf("open ctrl: %w", err)
-	}
-	slotsFile, err = os.OpenFile(slotsPath, os.O_RDWR|os.O_CREATE, 0644)
-	if err != nil {
-		ctrlFile.Close()
-		return nil, nil, nil, nil, 0, false, fmt.Errorf("open slots: %w", err)
-	}
+// The caller must open the files before calling this function.
+func openFiles(ctrlFile, slotsFile *os.File, expectedEntries uint64, consistencyHash [32]byte) (
+	ctrlMmap, slotsBytes []byte, numSlots uint64, needsRebuild bool, err error) {
 
 	ctrlFi, err := ctrlFile.Stat()
 	if err != nil {
-		ctrlFile.Close()
-		slotsFile.Close()
-		return nil, nil, nil, nil, 0, false, err
+		return nil, nil, 0, false, err
 	}
 	slotsFi, err := slotsFile.Stat()
 	if err != nil {
-		ctrlFile.Close()
-		slotsFile.Close()
-		return nil, nil, nil, nil, 0, false, err
+		return nil, nil, 0, false, err
 	}
 
 	needsRebuild = true
@@ -191,14 +191,10 @@ func openFiles(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHa
 			{slotsFile, slotsSize, "slots"},
 		} {
 			if err := wipe.f.Truncate(0); err != nil {
-				ctrlFile.Close()
-				slotsFile.Close()
-				return nil, nil, nil, nil, 0, false, fmt.Errorf("truncate %s: %w", wipe.name, err)
+				return nil, nil, 0, false, fmt.Errorf("truncate %s: %w", wipe.name, err)
 			}
 			if err := wipe.f.Truncate(wipe.size); err != nil {
-				ctrlFile.Close()
-				slotsFile.Close()
-				return nil, nil, nil, nil, 0, false, fmt.Errorf("extend %s: %w", wipe.name, err)
+				return nil, nil, 0, false, fmt.Errorf("extend %s: %w", wipe.name, err)
 			}
 		}
 	}
@@ -209,20 +205,16 @@ func openFiles(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHa
 	ctrlMmap, err = syscall.Mmap(int(ctrlFile.Fd()), 0, int(ctrlSize),
 		syscall.PROT_READ|syscall.PROT_WRITE, mmapFlags)
 	if err != nil {
-		ctrlFile.Close()
-		slotsFile.Close()
-		return nil, nil, nil, nil, 0, false, fmt.Errorf("mmap ctrl: %w", err)
+		return nil, nil, 0, false, fmt.Errorf("mmap ctrl: %w", err)
 	}
 	slotsBytes, err = syscall.Mmap(int(slotsFile.Fd()), 0, int(slotsSize),
 		syscall.PROT_READ|syscall.PROT_WRITE, mmapFlags)
 	if err != nil {
 		syscall.Munmap(ctrlMmap)
-		ctrlFile.Close()
-		slotsFile.Close()
-		return nil, nil, nil, nil, 0, false, fmt.Errorf("mmap slots: %w", err)
+		return nil, nil, 0, false, fmt.Errorf("mmap slots: %w", err)
 	}
 
-	return ctrlFile, slotsFile, ctrlMmap, slotsBytes, numSlots, needsRebuild, nil
+	return ctrlMmap, slotsBytes, numSlots, needsRebuild, nil
 }
 
 // roundUpGroupSize rounds n up to the nearest multiple of groupSize.
@@ -239,10 +231,13 @@ func (m *SwissPositionMap) Get(hash [32]byte) (uint64, bool, error) {
 	h1, h2 := splitHash(hash)
 	start := h1 % m.numGroups
 
+	var groupBuf [groupSize]byte
 	for i := range m.numGroups {
 		base := m.groupBase(start, i)
+		group := m.loadGroupCtrl(base, &groupBuf)
+
 		// Check slots with matching H2
-		for matches := m.matchH2(base, h2); matches != 0; matches &= matches - 1 {
+		for matches := matchH2(group, h2); matches != 0; matches &= matches - 1 {
 			slot := base + uint64(bits.TrailingZeros16(matches))
 			packed := m.getSlot(slot)
 			ok, err := m.verifyHash(packed, hash)
@@ -255,7 +250,7 @@ func (m *SwissPositionMap) Get(hash [32]byte) (uint64, bool, error) {
 		}
 
 		// Empty slot means key doesn't exist
-		if m.hasEmpty(base) {
+		if matchEmpty(group) != 0 {
 			return 0, false, nil
 		}
 	}
@@ -286,11 +281,13 @@ func (m *SwissPositionMap) set(hash [32]byte, packed uint64) error {
 	firstAvail := uint64(0)
 	hasAvail := false
 
+	var groupBuf [groupSize]byte
 	for i := range m.numGroups {
 		base := m.groupBase(start, i)
+		group := m.loadGroupCtrl(base, &groupBuf)
 
 		// Check if key exists (update in place)
-		for matches := m.matchH2(base, h2); matches != 0; matches &= matches - 1 {
+		for matches := matchH2(group, h2); matches != 0; matches &= matches - 1 {
 			slot := base + uint64(bits.TrailingZeros16(matches))
 			ok, err := m.verifyHash(m.getSlot(slot), hash)
 			if err != nil {
@@ -304,14 +301,14 @@ func (m *SwissPositionMap) set(hash [32]byte, packed uint64) error {
 
 		// Remember first available slot, but don't insert yet
 		if !hasAvail {
-			if avail := m.matchEmptyOrDeleted(base); avail != 0 {
+			if avail := matchEmptyOrDeleted(group); avail != 0 {
 				firstAvail = base + uint64(bits.TrailingZeros16(avail))
 				hasAvail = true
 			}
 		}
 
 		// Empty slot means the key definitely doesn't exist further
-		if m.hasEmpty(base) {
+		if matchEmpty(group) != 0 {
 			break
 		}
 	}
@@ -320,7 +317,7 @@ func (m *SwissPositionMap) set(hash [32]byte, packed uint64) error {
 		return fmt.Errorf("swiss table: no available slot (count=%d, slots=%d)", m.count, m.numSlots)
 	}
 
-	m.ctrl[firstAvail] = h2
+	m.setCtrl(firstAvail, h2)
 	m.setSlot(firstAvail, packed)
 	m.count++
 	return nil
@@ -336,24 +333,26 @@ func (m *SwissPositionMap) Delete(hash [32]byte) (bool, error) {
 	h1, h2 := splitHash(hash)
 	start := h1 % m.numGroups
 
+	var groupBuf [groupSize]byte
 	for i := range m.numGroups {
 		base := m.groupBase(start, i)
+		group := m.loadGroupCtrl(base, &groupBuf)
 
-		for matches := m.matchH2(base, h2); matches != 0; matches &= matches - 1 {
+		for matches := matchH2(group, h2); matches != 0; matches &= matches - 1 {
 			slot := base + uint64(bits.TrailingZeros16(matches))
 			ok, err := m.verifyHash(m.getSlot(slot), hash)
 			if err != nil {
 				return false, fmt.Errorf("swiss delete: %w", err)
 			}
 			if ok {
-				m.ctrl[slot] = ctrlDeleted
+				m.setCtrl(slot, ctrlDeleted)
 				m.clearSlot(slot)
 				m.count--
 				return true, nil
 			}
 		}
 
-		if m.hasEmpty(base) {
+		if matchEmpty(group) != 0 {
 			return false, nil
 		}
 	}
@@ -367,9 +366,15 @@ func (m *SwissPositionMap) Count() uint64 {
 
 // ForEach iterates over all entries.
 func (m *SwissPositionMap) ForEach(fn func(packed uint64)) {
-	for i, c := range m.ctrl {
+	for i := range m.numSlots {
+		var c byte
+		if v, ok := m.ctrlOverlay[i]; ok {
+			c = v
+		} else {
+			c = m.ctrl[i]
+		}
 		if c&ctrlFull != 0 {
-			fn(m.getSlot(uint64(i)))
+			fn(m.getSlot(i))
 		}
 	}
 }
@@ -462,40 +467,125 @@ func (m *SwissPositionMap) verifyHash(packed uint64, expected [32]byte) (bool, e
 }
 
 // ----------------------------------------------------------------------------
-// Internal: Group matching (SIMD on amd64, scalar fallback in swisstable_generic.go)
+// Internal: Overlay-aware accessors
 // ----------------------------------------------------------------------------
 
-func (m *SwissPositionMap) matchH2(base uint64, h2 byte) uint16 {
-	return matchH2(m.ctrl[base:base+groupSize], h2)
+// loadGroupCtrl returns the 16-byte ctrl group at the given base offset,
+// merging any overlay entries. When no overlay entries exist for this group,
+// the mmap slice is returned directly (zero-copy fast path). Otherwise the
+// provided buf is filled and returned. Each caller provides its own buf so
+// concurrent Get calls remain safe.
+func (m *SwissPositionMap) loadGroupCtrl(base uint64, buf *[groupSize]byte) []byte {
+	if len(m.dirtyGroups) == 0 {
+		return m.ctrl[base : base+groupSize]
+	}
+	if _, dirty := m.dirtyGroups[base/groupSize]; !dirty {
+		return m.ctrl[base : base+groupSize]
+	}
+	copy(buf[:], m.ctrl[base:base+groupSize])
+	for i := range uint64(groupSize) {
+		if v, ok := m.ctrlOverlay[base+i]; ok {
+			buf[i] = v
+		}
+	}
+	return buf[:]
 }
 
-func (m *SwissPositionMap) hasEmpty(base uint64) bool {
-	return matchEmpty(m.ctrl[base:base+groupSize]) != 0
+// setCtrl writes a ctrl byte to the overlay (not the mmap).
+func (m *SwissPositionMap) setCtrl(slot uint64, v byte) {
+	m.ctrlOverlay[slot] = v
+	m.dirtyGroups[slot/groupSize] = struct{}{}
 }
 
-func (m *SwissPositionMap) matchEmptyOrDeleted(base uint64) uint16 {
-	return matchEmptyOrDeleted(m.ctrl[base : base+groupSize])
-}
-
-// ----------------------------------------------------------------------------
-// Internal: Slot access
-// ----------------------------------------------------------------------------
-
+// getSlot returns the packed value for slot i, checking the overlay first.
 func (m *SwissPositionMap) getSlot(i uint64) uint64 {
+	if val, ok := m.slotsOverlay[i]; ok {
+		return val
+	}
 	return binary.LittleEndian.Uint64(m.slots[i*8:])
 }
 
+// setSlot writes a packed value to the overlay (not the mmap).
 func (m *SwissPositionMap) setSlot(i uint64, val uint64) {
-	binary.LittleEndian.PutUint64(m.slots[i*8:], val)
+	m.slotsOverlay[i] = val
 }
 
+// clearSlot writes a zero packed value to the overlay (not the mmap).
 func (m *SwissPositionMap) clearSlot(i uint64) {
-	binary.LittleEndian.PutUint64(m.slots[i*8:], 0)
+	m.slotsOverlay[i] = 0
 }
 
 // ----------------------------------------------------------------------------
 // Internal: Resize
 // ----------------------------------------------------------------------------
+
+// RebuildEntry holds precomputed hash components for sorted bulk insertion.
+type RebuildEntry struct {
+	group  uint32 // H1 % numGroups
+	h2     byte   // H2 fingerprint (with ctrlFull bit set)
+	packed uint64 // packed position + addIndex
+}
+
+// PrepareEntry computes the group and H2 from a hash for bulk rebuild.
+func (m *SwissPositionMap) PrepareEntry(hash [32]byte, packed uint64) RebuildEntry {
+	h1, h2 := splitHash(hash)
+	return RebuildEntry{
+		group:  uint32(h1 % m.numGroups),
+		h2:     h2,
+		packed: packed,
+	}
+}
+
+// PrepareRebuild clears the table for a fresh bulk rebuild. Must be called
+// before InsertBatch when the table may contain stale data or tombstones.
+// Also clears the overlay since rebuild writes directly to the mmap.
+func (m *SwissPositionMap) PrepareRebuild() {
+	clear(m.ctrl)
+	clear(m.ctrlOverlay)
+	clear(m.slotsOverlay)
+	clear(m.dirtyGroups)
+	m.count = 0
+}
+
+// InsertBatch sorts entries by group and inserts them for sequential ctrl/slots
+// access. Call PrepareRebuild once before the first InsertBatch. The entries
+// slice is sorted in place.
+func (m *SwissPositionMap) InsertBatch(entries []RebuildEntry) error {
+	slices.SortFunc(entries, func(a, b RebuildEntry) int {
+		if a.group < b.group {
+			return -1
+		}
+		if a.group > b.group {
+			return 1
+		}
+		return 0
+	})
+
+	for _, e := range entries {
+		if err := rehashInsertPrecomputed(m.ctrl, m.slots, m.numGroups, uint64(e.group), e.h2, e.packed); err != nil {
+			return err
+		}
+	}
+
+	m.count += uint64(len(entries))
+	return nil
+}
+
+// rehashInsertPrecomputed inserts a precomputed entry into explicit ctrl/slots
+// buffers. Like rehashInsert but skips splitHash since H1 group and H2 are
+// already computed.
+func rehashInsertPrecomputed(ctrl []byte, slots []byte, numGroups uint64, startGroup uint64, h2 byte, packed uint64) error {
+	for i := range numGroups {
+		base := ((startGroup + i) % numGroups) * groupSize
+		if avail := matchEmpty(ctrl[base : base+groupSize]); avail != 0 {
+			slot := base + uint64(bits.TrailingZeros16(avail))
+			ctrl[slot] = h2
+			binary.LittleEndian.PutUint64(slots[slot*8:], packed)
+			return nil
+		}
+	}
+	return fmt.Errorf("swiss table rehash precomputed: no slot available (groups=%d)", numGroups)
+}
 
 // rehashInsert inserts a hash->packed mapping into explicit ctrl/slots buffers.
 // It skips duplicate checking because it is only used during resize where the
@@ -528,6 +618,9 @@ func rehashInsert(ctrl []byte, slots []byte, numGroups uint64, hash [32]byte, pa
 // Only after a successful rehash does the swap occur. On failure the old
 // ctrl/slots are restored from saved copies so the map remains usable for the
 // current session. The zeroed consistency hash ensures rebuild on restart.
+//
+// Overlay entries are merged into the old data before collecting entries for
+// rehash, then the overlay is cleared since all entries are in the new mmap.
 func (m *SwissPositionMap) resize() error {
 	oldNumSlots := m.numSlots
 	newNumSlots := oldNumSlots * 2
@@ -555,6 +648,18 @@ func (m *SwissPositionMap) resize() error {
 	}
 	defer munmapAnon(oldSlots)
 	copy(oldSlots, m.slots)
+
+	// Merge overlay entries into old copies so they're included in rehash.
+	for slot, v := range m.ctrlOverlay {
+		if slot < oldNumSlots {
+			oldCtrl[slot] = v
+		}
+	}
+	for slot, v := range m.slotsOverlay {
+		if slot < oldNumSlots {
+			binary.LittleEndian.PutUint64(oldSlots[slot*8:], v)
+		}
+	}
 
 	// Collect all occupied packed slot values and sort by data file
 	// position so that hash reads are sequential rather than random.
@@ -670,5 +775,106 @@ func (m *SwissPositionMap) resize() error {
 	syscall.Munmap(oldCtrlMmap)
 	syscall.Munmap(oldSlotsMmap)
 
+	// Clear overlay — all entries are now in the new mmap. The rehashed
+	// data is written through the mmap (MAP_SHARED) and will be synced
+	// during the next flush. The consistency hash was already invalidated,
+	// so a crash before flush triggers rebuild.
+	clear(m.ctrlOverlay)
+	clear(m.slotsOverlay)
+	clear(m.dirtyGroups)
+
 	return nil
+}
+
+// ----------------------------------------------------------------------------
+// WAL integration
+// ----------------------------------------------------------------------------
+
+// PendingCount returns the number of dirty overlay entries (ctrl + slots).
+func (m *SwissPositionMap) PendingCount() int {
+	return len(m.ctrlOverlay) + len(m.slotsOverlay)
+}
+
+// PendingCtrlOverlay returns the ctrl overlay map for size estimation.
+func (m *SwissPositionMap) PendingCtrlOverlay() map[uint64]byte {
+	return m.ctrlOverlay
+}
+
+// PendingSlotsOverlay returns the slots overlay map for size estimation.
+func (m *SwissPositionMap) PendingSlotsOverlay() map[uint64]uint64 {
+	return m.slotsOverlay
+}
+
+// ForEachPendingCtrl iterates over dirty ctrl entries. The callback receives
+// the byte offset in the ctrl file and the ctrl byte value.
+func (m *SwissPositionMap) ForEachPendingCtrl(fn func(fileOffset int64, value byte)) {
+	for slot, v := range m.ctrlOverlay {
+		fn(int64(fileHeaderSize+slot), v)
+	}
+}
+
+// ForEachPendingSlot iterates over dirty slot entries. The callback receives
+// the byte offset in the slots file and the packed value.
+func (m *SwissPositionMap) ForEachPendingSlot(fn func(fileOffset int64, value uint64)) {
+	for slot, v := range m.slotsOverlay {
+		fn(int64(fileHeaderSize+slot*8), v)
+	}
+}
+
+// ApplyPending writes all pending ctrl/slot overlay entries to the underlying
+// files via file descriptor writes (not through the mmap). The MAP_SHARED mmap
+// will reflect these changes through the shared page cache.
+func (m *SwissPositionMap) ApplyPending() error {
+	for slot, v := range m.ctrlOverlay {
+		if _, err := m.ctrlFile.WriteAt([]byte{v}, int64(fileHeaderSize+slot)); err != nil {
+			return fmt.Errorf("apply ctrl at slot %d: %w", slot, err)
+		}
+	}
+	var buf [8]byte
+	for slot, v := range m.slotsOverlay {
+		binary.LittleEndian.PutUint64(buf[:], v)
+		if _, err := m.slotsFile.WriteAt(buf[:], int64(fileHeaderSize+slot*8)); err != nil {
+			return fmt.Errorf("apply slot at slot %d: %w", slot, err)
+		}
+	}
+	return nil
+}
+
+// SyncFiles syncs the ctrl and slots files to disk.
+func (m *SwissPositionMap) SyncFiles() error {
+	if err := m.ctrlFile.Sync(); err != nil {
+		return fmt.Errorf("sync ctrl: %w", err)
+	}
+	return m.slotsFile.Sync()
+}
+
+// ApplyConsistencyHash writes the consistency hash to both file headers
+// via fd writes (not through the mmap). Unlike SetConsistencyHash, this
+// does NOT sync the files — the caller is responsible for syncing.
+func (m *SwissPositionMap) ApplyConsistencyHash(hash [32]byte) error {
+	if _, err := m.ctrlFile.WriteAt(hash[:], 0); err != nil {
+		return fmt.Errorf("write ctrl consistency hash: %w", err)
+	}
+	if _, err := m.slotsFile.WriteAt(hash[:], 0); err != nil {
+		return fmt.Errorf("write slots consistency hash: %w", err)
+	}
+	return nil
+}
+
+// ClearPending drops the overlay after a successful flush. The mmap now
+// reflects the flushed data via the shared page cache.
+func (m *SwissPositionMap) ClearPending() {
+	clear(m.ctrlOverlay)
+	clear(m.slotsOverlay)
+	clear(m.dirtyGroups)
+	m.baseCount = m.count
+}
+
+// DiscardPending reverts the overlay and count to the pre-modification state.
+// The mmap still has the original data (overlay never touched the mmap).
+func (m *SwissPositionMap) DiscardPending() {
+	clear(m.ctrlOverlay)
+	clear(m.slotsOverlay)
+	clear(m.dirtyGroups)
+	m.count = m.baseCount
 }
