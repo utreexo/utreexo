@@ -476,6 +476,9 @@ func TestSwissPositionMapConsistency(t *testing.T) {
 		for i, h := range hashes {
 			require.NoError(t, m.Set(h, uint64(i)))
 		}
+		// Apply overlay to files so SetConsistencyHash validates on reopen.
+		require.NoError(t, m.ApplyPending())
+		m.ClearPending()
 		require.NoError(t, m.SetConsistencyHash(savedHash))
 		m.Close()
 		dataFile.Close()
@@ -605,6 +608,7 @@ func TestSwissPositionMapResizeConsistencyHash(t *testing.T) {
 	require.Greater(t, m.numSlots, initialSlots, "should have resized")
 
 	// SetConsistencyHash after resize must not panic and must not error.
+	// After resize, overlay is cleared and data is in the mmap.
 	var setErr error
 	require.NotPanics(t, func() {
 		setErr = m.SetConsistencyHash([32]byte{0xAB})
