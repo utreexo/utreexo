@@ -8,6 +8,7 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -21,7 +22,10 @@ func testHashFromInt(n int) Hash {
 }
 
 // memFile is an in-memory implementation of io.ReadWriteSeeker for testing.
+// mu protects concurrent ReadAt/WriteAt calls (which are safe on os.File
+// at disjoint offsets but race on a []byte slice).
 type memFile struct {
+	mu     sync.RWMutex
 	data   []byte
 	offset int64
 }
@@ -67,6 +71,8 @@ func (m *memFile) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (m *memFile) ReadAt(p []byte, off int64) (int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if off >= int64(len(m.data)) {
 		return 0, io.EOF
 	}
@@ -74,6 +80,17 @@ func (m *memFile) ReadAt(p []byte, off int64) (int, error) {
 	if n < len(p) {
 		return n, io.EOF
 	}
+	return n, nil
+}
+
+func (m *memFile) WriteAt(p []byte, off int64) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	needed := off + int64(len(p)) - int64(len(m.data))
+	if needed > 0 {
+		m.data = append(m.data, make([]byte, needed)...)
+	}
+	n := copy(m.data[off:], p)
 	return n, nil
 }
 
@@ -543,7 +560,7 @@ func FuzzForestRecord(f *testing.F) {
 			for i, add := range adds {
 				addHashes[i] = add.Hash
 			}
-			_, err = recordForest.Record(addHashes, delHashes)
+			_, _, err = recordForest.Record(addHashes, delHashes)
 			if err != nil {
 				t.Fatalf("block %d: Record error: %v", b, err)
 			}
@@ -564,6 +581,267 @@ func FuzzForestRecord(f *testing.F) {
 		if err != nil {
 			t.Fatalf("HashAll error: %v", err)
 		}
+	})
+}
+
+// FuzzForestGenerateRoots tests that Record + Snapshot + GenerateRoots produces
+// the same roots as Modify, and that GenerateProof produces valid proofs.
+//
+// Proof verification requires the tree state BEFORE the deletions being proved.
+// So we process blocks 0..N-1, snapshot, GenerateRoots, then prove block N's
+// deletions against the block N-1 snapshot.
+func FuzzForestGenerateRoots(f *testing.F) {
+	var tests = []struct {
+		numAdds  uint32
+		duration uint32
+		seed     int64
+	}{
+		{3, 0x07, 0x07},
+	}
+	for _, test := range tests {
+		f.Add(test.numAdds, test.duration, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
+		// Cap numAdds to keep test runtime reasonable.
+		if numAdds > 1000 {
+			numAdds = numAdds%1000 + 1
+		}
+
+		sc := newSimChainWithSeed(duration, seed)
+
+		// Compute forestRows large enough for 101 blocks of numAdds leaves.
+		maxLeaves := uint64(numAdds) * 101
+		forestRows := TreeRows(maxLeaves + 1)
+		if forestRows < 16 {
+			forestRows = 16
+		}
+
+		// Forest using normal Modify (reference)
+		tmpDir1 := t.TempDir()
+		modifyForest, err := newForest(newMemFile(), newMemFile(), newMemFile(), nil, tmpDir1+"/ctrl", tmpDir1+"/slots", forestRows)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Forest using Record + GenerateRoots
+		tmpDir2 := t.TempDir()
+		recordForest, err := newForest(newMemFile(), newMemFile(), newMemFile(), nil, tmpDir2+"/ctrl", tmpDir2+"/slots", forestRows)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Process blocks 0..100, calling GenerateRoots per-block to exercise
+		// both the full-scan (first call) and incremental paths.
+		for b := 0; b <= 100; b++ {
+			adds, _, delHashes := sc.NextBlock(numAdds)
+
+			proof, err := modifyForest.Prove(delHashes)
+			if err != nil {
+				t.Fatalf("block %d: Prove error: %v", b, err)
+			}
+
+			// Snapshot before Record to capture pre-block state.
+			snap := recordForest.Snapshot()
+
+			addHashes := make([]Hash, len(adds))
+			for i, add := range adds {
+				addHashes[i] = add.Hash
+			}
+			_, _, err = recordForest.Record(addHashes, delHashes)
+			if err != nil {
+				t.Fatalf("block %d: Record error: %v", b, err)
+			}
+
+			// GenerateRoots should match Modify roots (pre-block state).
+			genRoots, genNumLeaves, err := recordForest.GenerateRoots(snap)
+			if err != nil {
+				t.Fatalf("block %d: GenerateRoots error: %v", b, err)
+			}
+
+			modifyRoots := modifyForest.GetRoots()
+			require.Equal(t, modifyRoots, genRoots,
+				"block %d: GenerateRoots should match Modify roots", b)
+			require.Equal(t, modifyForest.NumLeaves, genNumLeaves,
+				"block %d: numLeaves mismatch", b)
+
+			// Prove this block's deletions against pre-block snapshot.
+			if len(delHashes) > 0 {
+				genProof, err := recordForest.GenerateProof(snap, delHashes)
+				if err != nil {
+					t.Fatalf("block %d: GenerateProof error: %v", b, err)
+				}
+
+				stump := Stump{Roots: genRoots, NumLeaves: genNumLeaves}
+				_, err = Verify(stump, delHashes, genProof)
+				if err != nil {
+					t.Fatalf("block %d: GenerateProof verification failed: %v", b, err)
+				}
+			}
+
+			recordForest.ReleaseSnapshot(snap)
+
+			err = modifyForest.Modify(adds, delHashes, proof)
+			if err != nil {
+				t.Fatalf("block %d: Modify error: %v", b, err)
+			}
+		}
+	})
+}
+
+// TestGenerateRootsSmall is a focused test for GenerateRoots intermediate hashes.
+func TestGenerateRootsSmall(t *testing.T) {
+	// Reference: Modify forest
+	modForest := newTestForest(t, 10)
+	// Record forest
+	recForest := newTestForest(t, 10)
+
+	pollard := NewAccumulator()
+
+	// Add 4 leaves
+	h := [4]Hash{testHashFromInt(1), testHashFromInt(2), testHashFromInt(3), testHashFromInt(4)}
+	adds := []Leaf{{Hash: h[0]}, {Hash: h[1]}, {Hash: h[2]}, {Hash: h[3]}}
+
+	require.NoError(t, pollard.Modify(adds, nil, Proof{}))
+	require.NoError(t, modForest.Modify(adds, nil, Proof{}))
+	_, _, err := recForest.Record([]Hash{h[0], h[1], h[2], h[3]}, nil)
+	require.NoError(t, err)
+
+	// Delete leaf 1 (sibling of leaf 0)
+	delHashes := []Hash{h[1]}
+	proof, err := pollard.Prove(delHashes)
+	require.NoError(t, err)
+	require.NoError(t, pollard.Modify(nil, delHashes, proof))
+
+	modProof, err := modForest.Prove(delHashes)
+	require.NoError(t, err)
+	require.NoError(t, modForest.Modify(nil, delHashes, modProof))
+	_, _, err = recForest.Record(nil, delHashes)
+	require.NoError(t, err)
+
+	// Take snapshot and GenerateRoots
+	snap := recForest.Snapshot()
+	defer recForest.ReleaseSnapshot(snap)
+
+	genRoots, genNL, err := recForest.GenerateRoots(snap)
+	require.NoError(t, err)
+
+	modRoots := modForest.GetRoots()
+	require.Equal(t, modForest.NumLeaves, genNL)
+	require.Equal(t, modRoots, genRoots, "roots must match")
+
+	// Prove leaf 0 (whose sibling h[1] was deleted). h[0] is still
+	// in the tree, so the proof should verify against post-deletion roots.
+	genProof, err := recForest.GenerateProof(snap, []Hash{h[0]})
+	require.NoError(t, err)
+
+	stump := Stump{Roots: genRoots, NumLeaves: genNL}
+	_, err = Verify(stump, []Hash{h[0]}, genProof)
+	require.NoError(t, err, "GenerateProof should produce a valid proof")
+}
+
+// FuzzForestGenerateRootsCOW tests that the COW bitmap correctly preserves
+// the snapshot state while the writer continues to advance.
+func FuzzForestGenerateRootsCOW(f *testing.F) {
+	var tests = []struct {
+		numAdds  uint32
+		duration uint32
+		seed     int64
+	}{
+		{3, 0x07, 0x07},
+	}
+	for _, test := range tests {
+		f.Add(test.numAdds, test.duration, test.seed)
+	}
+
+	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
+		t.Parallel()
+
+		// Cap numAdds to keep test runtime reasonable.
+		if numAdds > 1000 {
+			numAdds = numAdds%1000 + 1
+		}
+
+		sc := newSimChainWithSeed(duration, seed)
+
+		// Compute forestRows large enough for 100 blocks of numAdds leaves.
+		maxLeaves := uint64(numAdds) * 100
+		forestRows := TreeRows(maxLeaves + 1)
+		if forestRows < 16 {
+			forestRows = 16
+		}
+
+		// Reference forest using Modify
+		tmpDir1 := t.TempDir()
+		modifyForest, err := newForest(newMemFile(), newMemFile(), newMemFile(), nil, tmpDir1+"/ctrl", tmpDir1+"/slots", forestRows)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Record forest
+		tmpDir2 := t.TempDir()
+		recordForest, err := newForest(newMemFile(), newMemFile(), newMemFile(), nil, tmpDir2+"/ctrl", tmpDir2+"/slots", forestRows)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Process 50 blocks on both.
+		for b := 0; b < 50; b++ {
+			adds, _, delHashes := sc.NextBlock(numAdds)
+
+			proof, err := modifyForest.Prove(delHashes)
+			if err != nil {
+				t.Fatalf("block %d: Prove error: %v", b, err)
+			}
+			err = modifyForest.Modify(adds, delHashes, proof)
+			if err != nil {
+				t.Fatalf("block %d: Modify error: %v", b, err)
+			}
+
+			addHashes := make([]Hash, len(adds))
+			for i, add := range adds {
+				addHashes[i] = add.Hash
+			}
+			_, _, err = recordForest.Record(addHashes, delHashes)
+			if err != nil {
+				t.Fatalf("block %d: Record error: %v", b, err)
+			}
+		}
+
+		// Snapshot at block 50.
+		snap := recordForest.Snapshot()
+
+		// Writer continues for 50 more blocks AFTER the snapshot.
+		for b := 50; b < 100; b++ {
+			adds, _, delHashes := sc.NextBlock(numAdds)
+			addHashes := make([]Hash, len(adds))
+			for i, add := range adds {
+				addHashes[i] = add.Hash
+			}
+			_, _, err = recordForest.Record(addHashes, delHashes)
+			if err != nil {
+				t.Fatalf("block %d: Record error: %v", b, err)
+			}
+		}
+
+		// GenerateRoots on the snapshot should still match the Modify forest at block 50.
+		genRoots, genNumLeaves, err := recordForest.GenerateRoots(snap)
+		if err != nil {
+			t.Fatalf("GenerateRoots error: %v", err)
+		}
+
+		recordForest.ReleaseSnapshot(snap)
+
+		if genNumLeaves != modifyForest.NumLeaves {
+			t.Fatalf("numLeaves mismatch: GenerateRoots=%d, Modify=%d",
+				genNumLeaves, modifyForest.NumLeaves)
+		}
+
+		modifyRoots := modifyForest.GetRoots()
+		require.Equal(t, modifyRoots, genRoots,
+			"GenerateRoots at snapshot should match Modify roots at block 50, even after writer advanced to block 100")
 	})
 }
 
