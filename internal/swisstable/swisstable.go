@@ -27,6 +27,7 @@ import (
 	"io"
 	"math/bits"
 	"os"
+	"runtime"
 	"slices"
 	"syscall"
 )
@@ -70,6 +71,12 @@ type SwissPositionMap struct {
 
 	// Entry count
 	count uint64
+
+	// Reusable buffer for hash verification. Avoids heap allocation on
+	// every verifyHash call — the [32]byte escapes to heap when passed
+	// to io.ReaderAt.ReadAt through the interface, causing millions of
+	// small allocations during Set and resize.
+	hashBuf [32]byte
 }
 
 // ----------------------------------------------------------------------------
@@ -239,13 +246,16 @@ func (m *SwissPositionMap) Get(hash [32]byte) (uint64, bool, error) {
 	h1, h2 := splitHash(hash)
 	start := h1 % m.numGroups
 
+	// Local buffer for hash verification. Get is called concurrently
+	// so we can't use the shared m.hashBuf.
+	var buf [32]byte
 	for i := range m.numGroups {
 		base := m.groupBase(start, i)
 		// Check slots with matching H2
 		for matches := m.matchH2(base, h2); matches != 0; matches &= matches - 1 {
 			slot := base + uint64(bits.TrailingZeros16(matches))
 			packed := m.getSlot(slot)
-			ok, err := m.verifyHash(packed, hash)
+			ok, err := m.verifyHash(buf[:], packed, hash)
 			if err != nil {
 				return 0, false, fmt.Errorf("swiss get: %w", err)
 			}
@@ -260,6 +270,66 @@ func (m *SwissPositionMap) Get(hash [32]byte) (uint64, bool, error) {
 		}
 	}
 	return 0, false, nil
+}
+
+// SetBatch inserts multiple new hash→packed mappings. The caller guarantees
+// that none of the hashes already exist in the table (e.g. new leaves from
+// Record). This skips duplicate checking (matchH2 + verifyHash) and
+// prefetches ctrl/slots memory 4 iterations ahead to hide mmap latency.
+//
+// NOT safe for concurrent use. Must not be called with hashes that are
+// already in the table — use Set for upserts.
+func (m *SwissPositionMap) SetBatch(hashes [][32]byte, packeds []uint64) error {
+	n := uint64(len(hashes))
+	if n == 0 {
+		return nil
+	}
+
+	// Pre-resize once for the entire batch.
+	for (m.count+n)*10 > m.numSlots*7 {
+		if err := m.resize(); err != nil {
+			return err
+		}
+	}
+
+	const ahead = 4
+	numGroups := m.numGroups
+	ctrl := m.ctrl
+	slots := m.slots
+	var sink byte
+
+	for i := range hashes {
+		// Prefetch ctrl + slots for a future insert to hide mmap latency.
+		// The sink variable prevents the compiler from optimizing these away.
+		if i+ahead < len(hashes) {
+			h1p := binary.LittleEndian.Uint64(hashes[i+ahead][:8])
+			baseP := (h1p % numGroups) * groupSize
+			sink ^= ctrl[baseP]
+			sink ^= slots[baseP*8]
+		}
+
+		h1, h2 := splitHash(hashes[i])
+		start := h1 % numGroups
+
+		inserted := false
+		for j := range numGroups {
+			base := ((start + j) % numGroups) * groupSize
+			if avail := matchEmptyOrDeleted(ctrl[base : base+groupSize]); avail != 0 {
+				slot := base + uint64(bits.TrailingZeros16(avail))
+				ctrl[slot] = h2
+				binary.LittleEndian.PutUint64(slots[slot*8:], packeds[i])
+				m.count++
+				inserted = true
+				break
+			}
+		}
+		if !inserted {
+			runtime.KeepAlive(sink)
+			return fmt.Errorf("swiss table SetBatch: no slot (count=%d, slots=%d)", m.count, m.numSlots)
+		}
+	}
+	runtime.KeepAlive(sink)
+	return nil
 }
 
 // Set stores a hash -> packed position mapping, resizing the table if needed.
@@ -292,7 +362,7 @@ func (m *SwissPositionMap) set(hash [32]byte, packed uint64) error {
 		// Check if key exists (update in place)
 		for matches := m.matchH2(base, h2); matches != 0; matches &= matches - 1 {
 			slot := base + uint64(bits.TrailingZeros16(matches))
-			ok, err := m.verifyHash(m.getSlot(slot), hash)
+			ok, err := m.verifyHash(m.hashBuf[:], m.getSlot(slot), hash)
 			if err != nil {
 				return fmt.Errorf("swiss set: %w", err)
 			}
@@ -341,7 +411,7 @@ func (m *SwissPositionMap) Delete(hash [32]byte) (bool, error) {
 
 		for matches := m.matchH2(base, h2); matches != 0; matches &= matches - 1 {
 			slot := base + uint64(bits.TrailingZeros16(matches))
-			ok, err := m.verifyHash(m.getSlot(slot), hash)
+			ok, err := m.verifyHash(m.hashBuf[:], m.getSlot(slot), hash)
 			if err != nil {
 				return false, fmt.Errorf("swiss delete: %w", err)
 			}
@@ -452,13 +522,12 @@ func splitHash(hash [32]byte) (h1 uint64, h2 byte) {
 // verifyHash reads the hash at the position encoded in packed and compares it
 // to expected. The position (extracted via posMask) must correspond to a
 // valid 32-byte hash entry in dataFile at offset position*32.
-func (m *SwissPositionMap) verifyHash(packed uint64, expected [32]byte) (bool, error) {
-	var buf [32]byte
+func (m *SwissPositionMap) verifyHash(buf []byte, packed uint64, expected [32]byte) (bool, error) {
 	pos := packed & m.posMask
-	if _, err := m.dataFile.ReadAt(buf[:], int64(pos*32)); err != nil {
+	if _, err := m.dataFile.ReadAt(buf, int64(pos*32)); err != nil {
 		return false, fmt.Errorf("read hash at position %d: %w", pos, err)
 	}
-	return buf == expected, nil
+	return *(*[32]byte)(buf) == expected, nil
 }
 
 // ----------------------------------------------------------------------------
@@ -530,7 +599,7 @@ func rehashInsert(ctrl []byte, slots []byte, numGroups uint64, hash [32]byte, pa
 // current session. The zeroed consistency hash ensures rebuild on restart.
 func (m *SwissPositionMap) resize() error {
 	oldNumSlots := m.numSlots
-	newNumSlots := oldNumSlots * 2
+	newNumSlots := oldNumSlots * 4
 	newNumGroups := newNumSlots / groupSize
 
 	// Copy old data before remapping. Both copies are necessary because
@@ -643,13 +712,12 @@ func (m *SwissPositionMap) resize() error {
 	}
 
 	for _, packed := range entries {
-		var hash [32]byte
 		pos := int64((packed & posMask) * 32)
-		if _, err := m.dataFile.ReadAt(hash[:], pos); err != nil {
+		if _, err := m.dataFile.ReadAt(m.hashBuf[:], pos); err != nil {
 			restoreOld()
 			return fmt.Errorf("resize rehash read: %w", err)
 		}
-		if err := rehashInsert(newCtrl, newSlots, newNumGroups, hash, packed); err != nil {
+		if err := rehashInsert(newCtrl, newSlots, newNumGroups, m.hashBuf, packed); err != nil {
 			restoreOld()
 			return fmt.Errorf("resize rehash: %w", err)
 		}
