@@ -16,5 +16,6 @@ import (
 type File interface {
 	io.ReadWriteSeeker
 	io.ReaderAt
+	io.WriterAt
 	io.Closer
 }

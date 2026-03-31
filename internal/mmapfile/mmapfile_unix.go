@@ -59,6 +59,20 @@ func (m *mmapFile) ReadAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
+func (m *mmapFile) WriteAt(p []byte, off int64) (int, error) {
+	if m.data == nil {
+		return 0, errClosed
+	}
+	if off < 0 || off >= m.size {
+		return 0, fmt.Errorf("mmapFile: writeAt at %d beyond size %d", off, m.size)
+	}
+	n := copy(m.data[off:m.size], p)
+	if n < len(p) {
+		return n, fmt.Errorf("mmapFile: short writeAt at %d (wrote %d of %d)", off, n, len(p))
+	}
+	return n, nil
+}
+
 func (m *mmapFile) Read(p []byte) (int, error) {
 	n, err := m.ReadAt(p, m.pos)
 	m.pos += int64(n)
