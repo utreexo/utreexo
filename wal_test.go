@@ -583,7 +583,7 @@ func TestWALForestIntegration(t *testing.T) {
 	require.NoError(t, err)
 
 	tmpDir := t.TempDir()
-	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10)
+	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10, 0)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -619,7 +619,7 @@ func TestWALForestIntegration(t *testing.T) {
 	tmpDir2 := t.TempDir()
 	bitmap2, err := loadDeletedBitmap(delFile)
 	require.NoError(t, err)
-	forest2, err := newForest(mainFile, blockCountsFile, metaFile, bitmap2, tmpDir2+"/ctrl", tmpDir2+"/slots", 10)
+	forest2, err := newForest(mainFile, blockCountsFile, metaFile, bitmap2, tmpDir2+"/ctrl", tmpDir2+"/slots", 10, 0)
 	require.NoError(t, err)
 	require.Equal(t, forest.GetRoots(), forest2.GetRoots(),
 		"roots should match after restart from WAL-flushed data")
@@ -643,7 +643,7 @@ func TestWALForestRecovery(t *testing.T) {
 	require.NoError(t, err)
 
 	tmpDir := t.TempDir()
-	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10)
+	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10, 0)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -693,7 +693,7 @@ func TestWALForestRecovery(t *testing.T) {
 	// Build forest from recovered underlying files.
 	tmpDir2 := t.TempDir()
 	forest2, err := newForest(
-		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Bitmap(), tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
+		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Bitmap(), tmpDir2+"/ctrl", tmpDir2+"/slots", 10, 0,
 	)
 	require.NoError(t, err)
 
@@ -724,7 +724,7 @@ func TestWALCrashBeforeCommit(t *testing.T) {
 	require.NoError(t, err)
 
 	tmpDir := t.TempDir()
-	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10)
+	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10, 0)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -766,7 +766,7 @@ func TestWALCrashBeforeCommit(t *testing.T) {
 	// Build forest from underlying files — should be at block 1 state.
 	tmpDir2 := t.TempDir()
 	forest2, err := newForest(
-		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Bitmap(), tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
+		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Bitmap(), tmpDir2+"/ctrl", tmpDir2+"/slots", 10, 0,
 	)
 	require.NoError(t, err)
 

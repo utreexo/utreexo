@@ -138,7 +138,7 @@ func newTestForest(t *testing.T, forestRows uint8) *Forest {
 	forest, err := newForest(
 		newMemFile(), newMemFile(), newMemFile(), nil,
 		tmpDir+"/ctrl", tmpDir+"/slots",
-		forestRows,
+		forestRows, 0,
 	)
 	require.NoError(t, err)
 	return forest
@@ -426,7 +426,7 @@ func FuzzForestChain(f *testing.F) {
 
 		memFile := newMemFile()
 		tmpDir := t.TempDir()
-		forest, err := newForest(memFile, newMemFile(), newMemFile(), nil, tmpDir+"/ctrl", tmpDir+"/slots", 16)
+		forest, err := newForest(memFile, newMemFile(), newMemFile(), nil, tmpDir+"/ctrl", tmpDir+"/slots", 16, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -511,14 +511,14 @@ func FuzzForestRecord(f *testing.F) {
 
 		// Forest using normal Modify
 		tmpDir1 := t.TempDir()
-		modifyForest, err := newForest(newMemFile(), newMemFile(), newMemFile(), nil, tmpDir1+"/ctrl", tmpDir1+"/slots", 16)
+		modifyForest, err := newForest(newMemFile(), newMemFile(), newMemFile(), nil, tmpDir1+"/ctrl", tmpDir1+"/slots", 16, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		// Forest using Record + HashAll
 		tmpDir2 := t.TempDir()
-		recordForest, err := newForest(newMemFile(), newMemFile(), newMemFile(), nil, tmpDir2+"/ctrl", tmpDir2+"/slots", 16)
+		recordForest, err := newForest(newMemFile(), newMemFile(), newMemFile(), nil, tmpDir2+"/ctrl", tmpDir2+"/slots", 16, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -622,7 +622,7 @@ func FuzzTreeBuilding(f *testing.F) {
 
 		memFile := newMemFile()
 		tmpDir := t.TempDir()
-		forest, err := newForest(memFile, newMemFile(), newMemFile(), nil, tmpDir+"/ctrl", tmpDir+"/slots", 17)
+		forest, err := newForest(memFile, newMemFile(), newMemFile(), nil, tmpDir+"/ctrl", tmpDir+"/slots", 17, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -668,7 +668,7 @@ func TestForestNoFlushBeforeWAL(t *testing.T) {
 
 	// Create forest backed by the WAL.
 	tmpDir := t.TempDir()
-	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10)
+	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 10, 0)
 	require.NoError(t, err)
 
 	// Reference pollard for correctness comparison.
@@ -723,7 +723,7 @@ func TestForestNoFlushBeforeWAL(t *testing.T) {
 	require.NoError(t, err)
 	forest2, err := newForest(
 		underlyingFile, underlyingBlockCountsFile, underlyingMetaFile, bitmap2,
-		tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
+		tmpDir2+"/ctrl", tmpDir2+"/slots", 10, 0,
 	)
 	require.NoError(t, err)
 	require.Equal(t, forest.GetRoots(), forest2.GetRoots(),
@@ -750,7 +750,7 @@ func TestForestCrashRecovery(t *testing.T) {
 	require.NoError(t, err)
 
 	tmpDir := t.TempDir()
-	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 16)
+	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 16, 0)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -789,7 +789,7 @@ func TestForestCrashRecovery(t *testing.T) {
 	require.NoError(t, err)
 	preRecoveryForest, err := newForest(
 		mainFile, blockCountsFile, metaFile, preRecoveryBitmap,
-		tmpDir2+"/ctrl", tmpDir2+"/slots", 16,
+		tmpDir2+"/ctrl", tmpDir2+"/slots", 16, 0,
 	)
 	require.NoError(t, err)
 	require.Equal(t, block200Roots, preRecoveryForest.GetRoots(),
@@ -806,7 +806,7 @@ func TestForestCrashRecovery(t *testing.T) {
 	tmpDir3 := t.TempDir()
 	recoveredForest, err := newForest(
 		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Bitmap(),
-		tmpDir3+"/ctrl", tmpDir3+"/slots", 16,
+		tmpDir3+"/ctrl", tmpDir3+"/slots", 16, 0,
 	)
 	require.NoError(t, err)
 	require.Equal(t, block400Roots, recoveredForest.GetRoots(),
@@ -839,7 +839,7 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	require.NoError(t, err)
 
 	tmpDir := t.TempDir()
-	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 16)
+	forest, err := newForest(w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(), tmpDir+"/ctrl", tmpDir+"/slots", 16, 0)
 	require.NoError(t, err)
 
 	pollard := NewAccumulator()
@@ -884,7 +884,7 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 	tmpDir2 := t.TempDir()
 	recoveredForest, err := newForest(
 		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Bitmap(),
-		tmpDir2+"/ctrl", tmpDir2+"/slots", 16,
+		tmpDir2+"/ctrl", tmpDir2+"/slots", 16, 0,
 	)
 	require.NoError(t, err)
 	require.Equal(t, savedRoots, recoveredForest.GetRoots(),
@@ -1011,7 +1011,7 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 	tmpDir1 := t.TempDir()
 	forest, err := newForest(
 		w.Cached(0), w.Cached(1), w.Cached(2), w.Bitmap(),
-		tmpDir1+"/ctrl", tmpDir1+"/slots", 10,
+		tmpDir1+"/ctrl", tmpDir1+"/slots", 10, 0,
 	)
 	require.NoError(t, err)
 
@@ -1073,7 +1073,7 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 	tmpDir2 := t.TempDir()
 	forest2, err := newForest(
 		w2.Cached(0), w2.Cached(1), w2.Cached(2), w2.Bitmap(),
-		tmpDir2+"/ctrl", tmpDir2+"/slots", 10,
+		tmpDir2+"/ctrl", tmpDir2+"/slots", 10, 0,
 	)
 	require.NoError(t, err)
 
@@ -1230,7 +1230,7 @@ func TestForestBlockCountsReconciliation(t *testing.T) {
 			tmpDir := t.TempDir()
 			forest, err := newForest(
 				mainFile, blockCountsFile, metaFile, nil,
-				tmpDir+"/ctrl", tmpDir+"/slots", 10,
+				tmpDir+"/ctrl", tmpDir+"/slots", 10, 0,
 			)
 			require.NoError(t, err)
 			require.Equal(t, tc.numLeaves, forest.NumLeaves)

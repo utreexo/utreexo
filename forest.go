@@ -285,7 +285,7 @@ func readBlockCounts(file io.ReadSeeker) ([]uint32, error) {
 // load it with loadDeletedBitmap.
 // posMapCtrlPath and posMapSlotsPath are file paths for the Swiss Table position map.
 // forestRows sets the maximum tree height (determines max leaves = 2^forestRows).
-func newForest(file forestFile, blockCountsFile, metaFile forestFile, bitmap *deletedBitmap, posMapCtrlPath, posMapSlotsPath string, forestRows uint8) (*Forest, error) {
+func newForest(file forestFile, blockCountsFile, metaFile forestFile, bitmap *deletedBitmap, posMapCtrlPath, posMapSlotsPath string, forestRows uint8, expectedMaxLeaves uint64) (*Forest, error) {
 	if file == nil || blockCountsFile == nil || metaFile == nil {
 		return nil, fmt.Errorf("one of the given files are nil")
 	}
@@ -330,9 +330,15 @@ func newForest(file forestFile, blockCountsFile, metaFile forestFile, bitmap *de
 	metaFile.Seek(bestHashOffset, io.SeekStart)
 	metaFile.Read(consistencyHash[:])
 
-	// Create Swiss Table for position map. Size based on numLeaves (will resize if needed).
-	// Use a minimum of 1<<16 to avoid excessive early resizes on a fresh database.
-	expectedEntries := max(f.NumLeaves, 1<<16)
+	// Create Swiss Table for position map. Size based on numLeaves or
+	// expectedMaxLeaves (whichever is larger) to avoid costly resizes.
+	// When no hint is provided, use a minimum of 1<<16 to avoid excessive
+	// early resizes on a fresh database. Cap at 1<<33 to prevent
+	// accidental multi-hundred-GB allocations.
+	expectedEntries := max(f.NumLeaves, min(expectedMaxLeaves, 1<<33))
+	if expectedMaxLeaves == 0 {
+		expectedEntries = max(expectedEntries, 1<<16)
+	}
 	posMap, needsRebuild, err := swisstable.NewSwissPositionMap(posMapCtrlPath, posMapSlotsPath, expectedEntries, consistencyHash, file, positionMask)
 	if err != nil {
 		return nil, fmt.Errorf("create position map: %w", err)
@@ -359,7 +365,8 @@ func newForest(file forestFile, blockCountsFile, metaFile forestFile, bitmap *de
 type ForestOption func(*forestOptions)
 
 type forestOptions struct {
-	maxCacheMemory int64
+	maxCacheMemory    int64
+	expectedMaxLeaves uint64
 }
 
 // MaxCacheMemory sets the total WAL cache memory budget in bytes.
@@ -368,6 +375,15 @@ type forestOptions struct {
 func MaxCacheMemory(bytes int64) ForestOption {
 	return func(o *forestOptions) {
 		o.maxCacheMemory = bytes
+	}
+}
+
+// ExpectedMaxLeaves sets the expected maximum number of leaves for presizing
+// the position map. This avoids costly resizes during initial sync. If zero
+// or not set, the position map is sized based on the current NumLeaves.
+func ExpectedMaxLeaves(n uint64) ForestOption {
+	return func(o *forestOptions) {
+		o.expectedMaxLeaves = n
 	}
 }
 
@@ -470,6 +486,7 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 		wal.Bitmap(),
 		ctrlPath, slotsPath,
 		defaultForestRows,
+		o.expectedMaxLeaves,
 	)
 	if err != nil {
 		for _, c := range closers {
