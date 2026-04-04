@@ -1,6 +1,7 @@
 package utreexo
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"reflect"
@@ -406,4 +407,118 @@ func checkUpdateData(updateData UpdateData, adds, delHashes, prevRoots []Hash, p
 	}
 
 	return nil
+}
+
+// TestStumpSerializeDeserialize tests basic round-trip serialization.
+func TestStumpSerializeDeserialize(t *testing.T) {
+	// Test cases with different stump configuration
+	testCases := []struct {
+		name      string
+		numLeaves uint64
+		roots     []string
+	}{
+		{
+			name:      "empty stump",
+			numLeaves: 0,
+			roots:     []string{},
+		},
+		{
+			name:      "single root",
+			numLeaves: 1,
+			roots:     []string{"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+		},
+		{
+			name:      "multiple roots",
+			numLeaves: 15,
+			roots: []string{
+				"1111111111111111111111111111111111111111111111111111111111111111",
+				"2222222222222222222222222222222222222222222222222222222222222222",
+				"3333333333333333333333333333333333333333333333333333333333333333",
+				"4444444444444444444444444444444444444444444444444444444444444444",
+			},
+		},
+		{
+			name:      "large number of leaves",
+			numLeaves: 1000000,
+			roots: []string{
+				"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+				"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+				"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+				"0000000000000000000000000000000000000000000000000000000000000000",
+			},
+		},
+	}
+	deserializeTestCases := []struct {
+		name string
+		data []byte
+	}{
+		{
+			name: "empty data",
+			data: []byte{},
+		},
+		{
+			name: "incomplete NumLeaves",
+			data: []byte{0x01, 0x02, 0x03},
+		},
+		{
+			name: "incomplete roots count",
+			data: []byte{
+				0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x02, 0x03,
+			},
+		},
+		{
+			name: "incomplete root hash",
+			data: []byte{
+				0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x11, 0x11, 0x11,
+			},
+		},
+	}
+
+	for _, tc := range deserializeTestCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := bytes.NewReader(tc.data)
+			_, err := DeserializeStump(buf)
+			require.Error(t, err, "should fail to deserialize invalid data")
+		})
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create original stump
+			original := &Stump{
+				NumLeaves: tc.numLeaves,
+				Roots:     make([]Hash, len(tc.roots)),
+			}
+			// Convert hex string to hash arrays
+			for i, hexRoot := range tc.roots {
+				rootBytes, err := hex.DecodeString(hexRoot)
+				require.NoError(t, err)
+				require.Len(t, rootBytes, 32, "each root must be 32 bytes")
+				copy(original.Roots[i][:], rootBytes)
+			}
+			// Serialise to buffer
+			var buf bytes.Buffer
+			err := original.Serialize(&buf)
+			require.NoError(t, err)
+
+			// Deserialize from buffer
+			deserialized, err := DeserializeStump(&buf)
+			require.NoError(t, err)
+
+			// Verify round-trip succeeded
+			require.Equal(t, original.NumLeaves, deserialized.NumLeaves)
+			require.Equal(t, len(original.Roots), len(deserialized.Roots))
+
+			for i, originalRoot := range original.Roots {
+				require.Equal(t, originalRoot, deserialized.Roots[i], "root %d should match after round-trip", i)
+			}
+		})
+
+	}
 }

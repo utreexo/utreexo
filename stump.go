@@ -1,8 +1,10 @@
 package utreexo
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"sort"
 )
 
@@ -53,6 +55,55 @@ func (s *Stump) String() string {
 	str += "]"
 
 	return str
+}
+
+// Serialize writes the Stump to the given io.Writer in a binary format
+// compatible with rustreexo. The format is:
+// - 8 bytes: number of leaves (little-endian uint64)
+// - 8 bytes: number of roots (little-endian uint64)
+// - 32*N bytes: root hashes
+func (s *Stump) Serialize(w io.Writer) error {
+
+	// Write number of leaves (8  bytes, little-endian)
+	if err := binary.Write(w, binary.LittleEndian, s.NumLeaves); err != nil {
+		return fmt.Errorf("failed to write Numleaves: %v", err)
+	}
+	// Write number of roots (8 bytes, little-endian)
+	numRoots := uint64(len(s.Roots))
+	if err := binary.Write(w, binary.LittleEndian, numRoots); err != nil {
+		return fmt.Errorf("failed to write number of roots: %v", err)
+	}
+	// Write each root hash (32 bytes each)
+	for i, root := range s.Roots {
+		if _, err := w.Write(root[:]); err != nil {
+			return fmt.Errorf("failed to write root %d: %v", i, err)
+		}
+	}
+
+	return nil
+}
+
+// DeserializeStump reads a Stump from the given io.Reader, expecting
+// the binary format produced by Serialize.
+func DeserializeStump(r io.Reader) (*Stump, error) {
+	var stump Stump
+	// Read number of leaves (8 bytes , little-endian)
+	if err := binary.Read(r, binary.LittleEndian, &stump.NumLeaves); err != nil {
+		return nil, fmt.Errorf("failed to read NumbLeaves: %v", err)
+	}
+	// Read number of roots (8 bytes, little-endian)
+	var numRoots uint64
+	if err := binary.Read(r, binary.LittleEndian, &numRoots); err != nil {
+		return nil, fmt.Errorf("failed to read number of roots: %v", err)
+	}
+	// Read each root hash (32 bytes each)
+	stump.Roots = make([]Hash, numRoots)
+	for i := uint64(0); i < numRoots; i++ {
+		if _, err := io.ReadFull(r, stump.Roots[i][:]); err != nil {
+			return nil, fmt.Errorf("failed to read root %d: %v", i, err)
+		}
+	}
+	return &stump, nil
 }
 
 // Update verifies the proof and updates the Stump with the additions and the deletions.
