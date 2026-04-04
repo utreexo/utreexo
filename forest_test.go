@@ -1247,3 +1247,60 @@ func TestForestBlockCountsReconciliation(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkForestRebuildPositionMap(b *testing.B) {
+	for _, numLeaves := range []uint64{250_000, 5_000_000} {
+		b.Run(fmt.Sprintf("leaves_%dK", numLeaves/1000), func(b *testing.B) {
+			benchForestRebuild(b, numLeaves)
+		})
+	}
+}
+
+// benchForestRebuild builds a forest with the given number of leaves by
+// writing hashes directly to the data file (much faster than calling Modify
+// for millions of entries), then benchmarks rebuildPositionMap.
+func benchForestRebuild(b *testing.B, numLeaves uint64) {
+	b.Helper()
+
+	// Write deterministic hashes directly into the data file.
+	dataFile := newMemFile()
+	buf := make([]byte, numLeaves*32)
+	for i := uint64(0); i < numLeaves; i++ {
+		h := testHashFromInt(int(i))
+		copy(buf[i*32:], h[:])
+	}
+	dataFile.data = buf
+
+	// Create block counts: one block with all leaves.
+	blockCountsFile := newMemFile()
+	var countBuf [4]byte
+	binary.LittleEndian.PutUint32(countBuf[:], uint32(numLeaves))
+	blockCountsFile.Write(countBuf[:])
+
+	// Create metadata with numLeaves.
+	metaFile := newMemFile()
+	var metaBuf [64]byte
+	binary.LittleEndian.PutUint64(metaBuf[32:], numLeaves)
+	metaFile.Write(metaBuf[:])
+
+	tmpDir := b.TempDir()
+	forest, err := newForest(
+		dataFile, blockCountsFile, metaFile, nil,
+		tmpDir+"/ctrl", tmpDir+"/slots",
+		48,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer forest.Close([32]byte{})
+
+	b.Logf("NumLeaves: %d", forest.NumLeaves)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		if err := forest.rebuildPositionMap(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
