@@ -7,8 +7,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -784,6 +786,64 @@ func BenchmarkSwissSet(b *testing.B) {
 	b.ResetTimer()
 	for i := range b.N {
 		m.Set(hashes[i%numEntries], uint64(i%numEntries))
+	}
+}
+
+// TestSwissResizePerf measures resize wall-clock time and heap allocations
+// at realistic scale. Run with -v to see timing output.
+func TestSwissResizePerf(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping resize perf test in short mode")
+	}
+
+	for _, numEntries := range []int{500_000, 5_000_000} {
+		t.Run(fmt.Sprintf("entries=%d", numEntries), func(t *testing.T) {
+			tmpDir := t.TempDir()
+			dataFile, err := os.Create(tmpDir + "/data")
+			require.NoError(t, err)
+			defer dataFile.Close()
+
+			hashes := make([][32]byte, numEntries+1)
+			for i := range numEntries + 1 {
+				hashes[i] = testHashFromInt(i)
+				dataFile.Write(hashes[i][:])
+			}
+
+			m, _, err := NewSwissPositionMap(tmpDir+"/ctrl", tmpDir+"/slots", uint64(numEntries), [32]byte{}, dataFile, testPositionMask)
+			require.NoError(t, err)
+			defer m.Close()
+
+			for i := range numEntries {
+				require.NoError(t, m.Set(hashes[i], uint64(i)))
+			}
+
+			var memBefore, memAfter runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&memBefore)
+
+			start := time.Now()
+			require.NoError(t, m.resize())
+			elapsed := time.Since(start)
+
+			runtime.ReadMemStats(&memAfter)
+			allocated := memAfter.TotalAlloc - memBefore.TotalAlloc
+
+			t.Logf("resize %d entries: %v, heap allocated: %s",
+				numEntries, elapsed, formatBytes(allocated))
+		})
+	}
+}
+
+func formatBytes(b uint64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.2f GB", float64(b)/float64(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.2f MB", float64(b)/float64(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.2f KB", float64(b)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
 	}
 }
 
