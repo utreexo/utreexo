@@ -27,7 +27,6 @@ import (
 	"io"
 	"math/bits"
 	"os"
-	"runtime"
 	"slices"
 	"syscall"
 )
@@ -292,22 +291,11 @@ func (m *SwissPositionMap) SetBatch(hashes [][32]byte, packeds []uint64) error {
 		}
 	}
 
-	const ahead = 4
 	numGroups := m.numGroups
 	ctrl := m.ctrl
 	slots := m.slots
-	var sink byte
 
 	for i := range hashes {
-		// Prefetch ctrl + slots for a future insert to hide mmap latency.
-		// The sink variable prevents the compiler from optimizing these away.
-		if i+ahead < len(hashes) {
-			h1p := binary.LittleEndian.Uint64(hashes[i+ahead][:8])
-			baseP := (h1p % numGroups) * groupSize
-			sink ^= ctrl[baseP]
-			sink ^= slots[baseP*8]
-		}
-
 		h1, h2 := splitHash(hashes[i])
 		start := h1 % numGroups
 
@@ -324,11 +312,9 @@ func (m *SwissPositionMap) SetBatch(hashes [][32]byte, packeds []uint64) error {
 			}
 		}
 		if !inserted {
-			runtime.KeepAlive(sink)
 			return fmt.Errorf("swiss table SetBatch: no slot (count=%d, slots=%d)", m.count, m.numSlots)
 		}
 	}
-	runtime.KeepAlive(sink)
 	return nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -785,6 +786,116 @@ func BenchmarkSwissSet(b *testing.B) {
 	for i := range b.N {
 		m.Set(hashes[i%numEntries], uint64(i%numEntries))
 	}
+}
+
+func BenchmarkSwissSetBatch(b *testing.B) {
+	const batchSize = 4096
+	const totalEntries = 1 << 20
+
+	tmpDir := b.TempDir()
+	dataPath := tmpDir + "/data"
+	dataFile, _ := os.Create(dataPath)
+	defer dataFile.Close()
+
+	hashes := make([][32]byte, totalEntries)
+	for i := range totalEntries {
+		hashes[i] = testHashFromInt(i)
+		dataFile.Write(hashes[i][:])
+	}
+	dataFile.Seek(0, 0)
+
+	packeds := make([]uint64, batchSize)
+	for i := range batchSize {
+		packeds[i] = uint64(i)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		os.Remove(tmpDir + "/ctrl")
+		os.Remove(tmpDir + "/slots")
+		m, _, _ := NewSwissPositionMap(tmpDir+"/ctrl", tmpDir+"/slots", uint64(totalEntries), [32]byte{}, dataFile, testPositionMask)
+		b.StartTimer()
+
+		for off := 0; off+batchSize <= totalEntries; off += batchSize {
+			if err := m.SetBatch(hashes[off:off+batchSize], packeds); err != nil {
+				b.Fatal(err)
+			}
+		}
+
+		b.StopTimer()
+		m.Close()
+		b.StartTimer()
+	}
+	b.SetBytes(int64(totalEntries) * 32)
+}
+
+// BenchmarkSwissSetBatchCold simulates the IBD case the prefetch was designed
+// for: a table large enough that random inserts touch cold pages. Uses
+// MADV_DONTNEED on the mmap regions before each batch to force page-table /
+// TLB misses on subsequent accesses.
+func BenchmarkSwissSetBatchCold(b *testing.B) {
+	const batchSize = 4096
+	// 64M entries → ~64MB ctrl + ~512MB slots. Comfortably exceeds L3 (128MB)
+	// and forces random pages to be re-faulted after MADV_DONTNEED.
+	const totalEntries = 1 << 26
+
+	tmpDir := b.TempDir()
+	dataPath := tmpDir + "/data"
+	dataFile, _ := os.Create(dataPath)
+	defer dataFile.Close()
+
+	// Stream-write the data file without holding all hashes in RAM.
+	// We don't need the hashes back — SetBatch only reads the table.
+	hashes := make([][32]byte, batchSize)
+	packeds := make([]uint64, batchSize)
+	for i := range batchSize {
+		packeds[i] = uint64(i)
+	}
+
+	m, _, _ := NewSwissPositionMap(tmpDir+"/ctrl", tmpDir+"/slots", uint64(totalEntries), [32]byte{}, dataFile, testPositionMask)
+	defer m.Close()
+
+	// Pre-populate the table so that subsequent random reads in the prefetch
+	// path actually find populated cache lines (not all-zero pages).
+	preFill := totalEntries / 2
+	idx := 0
+	for off := 0; off+batchSize <= preFill; off += batchSize {
+		for i := range batchSize {
+			hashes[i] = testHashFromInt(idx)
+			idx++
+		}
+		if err := m.SetBatch(hashes, packeds); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	// Generate the hash batches we'll insert during the timed phase.
+	insertBatches := make([][][32]byte, 64)
+	for j := range insertBatches {
+		insertBatches[j] = make([][32]byte, batchSize)
+		for i := range batchSize {
+			insertBatches[j][i] = testHashFromInt(idx)
+			idx++
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		// Evict ctrl + slots pages, simulating cold mmap access.
+		_ = syscall.Madvise(m.ctrlMmap, syscall.MADV_DONTNEED)
+		_ = syscall.Madvise(m.slotsMmap, syscall.MADV_DONTNEED)
+		batch := insertBatches[i%len(insertBatches)]
+		b.StartTimer()
+
+		if err := m.SetBatch(batch, packeds); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.SetBytes(int64(batchSize) * 32)
 }
 
 // BenchmarkGoMapGet benchmarks native Go map for comparison.
