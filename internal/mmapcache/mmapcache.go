@@ -3,8 +3,10 @@
 // demand-paged by the kernel, so only touched pages consume physical memory.
 // A separate presence bitmap tracks which slots have cached data (for Get).
 // A dirty bitmap tracks which slots were written since the last ClearDirty
-// (for ForEach). Atomic range tracking [dirtyMinWord, dirtyMaxWord] bounds
-// the ForEach scan without any mutex or dense list, making Put fully lock-free.
+// (for ForEach). A second-level (coarse) dirty bitmap with one bit per 64
+// fine words lets ForEach and ClearDirty skip large empty regions cheaply.
+// Atomic range tracking [dirtyMinWord, dirtyMaxWord] further bounds the
+// scan without any mutex or dense list, making Put fully lock-free.
 package mmapcache
 
 import (
@@ -34,15 +36,17 @@ const maxRegionSize = 1 << (30 + 10*(^uint(0)>>63))
 // Callers must NOT call ForEach, Clear, ClearDirty, DeleteAbove, or Close
 // concurrently with any other method.
 type Store struct {
-	data        []byte // mmap'd data region (demand-paged)
-	bitmap      []byte // mmap'd presence bitmap; tracks which slots have cached data for Get
-	dirtyBitmap []byte // mmap'd dirty bitmap; tracks which slots were written since last ClearDirty
+	data         []byte // mmap'd data region (demand-paged)
+	bitmap       []byte // mmap'd presence bitmap; tracks which slots have cached data for Get
+	dirtyBitmap  []byte // mmap'd dirty bitmap; tracks which slots were written since last ClearDirty
+	dirtyBitmap2 []byte // mmap'd coarse dirty bitmap; bit cw*64+cb means dirtyBitmap word cw*64+cb may be non-zero
 
-	entrySize  int
-	slots      int // total number of slots
-	words      int // number of uint64 words in each bitmap
-	maxEntries int
-	totalCount atomic.Int64
+	entrySize   int
+	slots       int // total number of slots
+	words       int // number of uint64 words in each (fine) bitmap
+	coarseWords int // number of uint64 words in the coarse dirty bitmap
+	maxEntries  int
+	totalCount  atomic.Int64
 
 	// Atomic range of dirty bitmap word indices. ForEach scans only
 	// [dirtyMinWord, dirtyMaxWord]. Initialized to empty (min > max).
@@ -67,6 +71,11 @@ func New(entrySize int, maxBytes int64) (*Store, error) {
 	if bitmapSize == 0 {
 		bitmapSize = 8
 	}
+	coarseWords := (words + bitsPerWord - 1) / bitsPerWord
+	coarseBitmapSize := coarseWords * 8
+	if coarseBitmapSize == 0 {
+		coarseBitmapSize = 8
+	}
 
 	data, err := mmapAnon(maxRegionSize)
 	if err != nil {
@@ -83,15 +92,24 @@ func New(entrySize int, maxBytes int64) (*Store, error) {
 		mmapRelease(bitmap)
 		return nil, fmt.Errorf("mmapcache: mmap dirtyBitmap %d bytes: %w", bitmapSize, err)
 	}
+	dirtyBitmap2, err := mmapAnon(coarseBitmapSize)
+	if err != nil {
+		mmapRelease(data)
+		mmapRelease(bitmap)
+		mmapRelease(dirtyBitmap)
+		return nil, fmt.Errorf("mmapcache: mmap dirtyBitmap2 %d bytes: %w", coarseBitmapSize, err)
+	}
 
 	s := &Store{
-		data:        data,
-		bitmap:      bitmap,
-		dirtyBitmap: dirtyBitmap,
-		entrySize:   entrySize,
-		slots:       slots,
-		words:       words,
-		maxEntries:  int(maxBytes) / entrySize,
+		data:         data,
+		bitmap:       bitmap,
+		dirtyBitmap:  dirtyBitmap,
+		dirtyBitmap2: dirtyBitmap2,
+		entrySize:    entrySize,
+		slots:        slots,
+		words:        words,
+		coarseWords:  coarseWords,
+		maxEntries:   int(maxBytes) / entrySize,
 	}
 	// Initialize range sentinels to "empty".
 	s.dirtyMinWord.Store(math.MaxInt64)
@@ -194,6 +212,24 @@ func (s *Store) Put(offset int64, data []byte) error {
 			s.totalCount.Add(1)
 			atomicMinInt64(&s.dirtyMinWord, wInt64)
 			atomicMaxInt64(&s.dirtyMaxWord, wInt64)
+			// If this is the first bit in the fine word, mark the
+			// corresponding coarse bit so ForEach/ClearDirty can
+			// skip empty regions cheaply. Otherwise the coarse bit
+			// was already set by a prior Put into this word.
+			if old == 0 {
+				cw := w / bitsPerWord
+				cmask := uint64(1) << uint(w%bitsPerWord)
+				coarsePtr := bmWordPtr(s.dirtyBitmap2, cw)
+				for {
+					oldC := atomic.LoadUint64(coarsePtr)
+					if oldC&cmask != 0 {
+						break
+					}
+					if atomic.CompareAndSwapUint64(coarsePtr, oldC, oldC|cmask) {
+						break
+					}
+				}
+			}
 			return nil
 		}
 	}
@@ -283,12 +319,25 @@ func (s *Store) Clear() {
 			atomic.StoreUint64(bmWordPtr(s.bitmap, w), 0)
 		}
 	}
-	// Clear dirty bitmap in its tracked range.
+	// Clear dirty bitmap via the coarse hierarchy.
 	dlo := int(s.dirtyMinWord.Load())
 	dhi := int(s.dirtyMaxWord.Load())
-	for w := dlo; w <= dhi; w++ {
-		if atomic.LoadUint64(bmWordPtr(s.dirtyBitmap, w)) != 0 {
-			atomic.StoreUint64(bmWordPtr(s.dirtyBitmap, w), 0)
+	if dlo <= dhi {
+		coarseLo := dlo / bitsPerWord
+		coarseHi := dhi / bitsPerWord
+		for cw := coarseLo; cw <= coarseHi; cw++ {
+			cword := atomic.LoadUint64(bmWordPtr(s.dirtyBitmap2, cw))
+			if cword == 0 {
+				continue
+			}
+			tmp := cword
+			for tmp != 0 {
+				cbit := bits.TrailingZeros64(tmp)
+				tmp &= tmp - 1
+				w := cw*bitsPerWord + cbit
+				atomic.StoreUint64(bmWordPtr(s.dirtyBitmap, w), 0)
+			}
+			atomic.StoreUint64(bmWordPtr(s.dirtyBitmap2, cw), 0)
 		}
 	}
 	s.totalCount.Store(0)
@@ -308,9 +357,22 @@ func (s *Store) Clear() {
 func (s *Store) ClearDirty() {
 	lo := int(s.dirtyMinWord.Load())
 	hi := int(s.dirtyMaxWord.Load())
-	for w := lo; w <= hi; w++ {
-		if atomic.LoadUint64(bmWordPtr(s.dirtyBitmap, w)) != 0 {
-			atomic.StoreUint64(bmWordPtr(s.dirtyBitmap, w), 0)
+	if lo <= hi {
+		coarseLo := lo / bitsPerWord
+		coarseHi := hi / bitsPerWord
+		for cw := coarseLo; cw <= coarseHi; cw++ {
+			cword := atomic.LoadUint64(bmWordPtr(s.dirtyBitmap2, cw))
+			if cword == 0 {
+				continue
+			}
+			tmp := cword
+			for tmp != 0 {
+				cbit := bits.TrailingZeros64(tmp)
+				tmp &= tmp - 1
+				w := cw*bitsPerWord + cbit
+				atomic.StoreUint64(bmWordPtr(s.dirtyBitmap, w), 0)
+			}
+			atomic.StoreUint64(bmWordPtr(s.dirtyBitmap2, cw), 0)
 		}
 	}
 	s.totalCount.Store(0)
@@ -332,24 +394,42 @@ func (s *Store) Close() {
 		mmapRelease(s.dirtyBitmap)
 		s.dirtyBitmap = nil
 	}
+	if s.dirtyBitmap2 != nil {
+		mmapRelease(s.dirtyBitmap2)
+		s.dirtyBitmap2 = nil
+	}
 	s.totalCount.Store(0)
 }
 
 // ForEach iterates over all dirty entries (written since last ClearDirty),
-// calling fn for each one. Uses atomic range tracking to bound the scan.
+// calling fn for each one. Uses the two-level dirty bitmap so empty
+// 4096-slot regions are skipped without inspecting their fine words.
 //
 // NOT safe for concurrent use with Put/Delete.
 func (s *Store) ForEach(fn func(offset int64, data []byte)) {
 	lo := int(s.dirtyMinWord.Load())
 	hi := int(s.dirtyMaxWord.Load())
-	for w := lo; w <= hi; w++ {
-		word := atomic.LoadUint64(bmWordPtr(s.dirtyBitmap, w))
-		for word != 0 {
-			bit := bits.TrailingZeros64(word)
-			slot := w*bitsPerWord + bit
-			start := slot * s.entrySize
-			fn(int64(start), s.data[start:start+s.entrySize])
-			word &= word - 1
+	if lo > hi {
+		return
+	}
+	entrySize := s.entrySize
+	data := s.data
+	coarseLo := lo / bitsPerWord
+	coarseHi := hi / bitsPerWord
+	for cw := coarseLo; cw <= coarseHi; cw++ {
+		cword := atomic.LoadUint64(bmWordPtr(s.dirtyBitmap2, cw))
+		for cword != 0 {
+			cbit := bits.TrailingZeros64(cword)
+			cword &= cword - 1
+			w := cw*bitsPerWord + cbit
+			word := atomic.LoadUint64(bmWordPtr(s.dirtyBitmap, w))
+			for word != 0 {
+				bit := bits.TrailingZeros64(word)
+				slot := w*bitsPerWord + bit
+				start := slot * entrySize
+				fn(int64(start), data[start:start+entrySize])
+				word &= word - 1
+			}
 		}
 	}
 }
