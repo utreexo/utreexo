@@ -29,6 +29,11 @@ type cacheStore interface {
 	// clear removes all entries from the cache.
 	clear()
 
+	// clearDirty resets dirty tracking but keeps all entries cached.
+	// After clearDirty, forEach iterates nothing and subsequent puts to
+	// existing entries take the fast path.
+	clearDirty()
+
 	// forEach iterates over all cached entries, calling fn for each.
 	forEach(fn func(offset int64, data []byte))
 
@@ -90,6 +95,30 @@ func newCachedRWS(underlying forestFile, entrySize int, maxCacheBytes int64) (*c
 		maxWritten: size,
 		baseSize:   size,
 	}, nil
+}
+
+// WriteAt writes len(p) bytes starting at byte offset off.
+// The data is stored in the cache (same as Write) without touching the
+// underlying file. Unlike Write, it does not advance the seek position,
+// making it safe for concurrent use when callers write to disjoint offsets.
+//
+// p may be a single entry or a contiguous batch of entries (len must be
+// a multiple of entrySize). Each entry is stored as a separate cache put.
+func (c *cachedRWS) WriteAt(p []byte, off int64) (int, error) {
+	es := c.cache.entrySize()
+	if len(p)%es != 0 {
+		return 0, fmt.Errorf("expected multiple of %d bytes, got %d", es, len(p))
+	}
+	for i := 0; i < len(p); i += es {
+		if err := c.cache.put(off+int64(i), p[i:i+es]); err != nil {
+			return i, err
+		}
+	}
+	end := off + int64(len(p))
+	if end > c.maxWritten {
+		c.maxWritten = end
+	}
+	return len(p), nil
 }
 
 // ReadAt reads len(p) bytes starting at byte offset off.
@@ -193,7 +222,10 @@ func (c *cachedRWS) Flush() error {
 	if flushErr != nil {
 		return flushErr
 	}
-	c.cache.clear()
+	// Keep entries cached (bitmap + data intact) but reset dirty tracking.
+	// Subsequent writes to existing positions take the lock-free overwrite
+	// fast path instead of contending on the dirty list lock.
+	c.cache.clearDirty()
 
 	// Update baseSize so subsequent reads can reach the newly flushed data
 	// in the underlying file.
@@ -222,12 +254,13 @@ func (c *cachedRWS) FlushNeeded() bool {
 	return c.cache.overflowed()
 }
 
-// resetAfterFlush clears the cache and updates baseSize/maxWritten to
+// resetAfterFlush clears dirty tracking and updates baseSize/maxWritten to
 // reflect the current underlying file size. This should be called after
 // writes have been applied to the underlying file (e.g. by the WAL),
 // so that a subsequent Discard resets to the correct post-flush baseline.
+// Entries remain cached for fast overwrite paths.
 func (c *cachedRWS) resetAfterFlush() error {
-	c.cache.clear()
+	c.cache.clearDirty()
 	size, err := c.underlying.Seek(0, io.SeekEnd)
 	if err != nil {
 		return err

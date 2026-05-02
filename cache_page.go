@@ -159,6 +159,12 @@ func (p *pageCacheStore) clear() {
 	p.totalCount = 0
 }
 
+// clearDirty is a no-op for pageCacheStore since it doesn't have separate
+// dirty tracking — falls back to full clear.
+func (p *pageCacheStore) clearDirty() {
+	p.clear()
+}
+
 // forEach iterates over all occupied slots, calling fn with the byte offset and
 // data for each cached entry.
 func (p *pageCacheStore) forEach(fn func(offset int64, data []byte)) {

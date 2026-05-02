@@ -7,7 +7,9 @@ import (
 	"math/bits"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
+	"sync/atomic"
 
 	"github.com/utreexo/utreexo/internal/mmapfile"
 	"github.com/utreexo/utreexo/internal/swisstable"
@@ -61,6 +63,7 @@ var _ Utreexo = (*Forest)(nil)
 type forestFile interface {
 	io.ReadWriteSeeker
 	io.ReaderAt
+	io.WriterAt
 }
 
 // positionMap value packing: upper 17 bits = addIndex, lower 47 bits = position
@@ -86,6 +89,138 @@ func unpackIndex(v uint64) int32 { return int32(v >> positionBits) }
 type deletedBitmap struct {
 	bits       []uint64
 	dirtyWords map[uint64]struct{}
+}
+
+// bitmapSnapshot provides a read-only, immutable view of the bitmap at
+// snapshot time. It owns a private copy of the bits slice, so the writer
+// can freely mutate the live bitmap without locks or COW overhead.
+type bitmapSnapshot struct {
+	bits []uint64 // private copy made at snapshot time; never modified
+}
+
+// isSet returns true if pos was marked as deleted at snapshot time.
+func (s *bitmapSnapshot) isSet(pos uint64) bool {
+	word := pos / 64
+	if word >= uint64(len(s.bits)) {
+		return false
+	}
+	return s.bits[word]&(1<<(pos%64)) != 0
+}
+
+// HashOverlay captures intermediate hash writes in memory so that
+// GenRoots can write to memory while the previous GenProof still reads
+// from the file. Each overlay may point to a previous overlay, forming
+// a chain: reads check the chain from newest to oldest before falling
+// back to the file.
+//
+// Within rehashDeletionsParallel, concurrent workers write to per-worker
+// maps (workerData) that are merged into data after each row (under the
+// wg.Wait barrier), so no locking is needed.
+type HashOverlay struct {
+	data map[uint64]Hash
+	prev *HashOverlay // previous overlay; read-only, safe for concurrent access
+}
+
+// NewHashOverlay creates a fresh overlay. prev may be nil.
+func NewHashOverlay(prev *HashOverlay) *HashOverlay {
+	return &HashOverlay{
+		data: make(map[uint64]Hash, 4096),
+		prev: prev,
+	}
+}
+
+// get retrieves a hash from the overlay chain. Returns false if not found
+// in any overlay.
+func (o *HashOverlay) get(pos uint64) (Hash, bool) {
+	if o == nil {
+		return Hash{}, false
+	}
+	if h, ok := o.data[pos]; ok {
+		return h, true
+	}
+	return o.prev.get(pos)
+}
+
+// set writes a hash to this overlay.
+func (o *HashOverlay) set(pos uint64, h Hash) {
+	o.data[pos] = h
+}
+
+// AbsorbPrev merges prev's data into this overlay and cuts the chain.
+// After this call, o.prev is nil and all entries from prev are in o.data.
+// This keeps the overlay chain from growing unbounded.
+//
+// NOT safe for concurrent use — call only when no other goroutine reads prev.
+func (o *HashOverlay) AbsorbPrev() {
+	if o == nil || o.prev == nil {
+		return
+	}
+	for pos, hash := range o.prev.data {
+		if _, ok := o.data[pos]; !ok {
+			o.data[pos] = hash
+		}
+	}
+	// Recurse to absorb the entire chain.
+	o.prev.AbsorbPrev()
+	o.prev = nil
+}
+
+// CopyDataWithPrev creates a new overlay whose data is a shallow copy of
+// this overlay's data map, with prev set to the given base overlay.
+// The copy is O(len(o.data)) — only the current overlay's entries, not
+// the entire chain. Used to give GenProof a private snapshot of this
+// block's delta entries chained to a shared read-only base.
+func (o *HashOverlay) CopyDataWithPrev(base *HashOverlay) *HashOverlay {
+	if o == nil {
+		return base
+	}
+	cp := &HashOverlay{
+		data: make(map[uint64]Hash, len(o.data)),
+		prev: base,
+	}
+	for k, v := range o.data {
+		cp.data[k] = v
+	}
+	return cp
+}
+
+// Len returns the number of entries in this overlay (not the chain).
+func (o *HashOverlay) Len() int {
+	if o == nil {
+		return 0
+	}
+	return len(o.data)
+}
+
+// FlushTo writes all entries from this overlay (not the chain) to the forest file.
+func (o *HashOverlay) FlushTo(f *Forest) error {
+	for pos, hash := range o.data {
+		if err := f.writeHashAt(pos, hash); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// FlushChainTo writes all entries from this overlay AND its entire prev chain
+// to the forest file. Flushes oldest-first so newer values overwrite older ones.
+func (o *HashOverlay) FlushChainTo(f *Forest) error {
+	if o == nil {
+		return nil
+	}
+	// Collect chain oldest-first.
+	var chain []*HashOverlay
+	for cur := o; cur != nil; cur = cur.prev {
+		chain = append(chain, cur)
+	}
+	for i := len(chain) - 1; i >= 0; i-- {
+		for pos, hash := range chain[i].data {
+			if err := f.writeHashAt(pos, hash); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // newDeletedBitmap creates a bitmap sized to track numLeaves positions.
@@ -202,6 +337,149 @@ func (b *deletedBitmap) count() int {
 	return n
 }
 
+// bitmapBufCh is a channel-based pool for snapshot buffers.
+// Unlike sync.Pool, items in a buffered channel survive GC cycles.
+// sync.Pool clears all cached items on every GC, which causes massive
+// allocation churn when GC is already under pressure (133 GB of bitmap
+// copies in ~100s of IBD). A buffered channel keeps buffers alive
+// regardless of GC activity, eliminating the allocation-GC feedback loop.
+var bitmapBufCh = make(chan []uint64, 64)
+
+// snapshot creates an immutable copy of the current bitmap state.
+// The returned snapshot is completely independent — the writer can
+// freely mutate the live bitmap without any synchronization.
+// Reuses buffers from the channel pool to avoid GC pressure.
+func (b *deletedBitmap) snapshot() *bitmapSnapshot {
+	needed := len(b.bits)
+	var buf []uint64
+	select {
+	case buf = <-bitmapBufCh:
+		if cap(buf) < needed {
+			buf = make([]uint64, needed)
+		} else {
+			buf = buf[:needed]
+		}
+	default:
+		buf = make([]uint64, needed)
+	}
+	copy(buf, b.bits)
+	return &bitmapSnapshot{bits: buf}
+}
+
+// numWorkers is the number of goroutines used by parallelDo.
+var numWorkers = runtime.NumCPU()
+
+// workerPool is a persistent pool of goroutines. Each worker has its own
+// Cond variable. Only workers with actual work are signaled, and only
+// active workers are counted in the WaitGroup. Idle workers stay parked.
+type workerPool struct {
+	n       int
+	workers []poolWorker
+	wg      sync.WaitGroup
+}
+
+type poolWorker struct {
+	mu    sync.Mutex
+	cond  *sync.Cond
+	gen   uint64
+	fn    func(wIdx, start, end int)
+	start int
+	end   int
+}
+
+func newWorkerPool(n int) *workerPool {
+	p := &workerPool{
+		n:       n,
+		workers: make([]poolWorker, n),
+	}
+	for i := 0; i < n; i++ {
+		p.workers[i].cond = sync.NewCond(&p.workers[i].mu)
+		go p.worker(i)
+	}
+	return p
+}
+
+func (p *workerPool) worker(idx int) {
+	w := &p.workers[idx]
+	var lastGen uint64
+	w.mu.Lock()
+	for {
+		for w.gen == lastGen {
+			w.cond.Wait()
+		}
+		lastGen = w.gen
+		fn := w.fn
+		start, end := w.start, w.end
+		w.mu.Unlock()
+
+		fn(idx, start, end)
+		p.wg.Done()
+
+		w.mu.Lock()
+	}
+}
+
+func (p *workerPool) do(fn func(wIdx, start, end int), n int) {
+	workers := p.n
+	if workers > n {
+		workers = n
+	}
+	chunkSize := (n + workers - 1) / workers
+
+	active := 0
+	for i := 0; i < workers; i++ {
+		start := i * chunkSize
+		end := start + chunkSize
+		if end > n {
+			end = n
+		}
+		if start >= end {
+			break
+		}
+		active++
+	}
+
+	p.wg.Add(active)
+
+	for i := 0; i < active; i++ {
+		w := &p.workers[i]
+		w.mu.Lock()
+		w.fn = fn
+		w.start = i * chunkSize
+		w.end = w.start + chunkSize
+		if w.end > n {
+			w.end = n
+		}
+		w.gen++
+		w.mu.Unlock()
+		w.cond.Signal()
+	}
+
+	p.wg.Wait()
+}
+
+// mainPool is used by the main thread (Record, parallelLeafHash).
+var mainPool = newWorkerPool(numWorkers)
+
+// pipelinePool is used by the pipeline goroutine (GenerateRoots, GenerateProof).
+var pipelinePool = newWorkerPool(numWorkers)
+
+// parallelDo splits n work items across persistent pool workers (used by Record).
+func parallelDo(fn func(wIdx, start, end int), n int) {
+	mainPool.do(fn, n)
+}
+
+// MainParallelDo is an exported version of parallelDo for use by other
+// packages (e.g. indexers) that need to share the main thread's worker pool.
+func MainParallelDo(fn func(wIdx, start, end int), n int) {
+	mainPool.do(fn, n)
+}
+
+// pipelineParallelDo splits n work items across persistent pool workers (used by GenerateRoots).
+func pipelineParallelDo(fn func(wIdx, start, end int), n int) {
+	pipelinePool.do(fn, n)
+}
+
 // Forest is a Utreexo accumulator backed by a contiguous file.
 // Nodes are stored at row-based offsets computed by posToFileOffset:
 // each row gets a dense section sized by maxFileLeavesBits so that
@@ -240,8 +518,24 @@ type Forest struct {
 	// Persisted to metaFile (bytes 0-31, padded).
 	recordMode bool
 
+	// lastGeneratedLeaves tracks how many leaves the last GenerateRoots
+	// processed. Used to make subsequent calls incremental (O(k·log n)
+	// instead of O(n)). Reset to 0 on restart.
+	// Accessed atomically so GenerateRoots doesn't need f.mu.
+	lastGeneratedLeaves atomic.Uint64
+
+	// pendingDels accumulates leaf positions deleted by Record since
+	// the last Snapshot. Captured by Snapshot and cleared.
+	pendingDels []uint64
+
 	// wal is set when created via OpenForest; nil for newForest (test/advanced usage).
 	wal *wal
+
+	// Reusable buffers for Record (main thread only — never accessed by pipeline).
+	recordBuf      []byte     // batch write buffer for leaf hashes
+	recordErrs     []error    // error collection for parallelDo
+	setBatchHashes [][32]byte // reusable buffer for SetBatch hashes
+	setBatchPacked []uint64   // reusable buffer for SetBatch packed values
 
 	// closers holds os.File handles to close on Close(). Only set by OpenForest.
 	closers []io.Closer
@@ -507,10 +801,17 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 
 // Flush atomically commits all cached writes through the WAL journal.
 // Only valid on forests created via OpenForest.
+//
+// Acquires f.mu to serialize against concurrent writers (Record, Modify,
+// etc.). The deletedLeafPositions bitmap is mutated under f.mu, and the
+// WAL's serializeEntries iterates that bitmap; without the lock, callers
+// running the proof pipeline race with Flush during periodic catch-up flushes.
 func (f *Forest) Flush(bestHash [32]byte) error {
 	if f.wal == nil {
 		return fmt.Errorf("flush: no WAL (use OpenForest to enable)")
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.wal.Flush(bestHash)
 }
 
@@ -1475,52 +1776,121 @@ func (f *Forest) ModifyAndReturnTTLs(adds []Leaf, delHashes []Hash, _ Proof) ([]
 // Use during IBD for performance - call HashAll() when done to build the tree.
 // This is equivalent to Modify but defers all hashing until HashAll().
 // Returns the addIndexes for deleted leaves (for TTL tracking).
-func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, error) {
+func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, []uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	// Collect addIndexes and track deletions
-	addIndexes := make([]int32, 0, len(delHashes))
-	for _, delHash := range delHashes {
-		packed, found, err := f.positionMap.Get(delHash)
-		if err != nil {
-			return nil, fmt.Errorf("positionMap.Get: %w", err)
-		}
-		if !found {
-			return nil, fmt.Errorf("delhash %v not found in position map", delHash)
-		}
-		addIndexes = append(addIndexes, unpackIndex(packed))
-		leafPos := unpackPos(packed)
-
-		f.deletedLeafPositions.set(leafPos)
+	// Phase 1: Look up deletion positions.
+	// positionMap.Get is read-only and safe for concurrent access,
+	// so parallelize across cores for large batches.
+	type delResult struct {
+		addIndex int32
+		leafPos  uint64
 	}
+	delResults := make([]delResult, len(delHashes))
 
-	// Store leaves without computing parent hashes
-	for i, hash := range adds {
-		if hash != empty {
-			if err := f.positionMap.Set(hash, packPosIndex(f.NumLeaves, int32(i))); err != nil {
-				return nil, fmt.Errorf("positionMap.Set: %w", err)
+	if nDels := len(delHashes); nDels > 0 {
+		if nDels < minParallelSize {
+			for i, delHash := range delHashes {
+				packed, found, err := f.positionMap.Get(delHash)
+				if err != nil {
+					return nil, nil, fmt.Errorf("positionMap.Get: %w", err)
+				}
+				if !found {
+					return nil, nil, fmt.Errorf("delhash %v not found in position map", delHash)
+				}
+				delResults[i] = delResult{unpackIndex(packed), unpackPos(packed)}
+			}
+		} else {
+			if cap(f.recordErrs) < numWorkers {
+				f.recordErrs = make([]error, numWorkers)
+			}
+			errs := f.recordErrs[:numWorkers]
+			for i := range errs {
+				errs[i] = nil
+			}
+			parallelDo(func(wIdx, s, e int) {
+				for i := s; i < e; i++ {
+					packed, found, err := f.positionMap.Get(delHashes[i])
+					if err != nil {
+						errs[wIdx] = fmt.Errorf("positionMap.Get: %w", err)
+						return
+					}
+					if !found {
+						errs[wIdx] = fmt.Errorf("delhash %v not found in position map", delHashes[i])
+						return
+					}
+					delResults[i] = delResult{unpackIndex(packed), unpackPos(packed)}
+				}
+			}, nDels)
+			for _, err := range errs {
+				if err != nil {
+					return nil, nil, err
+				}
 			}
 		}
-
-		// Always write the leaf hash (even if empty, so HashAll can read it)
-		err := f.writeHash(f.NumLeaves, hash)
-		if err != nil {
-			return nil, fmt.Errorf("write leaf: %w", err)
-		}
-
-		f.NumLeaves++
 	}
 
+	// Apply deletion results to bitmap (sequential, not thread-safe).
+	addIndexes := make([]int32, len(delHashes))
+	delPositions := make([]uint64, len(delHashes))
+	for i, dr := range delResults {
+		addIndexes[i] = dr.addIndex
+		delPositions[i] = dr.leafPos
+		f.deletedLeafPositions.set(dr.leafPos)
+		f.pendingDels = append(f.pendingDels, dr.leafPos)
+	}
+
+	// Phase 2: Store leaves — batch file write THEN positionMap.Set.
+	// The batch write must happen first because positionMap.Set may
+	// trigger a Swiss table resize, which re-reads all entries from
+	// the data file via verifyHash. If the leaf data isn't in the
+	// cache yet, those entries would fail verification and be dropped.
+	startPos := f.NumLeaves
+	if len(adds) > 0 {
+		needed := len(adds) * 32
+		if cap(f.recordBuf) < needed {
+			f.recordBuf = make([]byte, needed)
+		}
+		buf := f.recordBuf[:needed]
+		for i, hash := range adds {
+			copy(buf[i*32:(i+1)*32], hash[:])
+		}
+		offset := f.posToFileOffset(startPos)
+		if _, err := f.file.WriteAt(buf, offset); err != nil {
+			return nil, nil, fmt.Errorf("batch write leaves: %w", err)
+		}
+	}
+	// Insert new leaves into positionMap using SetBatch (skips duplicate
+	// checking since new leaves can't already exist in the table).
+	if cap(f.setBatchHashes) < len(adds) {
+		f.setBatchHashes = make([][32]byte, len(adds))
+		f.setBatchPacked = make([]uint64, len(adds))
+	}
+	batchN := 0
+	for i, hash := range adds {
+		if hash != empty {
+			f.setBatchHashes[batchN] = hash
+			f.setBatchPacked[batchN] = packPosIndex(f.NumLeaves+uint64(i), int32(i))
+			batchN++
+		}
+	}
+	if batchN > 0 {
+		if err := f.positionMap.SetBatch(f.setBatchHashes[:batchN], f.setBatchPacked[:batchN]); err != nil {
+			return nil, nil, fmt.Errorf("positionMap.SetBatch: %w", err)
+		}
+	}
+	f.NumLeaves += uint64(len(adds))
+
 	if err := f.appendBlockCount(uint32(len(adds))); err != nil {
-		return nil, fmt.Errorf("append block count: %w", err)
+		return nil, nil, fmt.Errorf("append block count: %w", err)
 	}
 
 	f.recordMode = true
 	if err := f.saveMetadata(); err != nil {
-		return nil, fmt.Errorf("save metadata: %w", err)
+		return nil, nil, fmt.Errorf("save metadata: %w", err)
 	}
-	return addIndexes, nil
+	return addIndexes, delPositions, nil
 }
 
 // HashAll computes all parent hashes after Record calls are complete.
@@ -1906,4 +2276,1335 @@ func (r *rawForest) GetHash(position uint64) Hash {
 		return empty
 	}
 	return hash
+}
+
+// ForestSnapshot is an immutable view of the forest state at a point in time.
+// It captures numLeaves and a COW bitmap snapshot so that a concurrent reader
+// can compute roots and proofs while the writer continues calling Record.
+type ForestSnapshot struct {
+	numLeaves   uint64
+	bitmap      *bitmapSnapshot
+	pendingDels []uint64 // leaf positions deleted since last snapshot
+}
+
+// Snapshot captures the current forest state for concurrent root/proof generation.
+// Only one snapshot may be active at a time. Call ReleaseSnapshot when done.
+//
+// The caller must ensure that all writes from prior Record calls are visible
+// to ReadAt on the data file (e.g. via Flush or mmap visibility).
+func (f *Forest) Snapshot() *ForestSnapshot {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	snap := &ForestSnapshot{
+		numLeaves:   f.NumLeaves,
+		bitmap:      f.deletedLeafPositions.snapshot(),
+		pendingDels: f.pendingDels,
+	}
+	f.pendingDels = nil
+	return snap
+}
+
+// ReleaseSnapshot returns the snapshot's bitmap buffer to the channel pool
+// for reuse, reducing GC pressure from per-block bitmap copies. Should be
+// called after GenerateRoots and GenerateProof are done using the snapshot.
+func (f *Forest) ReleaseSnapshot(snap *ForestSnapshot) {
+	if snap == nil || snap.bitmap == nil || snap.bitmap.bits == nil {
+		return
+	}
+	select {
+	case bitmapBufCh <- snap.bitmap.bits:
+	default:
+		// Channel full — let GC collect this buffer.
+	}
+	snap.bitmap.bits = nil
+}
+
+// FlushOverlay writes all entries from the overlay to the file/cache and
+// clears the overlay. This bounds overlay memory during long pipeline runs.
+//
+// Must be called when no other goroutine is reading from the overlay or
+// from the file positions being written.
+func (f *Forest) FlushOverlay(overlay *HashOverlay) error {
+	if overlay == nil {
+		return nil
+	}
+	for pos, hash := range overlay.data {
+		if err := f.writeHashAt(pos, hash); err != nil {
+			return fmt.Errorf("FlushOverlay write pos %d: %w", pos, err)
+		}
+	}
+	// Clear the overlay data but keep the struct so callers with a
+	// reference can still use it (it will just be empty).
+	clear(overlay.data)
+	overlay.prev = nil
+	return nil
+}
+
+// WriteOverlayToFile writes all entries from the overlay to the file/cache
+// WITHOUT clearing the overlay data. Use this when other goroutines may
+// still hold references to the overlay via prev chains.
+func (f *Forest) WriteOverlayToFile(overlay *HashOverlay) error {
+	if overlay == nil {
+		return nil
+	}
+	for pos, hash := range overlay.data {
+		if err := f.writeHashAt(pos, hash); err != nil {
+			return fmt.Errorf("WriteOverlayToFile write pos %d: %w", pos, err)
+		}
+	}
+	return nil
+}
+
+// readHashAt reads the hash at the given position using ReadAt.
+// Unlike readHash, this does not use the seek position and is safe for
+// concurrent use with other ReadAt/WriteAt calls on disjoint positions.
+func (f *Forest) readHashAt(position uint64) (Hash, error) {
+	offset := f.posToFileOffset(position)
+	var hash Hash
+	_, err := f.file.ReadAt(hash[:], offset)
+	if err != nil {
+		return Hash{}, err
+	}
+	return hash, nil
+}
+
+// readHashWithOverlay reads the hash at the given position, checking the
+// overlay chain first. Falls back to the file if not found in any overlay.
+func (f *Forest) readHashWithOverlay(position uint64, overlay *HashOverlay) (Hash, error) {
+	if h, ok := overlay.get(position); ok {
+		return h, nil
+	}
+	return f.readHashAt(position)
+}
+
+// writeHashAt writes the hash at the given position using WriteAt.
+// Unlike writeHash, this does not use the seek position and is safe for
+// concurrent use with other ReadAt/WriteAt calls on disjoint positions.
+func (f *Forest) writeHashAt(position uint64, hash Hash) error {
+	offset := f.posToFileOffset(position)
+	_, err := f.file.WriteAt(hash[:], offset)
+	return err
+}
+
+// GenerateRoots computes all intermediate hashes and returns the roots for
+// the forest state captured in snap. It reads leaf hashes from row 0
+// (which are immutable once written by Record) and writes intermediate
+// hashes to rows 1+ using WriteAt. Since Record only appends to row 0
+// beyond snap.numLeaves, there is no I/O contention with a concurrent writer.
+//
+// This method does NOT hold f.mu — it is safe to call concurrently with Record.
+func (f *Forest) GenerateRoots(snap *ForestSnapshot) ([]Hash, uint64, error) {
+	totalLeaves := snap.numLeaves
+	prevLeaves := f.lastGeneratedLeaves.Load()
+
+	if prevLeaves == 0 || prevLeaves > totalLeaves {
+		// First call or restart: full O(n) scan.
+		return f.generateRootsFull(snap)
+	}
+
+	// Incremental: O(k·log n) — only process new adds + deletions.
+	return f.generateRootsIncremental(snap, prevLeaves)
+}
+
+// GenerateRootsOverlay is like GenerateRoots but writes intermediate hashes
+// to an in-memory overlay instead of the file. This allows the caller to
+// release the snapshot immediately and run GenProof from the overlay while
+// the next block's GenRoots runs concurrently.
+//
+// prevOverlay is the previous block's overlay (may be nil); it's checked
+// before the file for reads so that unflushed writes from the previous
+// GenRoots are visible.
+//
+// Returns the roots, numLeaves, and the overlay containing all writes.
+func (f *Forest) GenerateRootsOverlay(snap *ForestSnapshot, prevOverlay *HashOverlay) ([]Hash, uint64, *HashOverlay, error) {
+	totalLeaves := snap.numLeaves
+	forestRows := f.forestRows
+	overlay := NewHashOverlay(prevOverlay)
+	prevLeaves := f.lastGeneratedLeaves.Load()
+
+	if prevLeaves == 0 || prevLeaves > totalLeaves {
+		roots, numLeaves, err := f.generateRootsFullOverlay(snap, overlay)
+		return roots, numLeaves, overlay, err
+	}
+
+	roots, numLeaves, err := f.generateRootsIncrementalOverlay(snap, prevLeaves, overlay)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+
+	_ = forestRows
+	return roots, numLeaves, overlay, nil
+}
+
+// generateRootsFullOverlay is like generateRootsFull but writes to overlay.
+func (f *Forest) generateRootsFullOverlay(snap *ForestSnapshot, overlay *HashOverlay) ([]Hash, uint64, error) {
+	totalLeaves := snap.numLeaves
+	forestRows := f.forestRows
+
+	var numLeaves uint64
+	for pos := uint64(0); pos < totalLeaves; pos++ {
+		var hash Hash
+		if snap.bitmap.isSet(pos) {
+			hash = empty
+		} else {
+			var err error
+			hash, err = f.readHashWithOverlay(pos, overlay)
+			if err != nil {
+				return nil, 0, fmt.Errorf("read leaf at %d: %w", pos, err)
+			}
+		}
+
+		currentHash := hash
+		currentPos := numLeaves
+		for h := uint8(0); (numLeaves>>h)&1 == 1; h++ {
+			rootPos := rootPosition(numLeaves, h, forestRows)
+			rootHash, err := f.readHashWithOverlay(rootPos, overlay)
+			if err != nil {
+				return nil, 0, fmt.Errorf("read root at row %d: %w", h, err)
+			}
+			if snap.bitmap.isSet(rootPos) {
+				rootHash = empty
+			}
+
+			parentPos := Parent(currentPos, forestRows)
+			newHash := parentHash(rootHash, currentHash)
+			overlay.set(parentPos, newHash)
+
+			currentHash = newHash
+			currentPos = parentPos
+		}
+		numLeaves++
+	}
+
+	f.lastGeneratedLeaves.Store(totalLeaves)
+
+	return f.collectRootsOverlay(snap, numLeaves, overlay)
+}
+
+// generateRootsIncrementalOverlay is like generateRootsIncremental but writes to overlay.
+func (f *Forest) generateRootsIncrementalOverlay(snap *ForestSnapshot, prevLeaves uint64, overlay *HashOverlay) ([]Hash, uint64, error) {
+	totalLeaves := snap.numLeaves
+	forestRows := f.forestRows
+
+	// Phase 1: Rehash deletion paths using overlay.
+	if err := f.rehashDeletionsOverlay(snap, totalLeaves, forestRows, overlay); err != nil {
+		return nil, 0, err
+	}
+
+	// Phase 2: Process new additions.
+	numLeaves := prevLeaves
+	for pos := prevLeaves; pos < totalLeaves; pos++ {
+		var hash Hash
+		if snap.bitmap.isSet(pos) {
+			hash = empty
+		} else {
+			var err error
+			hash, err = f.readHashWithOverlay(pos, overlay)
+			if err != nil {
+				return nil, 0, fmt.Errorf("read leaf at %d: %w", pos, err)
+			}
+		}
+
+		currentHash := hash
+		currentPos := numLeaves
+		for h := uint8(0); (numLeaves>>h)&1 == 1; h++ {
+			rootPos := rootPosition(numLeaves, h, forestRows)
+			rootHash, err := f.readHashWithOverlay(rootPos, overlay)
+			if err != nil {
+				return nil, 0, fmt.Errorf("read root at row %d: %w", h, err)
+			}
+			if snap.bitmap.isSet(rootPos) {
+				rootHash = empty
+			}
+
+			parentPos := Parent(currentPos, forestRows)
+			newHash := parentHash(rootHash, currentHash)
+			overlay.set(parentPos, newHash)
+
+			currentHash = newHash
+			currentPos = parentPos
+		}
+		numLeaves++
+	}
+
+	f.lastGeneratedLeaves.Store(totalLeaves)
+
+	return f.collectRootsOverlay(snap, numLeaves, overlay)
+}
+
+// rehashDeletionsOverlay is like rehashDeletionsParallel but writes to overlay.
+func (f *Forest) rehashDeletionsOverlay(snap *ForestSnapshot, numLeaves uint64, forestRows uint8, overlay *HashOverlay) error {
+	if len(snap.pendingDels) == 0 {
+		return nil
+	}
+
+	numWorkers := runtime.NumCPU()
+	affected := make([]uint64, len(snap.pendingDels))
+	copy(affected, snap.pendingDels)
+	slices.SortFunc(affected, func(a, b uint64) bool { return a < b })
+
+	parentOut := make([]uint64, len(affected))
+	nextAffected := make([]uint64, 0, len(affected))
+	errs := make([]error, numWorkers)
+
+	// Per-worker overlay maps to avoid concurrent map writes.
+	workerMaps := make([]map[uint64]Hash, numWorkers)
+	for w := range workerMaps {
+		workerMaps[w] = make(map[uint64]Hash, len(affected)/numWorkers+1)
+	}
+
+	for row := uint8(0); row < forestRows && len(affected) > 0; row++ {
+		n := len(affected)
+
+		// Deduplicate sibling pairs.
+		for i := 0; i < n-1; i++ {
+			if affected[i] == ^uint64(0) {
+				continue
+			}
+			if affected[i]^1 == affected[i+1] {
+				affected[i] = leftSib(affected[i])
+				affected[i+1] = ^uint64(0)
+			}
+		}
+		j := 0
+		for i := 0; i < n; i++ {
+			if affected[i] != ^uint64(0) {
+				affected[j] = affected[i]
+				j++
+			}
+		}
+		affected = affected[:j]
+		n = j
+		if n == 0 {
+			break
+		}
+
+		if cap(parentOut) < n {
+			parentOut = make([]uint64, n)
+		}
+		parentOut = parentOut[:n]
+
+		rehashOverlayWork := func(wIdx, s, e int) {
+			wm := workerMaps[wIdx]
+			for i := s; i < e; i++ {
+				pos := affected[i]
+
+				if isRootPositionTotalRows(pos, numLeaves, forestRows) {
+					if row == 0 {
+						wm[pos] = empty
+					}
+					parentOut[i] = ^uint64(0)
+					continue
+				}
+
+				var currentHash Hash
+				if row == 0 && snap.bitmap.isSet(pos) {
+					currentHash = empty
+				} else {
+					h, err := f.readHashWithOverlay(pos, overlay)
+					if err != nil {
+						currentHash = empty
+					} else {
+						currentHash = h
+					}
+				}
+
+				sibPos := sibling(pos)
+				sibHash, err := f.readHashWithOverlay(sibPos, overlay)
+				if err != nil {
+					sibHash = empty
+				}
+				if row == 0 && snap.bitmap.isSet(sibPos) {
+					sibHash = empty
+				}
+
+				parentPos := Parent(pos, forestRows)
+				var newHash Hash
+				if isLeftNiece(pos) {
+					newHash = parentHash(currentHash, sibHash)
+				} else {
+					newHash = parentHash(sibHash, currentHash)
+				}
+				wm[parentPos] = newHash
+				parentOut[i] = parentPos
+			}
+		}
+
+		if n < minParallelSize {
+			clear(workerMaps[0])
+			rehashOverlayWork(0, 0, n)
+		} else {
+			workers := numWorkers
+			if workers > n {
+				workers = n
+			}
+			for w := 0; w < workers; w++ {
+				clear(workerMaps[w])
+			}
+			for i := range errs {
+				errs[i] = nil
+			}
+			pipelineParallelDo(func(wIdx, s, e int) {
+				rehashOverlayWork(wIdx, s, e)
+			}, n)
+			for _, err := range errs {
+				if err != nil {
+					return err
+				}
+			}
+		}
+
+		// Merge worker maps into main overlay.
+		mergeWorkers := numWorkers
+		if n < minParallelSize {
+			mergeWorkers = 1
+		} else if mergeWorkers > n {
+			mergeWorkers = n
+		}
+		for w := 0; w < mergeWorkers; w++ {
+			for pos, hash := range workerMaps[w] {
+				overlay.set(pos, hash)
+			}
+		}
+
+		// Collect unique parent positions for next row.
+		nextAffected = nextAffected[:0]
+		for i := 0; i < n; i++ {
+			if parentOut[i] != ^uint64(0) {
+				nextAffected = append(nextAffected, parentOut[i])
+			}
+		}
+		slices.SortFunc(nextAffected, func(a, b uint64) bool { return a < b })
+		j = 0
+		for i := 0; i < len(nextAffected); i++ {
+			if i == 0 || nextAffected[i] != nextAffected[i-1] {
+				nextAffected[j] = nextAffected[i]
+				j++
+			}
+		}
+		nextAffected = nextAffected[:j]
+		affected, nextAffected = nextAffected, affected
+	}
+
+	return nil
+}
+
+// collectRootsOverlay reads root hashes from overlay → file.
+func (f *Forest) collectRootsOverlay(snap *ForestSnapshot, numLeaves uint64, overlay *HashOverlay) ([]Hash, uint64, error) {
+	rootPositions := RootPositions(numLeaves, f.forestRows)
+	roots := make([]Hash, len(rootPositions))
+	for i, pos := range rootPositions {
+		if snap.bitmap.isSet(pos) {
+			roots[i] = empty
+			continue
+		}
+		hash, err := f.readHashWithOverlay(pos, overlay)
+		if err != nil {
+			return nil, 0, fmt.Errorf("read root at position %d: %w", pos, err)
+		}
+		roots[i] = hash
+	}
+	return roots, numLeaves, nil
+}
+
+// GenerateProofFromOverlay builds a proof reading from the overlay → file.
+// Safe to call concurrently with another GenRoots that writes to a different overlay.
+func (f *Forest) GenerateProofFromOverlay(targets []uint64, snap *ForestSnapshot, overlay *HashOverlay) (Proof, error) {
+	if len(targets) == 0 {
+		return Proof{}, nil
+	}
+
+	numLeaves := snap.numLeaves
+	forestRows := f.forestRows
+
+	proofHashes, err := f.fetchProofHashesOverlay(targets, numLeaves, snap, overlay)
+	if err != nil {
+		return Proof{}, err
+	}
+
+	outTargets := make([]uint64, len(targets))
+	copy(outTargets, targets)
+	if forestRows != defaultForestRows {
+		outTargets = translatePositions(outTargets, forestRows, defaultForestRows)
+	}
+
+	return Proof{
+		Targets: outTargets,
+		Proof:   proofHashes,
+	}, nil
+}
+
+// fetchProofHashesOverlay fetches proof hashes reading from overlay → file.
+// Parallelizes reads within each row.
+func (f *Forest) fetchProofHashesOverlay(leafPositions []uint64, numLeaves uint64, snap *ForestSnapshot, overlay *HashOverlay) ([]Hash, error) {
+	if len(leafPositions) == 0 {
+		return nil, nil
+	}
+
+	forestRows := f.forestRows
+	targets := make([]uint64, len(leafPositions))
+	copy(targets, leafPositions)
+	slices.SortFunc(targets, func(a, b uint64) bool { return a < b })
+	targets = deTwin(targets, forestRows)
+
+	numWorkers := runtime.NumCPU()
+	proofHashes := make([]Hash, 0, len(targets)*int(TreeRows(numLeaves)+1))
+
+	for row := uint8(0); row <= forestRows; row++ {
+		type readWork struct {
+			targetIdx int
+			sibPos    uint64
+		}
+		var reads []readWork
+
+		for i := 0; i < len(targets); i++ {
+			pos := targets[i]
+			if pos > maxPossiblePosAtRow(row, forestRows) {
+				continue
+			}
+			if row != DetectRow(pos, forestRows) {
+				continue
+			}
+			if isRootPositionOnRowTotalRows(pos, numLeaves, row, forestRows) {
+				continue
+			}
+			if i+1 < len(targets) && rightSib(pos) == targets[i+1] {
+				targets[i] = Parent(pos, forestRows)
+				i++
+				continue
+			}
+			reads = append(reads, readWork{targetIdx: i, sibPos: sibling(pos)})
+			targets[i] = Parent(pos, forestRows)
+		}
+
+		if len(reads) == 0 {
+			continue
+		}
+
+		rowHashes := make([]Hash, len(reads))
+		nReads := len(reads)
+
+		if nReads < minParallelSize {
+			for j, r := range reads {
+				h, err := f.readHashForProofOverlay(r.sibPos, snap, overlay)
+				if err != nil {
+					return nil, err
+				}
+				rowHashes[j] = h
+			}
+		} else {
+			errs := make([]error, numWorkers)
+			pipelineParallelDo(func(wIdx, s, e int) {
+				for j := s; j < e; j++ {
+					h, err := f.readHashForProofOverlay(reads[j].sibPos, snap, overlay)
+					if err != nil {
+						errs[wIdx] = err
+						return
+					}
+					rowHashes[j] = h
+				}
+			}, nReads)
+			for _, err := range errs {
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+
+		proofHashes = append(proofHashes, rowHashes...)
+		slices.SortFunc(targets, func(a, b uint64) bool { return a < b })
+	}
+
+	return proofHashes, nil
+}
+
+// readHashForProofOverlay reads a hash for proof generation using overlay → file.
+func (f *Forest) readHashForProofOverlay(position uint64, snap *ForestSnapshot, overlay *HashOverlay) (Hash, error) {
+	if DetectRow(position, f.forestRows) == 0 && snap.bitmap.isSet(position) {
+		return empty, nil
+	}
+	return f.readHashWithOverlay(position, overlay)
+}
+
+// generateRootsFull rebuilds all intermediate hashes from scratch.
+// O(n) — used only on the first call after startup.
+func (f *Forest) generateRootsFull(snap *ForestSnapshot) ([]Hash, uint64, error) {
+	totalLeaves := snap.numLeaves
+	forestRows := f.forestRows
+
+	// Full scan: process all leaves [0, totalLeaves) in parallel.
+	if err := f.processAddsParallel(snap, 0, totalLeaves, forestRows); err != nil {
+		return nil, 0, err
+	}
+
+	f.lastGeneratedLeaves.Store(totalLeaves)
+
+	return f.collectRoots(snap, totalLeaves)
+}
+
+// generateRootsIncremental updates intermediate hashes for only the new
+// additions and deletions since the last GenerateRoots call.
+// O(k·log n) where k = new adds + new deletions.
+func (f *Forest) generateRootsIncremental(snap *ForestSnapshot, prevLeaves uint64) ([]Hash, uint64, error) {
+	totalLeaves := snap.numLeaves
+	forestRows := f.forestRows
+
+	// Phase 1: Rehash deletion paths row-by-row in parallel.
+	// At each row, compute parent hashes for all affected positions
+	// concurrently using ReadAt/WriteAt on disjoint file offsets.
+	// Uses sorted slices (not maps) to avoid GC pressure.
+	if err := f.rehashDeletionsParallel(snap, totalLeaves, forestRows); err != nil {
+		return nil, 0, err
+	}
+
+	// Phase 2: Process new additions row-by-row in parallel.
+	// New leaf positions form a contiguous range [prevLeaves, totalLeaves).
+	// At each row, sibling pairs are deduplicated and parent hashes are
+	// computed concurrently across all cores. This replaces the sequential
+	// per-leaf merge loop with a parallel bottom-up tree build.
+	if err := f.processAddsParallel(snap, prevLeaves, totalLeaves, forestRows); err != nil {
+		return nil, 0, err
+	}
+
+	f.lastGeneratedLeaves.Store(totalLeaves)
+
+	return f.collectRoots(snap, totalLeaves)
+}
+
+// rehashDeletionsParallel recomputes intermediate hashes for all pending
+// deletions, processing the tree row by row from bottom up. At each row,
+// all affected positions are processed in parallel using goroutines.
+//
+// To avoid write conflicts when two deletions share an ancestor, sibling
+// pairs are deduplicated: if both left and right sibling are affected,
+// only the left is kept (it reads both children). Uses sorted slices
+// instead of maps to minimize GC pressure.
+// minParallelSize is the minimum number of work items before we
+// spawn goroutines. Below this threshold, the goroutine launch/sync
+// overhead exceeds the benefit of parallelism.
+const minParallelSize = 4096
+
+func (f *Forest) rehashDeletionsParallel(snap *ForestSnapshot, numLeaves uint64, forestRows uint8) error {
+	if len(snap.pendingDels) == 0 {
+		return nil
+	}
+
+	numWorkers := runtime.NumCPU()
+
+	// Affected positions at the current row. Reuse slices across rows.
+	affected := make([]uint64, len(snap.pendingDels))
+	copy(affected, snap.pendingDels)
+	slices.SortFunc(affected, func(a, b uint64) bool { return a < b })
+
+	// parentOut[i] holds the parent position computed for affected[i].
+	// Separate from affected to avoid data races between goroutines.
+	parentOut := make([]uint64, len(affected))
+	nextAffected := make([]uint64, 0, len(affected))
+	errs := make([]error, numWorkers)
+
+	for row := uint8(0); row < forestRows && len(affected) > 0; row++ {
+		n := len(affected)
+
+		// Deduplicate sibling pairs: if both pos and sibling(pos) are
+		// in the list, keep only the left sibling (it will read both
+		// children). Mark the right sibling as ^0 (sentinel).
+		for i := 0; i < n-1; i++ {
+			if affected[i] == ^uint64(0) {
+				continue
+			}
+			if affected[i]^1 == affected[i+1] {
+				affected[i] = leftSib(affected[i])
+				affected[i+1] = ^uint64(0)
+			}
+		}
+
+		// Compact: remove sentinels.
+		j := 0
+		for i := 0; i < n; i++ {
+			if affected[i] != ^uint64(0) {
+				affected[j] = affected[i]
+				j++
+			}
+		}
+		affected = affected[:j]
+		n = j
+
+		if n == 0 {
+			break
+		}
+
+		// Ensure parentOut is large enough.
+		if cap(parentOut) < n {
+			parentOut = make([]uint64, n)
+		}
+		parentOut = parentOut[:n]
+
+		// rehashDeletionWork processes positions [s, e) for the current row.
+		rehashDeletionWork := func(s, e int) error {
+			for i := s; i < e; i++ {
+				pos := affected[i]
+
+				if isRootPositionTotalRows(pos, numLeaves, forestRows) {
+					if row == 0 {
+						_ = f.writeHashAt(pos, empty)
+					}
+					parentOut[i] = ^uint64(0) // no parent to propagate
+					continue
+				}
+
+				// Read current position's hash.
+				var currentHash Hash
+				if row == 0 && snap.bitmap.isSet(pos) {
+					currentHash = empty
+				} else {
+					h, err := f.readHashAt(pos)
+					if err != nil {
+						currentHash = empty
+					} else {
+						currentHash = h
+					}
+				}
+
+				sibPos := sibling(pos)
+				sibHash, err := f.readHashAt(sibPos)
+				if err != nil {
+					sibHash = empty
+				}
+				if row == 0 && snap.bitmap.isSet(sibPos) {
+					sibHash = empty
+				}
+
+				parentPos := Parent(pos, forestRows)
+				var newHash Hash
+				if isLeftNiece(pos) {
+					newHash = parentHash(currentHash, sibHash)
+				} else {
+					newHash = parentHash(sibHash, currentHash)
+				}
+
+				if err := f.writeHashAt(parentPos, newHash); err != nil {
+					return err
+				}
+				parentOut[i] = parentPos
+			}
+			return nil
+		}
+
+		if n < minParallelSize {
+			if err := rehashDeletionWork(0, n); err != nil {
+				return err
+			}
+		} else {
+			for i := range errs {
+				errs[i] = nil
+			}
+			pipelineParallelDo(func(wIdx, s, e int) {
+				errs[wIdx] = rehashDeletionWork(s, e)
+			}, n)
+			for _, err := range errs {
+				if err != nil {
+					return err
+				}
+			}
+		}
+
+		// Collect unique parent positions for the next row.
+		nextAffected = nextAffected[:0]
+		for i := 0; i < n; i++ {
+			if parentOut[i] != ^uint64(0) {
+				nextAffected = append(nextAffected, parentOut[i])
+			}
+		}
+		slices.SortFunc(nextAffected, func(a, b uint64) bool { return a < b })
+		// Deduplicate consecutive equal values.
+		j = 0
+		for i := 0; i < len(nextAffected); i++ {
+			if i == 0 || nextAffected[i] != nextAffected[i-1] {
+				nextAffected[j] = nextAffected[i]
+				j++
+			}
+		}
+		nextAffected = nextAffected[:j]
+
+		affected, nextAffected = nextAffected, affected
+	}
+
+	return nil
+}
+
+// processAddsParallel computes intermediate hashes for new additions
+// [prevLeaves, totalLeaves) using a parallel bottom-up approach.
+// At each row, all parent hashes are computed concurrently across cores.
+//
+// The approach mirrors rehashDeletionsParallel: start with the new leaf
+// positions as "affected" at row 0, deduplicate sibling pairs, compute
+// parents in parallel, and propagate parent positions to the next row.
+//
+// For deduplicated pairs (both children are new), both hashes come from
+// the file. For singles (one new child, one existing sibling), the existing
+// sibling's hash is read from the file (already correct from Phase 1 deletion
+// rehashing). Deleted row-0 leaves are treated as empty via the snapshot bitmap.
+func (f *Forest) processAddsParallel(snap *ForestSnapshot, prevLeaves, totalLeaves uint64, forestRows uint8) error {
+	numAdds := int(totalLeaves - prevLeaves)
+	if numAdds == 0 {
+		return nil
+	}
+
+	numWorkers := runtime.NumCPU()
+
+	// Start with new leaf positions (contiguous, already sorted).
+	affected := make([]uint64, numAdds)
+	for i := range affected {
+		affected[i] = prevLeaves + uint64(i)
+	}
+
+	parentOut := make([]uint64, numAdds)
+	nextAffected := make([]uint64, 0, numAdds)
+	errs := make([]error, numWorkers)
+
+	for row := uint8(0); row < forestRows && len(affected) > 0; row++ {
+		n := len(affected)
+
+		// Deduplicate sibling pairs: if both left and right sibling are
+		// affected, keep only the left sibling. It will read both children.
+		for i := 0; i < n-1; i++ {
+			if affected[i] == ^uint64(0) {
+				continue
+			}
+			if affected[i]^1 == affected[i+1] {
+				affected[i] = leftSib(affected[i])
+				affected[i+1] = ^uint64(0)
+			}
+		}
+		j := 0
+		for i := 0; i < n; i++ {
+			if affected[i] != ^uint64(0) {
+				affected[j] = affected[i]
+				j++
+			}
+		}
+		affected = affected[:j]
+		n = j
+		if n == 0 {
+			break
+		}
+
+		if cap(parentOut) < n {
+			parentOut = make([]uint64, n)
+		}
+		parentOut = parentOut[:n]
+
+		// processAddsWork processes positions [s, e) for the current row.
+		processAddsWork := func(s, e int) error {
+			for i := s; i < e; i++ {
+				pos := affected[i]
+
+				if isRootPositionTotalRows(pos, totalLeaves, forestRows) {
+					parentOut[i] = ^uint64(0) // no parent to propagate
+					continue
+				}
+
+				// Read both children of the parent.
+				lPos := leftSib(pos)
+				rPos := lPos | 1
+
+				var leftHash, rightHash Hash
+
+				if row == 0 && snap.bitmap.isSet(lPos) {
+					leftHash = empty
+				} else {
+					h, err := f.readHashAt(lPos)
+					if err != nil {
+						leftHash = empty
+					} else {
+						leftHash = h
+					}
+				}
+
+				if row == 0 && snap.bitmap.isSet(rPos) {
+					rightHash = empty
+				} else {
+					h, err := f.readHashAt(rPos)
+					if err != nil {
+						rightHash = empty
+					} else {
+						rightHash = h
+					}
+				}
+
+				parentPos := Parent(pos, forestRows)
+				newHash := parentHash(leftHash, rightHash)
+
+				if err := f.writeHashAt(parentPos, newHash); err != nil {
+					return err
+				}
+				parentOut[i] = parentPos
+			}
+			return nil
+		}
+
+		if n < minParallelSize {
+			if err := processAddsWork(0, n); err != nil {
+				return err
+			}
+		} else {
+			for i := range errs {
+				errs[i] = nil
+			}
+			pipelineParallelDo(func(wIdx, s, e int) {
+				errs[wIdx] = processAddsWork(s, e)
+			}, n)
+			for _, err := range errs {
+				if err != nil {
+					return err
+				}
+			}
+		}
+
+		// Collect unique parent positions for the next row.
+		nextAffected = nextAffected[:0]
+		for i := 0; i < n; i++ {
+			if parentOut[i] != ^uint64(0) {
+				nextAffected = append(nextAffected, parentOut[i])
+			}
+		}
+		slices.SortFunc(nextAffected, func(a, b uint64) bool { return a < b })
+		j = 0
+		for i := 0; i < len(nextAffected); i++ {
+			if i == 0 || nextAffected[i] != nextAffected[i-1] {
+				nextAffected[j] = nextAffected[i]
+				j++
+			}
+		}
+		nextAffected = nextAffected[:j]
+		affected, nextAffected = nextAffected, affected
+	}
+
+	return nil
+}
+
+// collectRoots reads root hashes from the file, respecting the snapshot bitmap.
+func (f *Forest) collectRoots(snap *ForestSnapshot, numLeaves uint64) ([]Hash, uint64, error) {
+	rootPositions := RootPositions(numLeaves, f.forestRows)
+	roots := make([]Hash, len(rootPositions))
+	for i, pos := range rootPositions {
+		if snap.bitmap.isSet(pos) {
+			roots[i] = empty
+			continue
+		}
+		hash, err := f.readHashAt(pos)
+		if err != nil {
+			return nil, 0, fmt.Errorf("read root at position %d: %w", pos, err)
+		}
+		roots[i] = hash
+	}
+
+	return roots, numLeaves, nil
+}
+
+// ExitRecordMode transitions the forest out of record mode after GenerateRoots
+// has written all intermediate hashes to the data file. This allows subsequent
+// calls to Modify, Prove, and other methods that require a fully-hashed tree.
+//
+// The caller must have called GenerateRoots (with a snapshot covering all
+// recorded leaves) before calling this method, so that intermediate hashes
+// are populated in the data file.
+func (f *Forest) ExitRecordMode() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if !f.recordMode {
+		return nil
+	}
+
+	f.recordMode = false
+	if err := f.saveMetadata(); err != nil {
+		return fmt.Errorf("save metadata: %w", err)
+	}
+	return nil
+}
+
+// IsRecordMode returns true if the forest is in record mode (Record has been
+// called but intermediate hashes have not yet been computed).
+func (f *Forest) IsRecordMode() bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.recordMode
+}
+
+// getLeafPosition returns the row-0 position for the given hash from the
+// position map. Unlike calculatePosition (used with Modify), no walk-up is
+// needed because GenerateRoots has no move-ups — every leaf stays at its
+// original row-0 position.
+func (f *Forest) getLeafPosition(hash Hash) (uint64, error) {
+	packed, found, err := f.positionMap.Get(hash)
+	if err != nil {
+		return 0, fmt.Errorf("positionMap.Get: %w", err)
+	}
+	if !found {
+		return 0, fmt.Errorf("hash %v not found in the position map", hash)
+	}
+	return unpackPos(packed), nil
+}
+
+// readHashForProof reads the hash at the given position, respecting the
+// snapshot bitmap: deleted row-0 leaves return empty (since GenerateRoots
+// treats them as empty but doesn't overwrite their file position).
+func (f *Forest) readHashForProof(position uint64, snap *ForestSnapshot) (Hash, error) {
+	if DetectRow(position, f.forestRows) == 0 && snap.bitmap.isSet(position) {
+		return empty, nil
+	}
+	return f.readHashAt(position)
+}
+
+// GenerateProof generates an inclusion proof for the given hashes using the
+// forest state captured in snap. GenerateRoots must have been called on the
+// same snapshot first so that intermediate hashes are populated.
+//
+// The proof targets are row-0 positions in the GenerateRoots tree (no move-ups),
+// translated to defaultForestRows space.
+//
+// This method does NOT hold f.mu — it is safe to call concurrently with Record.
+func (f *Forest) GenerateProof(snap *ForestSnapshot, delHashes []Hash) (Proof, error) {
+	if len(delHashes) == 0 {
+		return Proof{}, nil
+	}
+
+	forestRows := f.forestRows
+
+	// Build target pairs: calcPos for ordering, actualPos (raw leaf pos) for reading.
+	pairs := make([]targetPair, len(delHashes))
+	for i, hash := range delHashes {
+		rawPos, err := f.getLeafPosition(hash)
+		if err != nil {
+			return Proof{}, fmt.Errorf("find target for hash %x: %w", hash[:8], err)
+		}
+		calcPos, err := f.calculatePositionAt(rawPos, snap)
+		if err != nil {
+			return Proof{}, fmt.Errorf("calculatePositionAt for hash %x: %w", hash[:8], err)
+		}
+		pairs[i] = targetPair{calcPos: calcPos, actualPos: rawPos}
+	}
+
+	proofHashes, err := f.fetchProofHashesPairsAt(pairs, snap)
+	if err != nil {
+		return Proof{}, err
+	}
+
+	// Output targets use calcPos.
+	targets := make([]uint64, len(pairs))
+	for i, p := range pairs {
+		targets[i] = p.calcPos
+	}
+	if forestRows != defaultForestRows {
+		targets = translatePositions(targets, forestRows, defaultForestRows)
+	}
+
+	return Proof{
+		Targets: targets,
+		Proof:   proofHashes,
+	}, nil
+}
+
+// LookupDelPositions resolves deletion hashes to their leaf positions via the
+// position map. Call this BEFORE releasing the snapshot so the position map is
+// not mutated concurrently by Record.
+func (f *Forest) LookupDelPositions(delHashes []Hash) ([]uint64, error) {
+	n := len(delHashes)
+	if n == 0 {
+		return nil, nil
+	}
+	positions := make([]uint64, n)
+
+	// positionMap.Get is safe for concurrent read-only access.
+	numWorkers := runtime.NumCPU()
+	if numWorkers > n {
+		numWorkers = n
+	}
+	if numWorkers <= 1 {
+		for i, hash := range delHashes {
+			pos, err := f.getLeafPosition(hash)
+			if err != nil {
+				return nil, fmt.Errorf("find target for hash %x: %w", hash[:8], err)
+			}
+			positions[i] = pos
+		}
+		return positions, nil
+	}
+
+	errs := make([]error, numWorkers)
+	chunkSize := (n + numWorkers - 1) / numWorkers
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		start := w * chunkSize
+		end := start + chunkSize
+		if end > n {
+			end = n
+		}
+		if start >= end {
+			continue
+		}
+		wg.Add(1)
+		go func(wIdx, s, e int) {
+			defer wg.Done()
+			for i := s; i < e; i++ {
+				pos, err := f.getLeafPosition(delHashes[i])
+				if err != nil {
+					errs[wIdx] = fmt.Errorf("find target for hash %x: %w", delHashes[i][:8], err)
+					return
+				}
+				positions[i] = pos
+			}
+		}(w, start, end)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return positions, nil
+}
+
+// GenerateProofFromPositions builds an inclusion proof using pre-computed
+// leaf positions. Unlike GenerateProof, it does NOT access the position map,
+// so it is safe to call concurrently with Record (which writes to positionMap).
+// It only reads from the data file and the bitmap snapshot.
+//
+// Because GenerateRoots builds the tree without move-ups (deleted leaves are
+// empty, parentHash(empty, x) = x propagates naturally), we use a two-position
+// scheme: calcPos (from calculatePositionAt) determines row ordering and sibling
+// detection (matching what a pollard sees), while actualPos (raw leaf position)
+// determines where to read sibling hashes from the file.
+func (f *Forest) GenerateProofFromPositions(targets []uint64, snap *ForestSnapshot) (Proof, error) {
+	if len(targets) == 0 {
+		return Proof{}, nil
+	}
+
+	forestRows := f.forestRows
+
+	// Build target pairs with both calculated and actual positions.
+	// Each calculatePositionAt is independent (read-only), so parallelize.
+	pairs := make([]targetPair, len(targets))
+	nTargets := len(targets)
+	if nTargets < minParallelSize {
+		for i, pos := range targets {
+			calcPos, err := f.calculatePositionAt(pos, snap)
+			if err != nil {
+				return Proof{}, fmt.Errorf("calculatePositionAt for pos %d: %w", pos, err)
+			}
+			pairs[i] = targetPair{calcPos: calcPos, actualPos: pos}
+		}
+	} else {
+		errs := make([]error, numWorkers)
+		pipelineParallelDo(func(wIdx, s, e int) {
+			for i := s; i < e; i++ {
+				calcPos, err := f.calculatePositionAt(targets[i], snap)
+				if err != nil {
+					errs[wIdx] = fmt.Errorf("calculatePositionAt for pos %d: %w", targets[i], err)
+					return
+				}
+				pairs[i] = targetPair{calcPos: calcPos, actualPos: targets[i]}
+			}
+		}, nTargets)
+		for _, err := range errs {
+			if err != nil {
+				return Proof{}, err
+			}
+		}
+	}
+
+	proofHashes, err := f.fetchProofHashesPairsAt(pairs, snap)
+	if err != nil {
+		return Proof{}, err
+	}
+
+	// Output targets use calcPos (the compacted positions).
+	outTargets := make([]uint64, len(pairs))
+	for i, p := range pairs {
+		outTargets[i] = p.calcPos
+	}
+	if forestRows != defaultForestRows {
+		outTargets = translatePositions(outTargets, forestRows, defaultForestRows)
+	}
+
+	return Proof{
+		Targets: outTargets,
+		Proof:   proofHashes,
+	}, nil
+}
+
+// calculatePositionAt computes the logical (compacted) position of a leaf,
+// equivalent to calculatePosition but using ReadAt so it is safe for
+// concurrent use with Record. It implements the walk-up-then-walk-down
+// algorithm: walk up to the root skipping levels where parentH == currentHash
+// (move-ups), recording left/right turns for real levels, then walk back
+// down using those turns.
+func (f *Forest) calculatePositionAt(rawPos uint64, snap *ForestSnapshot) (uint64, error) {
+	forestRows := f.forestRows
+
+	currentHash, err := f.readHashForProof(rawPos, snap)
+	if err != nil {
+		return 0, err
+	}
+
+	currentPos := rawPos
+	rowsToTop := 0
+	leftRightIndicator := uint64(0)
+	for !isRootPositionTotalRows(currentPos, snap.numLeaves, forestRows) {
+		parentPos := Parent(currentPos, forestRows)
+		parentH, err := f.readHashAt(parentPos)
+		if err != nil {
+			return 0, fmt.Errorf("read parent at %d: %w", parentPos, err)
+		}
+
+		if parentH == currentHash {
+			// Sibling was deleted — this level doesn't exist in compacted tree.
+		} else {
+			if isLeftNiece(currentPos) {
+				leftRightIndicator <<= 1
+			} else {
+				leftRightIndicator <<= 1
+				leftRightIndicator |= 1
+			}
+			rowsToTop++
+		}
+		currentPos = parentPos
+		currentHash = parentH
+	}
+
+	retPos := currentPos
+	for i := 0; i < rowsToTop; i++ {
+		isRight := uint64(1) << i
+		if leftRightIndicator&isRight == isRight {
+			retPos = RightChild(retPos, forestRows)
+		} else {
+			retPos = LeftChild(retPos, forestRows)
+		}
+	}
+
+	return retPos, nil
+}
+
+// fetchProofHashesPairsAt generates proof hashes using the two-position scheme.
+// calcPos (from calculatePositionAt) determines row ordering and sibling detection.
+// actualPos (raw leaf position) determines where to read sibling hashes.
+// This mirrors fetchProofHashes but uses ReadAt for concurrent safety.
+func (f *Forest) fetchProofHashesPairsAt(pairs []targetPair, snap *ForestSnapshot) ([]Hash, error) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+
+	forestRows := f.forestRows
+	numLeaves := snap.numLeaves
+
+	// Sort by calculated position to match pollard ordering.
+	targets := make([]targetPair, len(pairs))
+	copy(targets, pairs)
+	slices.SortFunc(targets, func(a, b targetPair) bool {
+		return a.calcPos < b.calcPos
+	})
+
+	// deTwin using calculated positions, walking up actualPos with ReadAt.
+	targets, err := f.deTwinPairsAt(targets, snap)
+	if err != nil {
+		return nil, err
+	}
+
+	proofHashes := make([]Hash, 0, len(targets)*int(TreeRows(numLeaves)+1))
+	for row := uint8(0); row <= forestRows; row++ {
+		for i := 0; i < len(targets); i++ {
+			calcPos := targets[i].calcPos
+			actualPos := targets[i].actualPos
+
+			if calcPos > maxPossiblePosAtRow(row, forestRows) {
+				continue
+			}
+			if row != DetectRow(calcPos, forestRows) {
+				continue
+			}
+			if isRootPositionOnRowTotalRows(calcPos, numLeaves, row, forestRows) {
+				continue
+			}
+
+			// Walk up actual position to handle move-ups.
+			actualParentPos := Parent(actualPos, forestRows)
+			parentH, err := f.readHashAt(actualParentPos)
+			if err != nil {
+				return nil, err
+			}
+			currentHash, err := f.readHashForProof(actualPos, snap)
+			if err != nil {
+				return nil, err
+			}
+			for parentH == currentHash {
+				actualPos = actualParentPos
+				targets[i].actualPos = actualPos
+				actualParentPos = Parent(actualPos, forestRows)
+				parentH, err = f.readHashAt(actualParentPos)
+				if err != nil {
+					return nil, err
+				}
+			}
+
+			// Check if next target is sibling (using calcPos).
+			if i+1 < len(targets) && rightSib(calcPos) == targets[i+1].calcPos {
+				targets[i].calcPos = Parent(calcPos, forestRows)
+				targets[i].actualPos = actualParentPos
+				i++ // Skip sibling
+				continue
+			}
+
+			// Read sibling hash from actual sibling position.
+			proofHash, err := f.readHashForProof(sibling(actualPos), snap)
+			if err != nil {
+				return nil, err
+			}
+			proofHashes = append(proofHashes, proofHash)
+			targets[i].calcPos = Parent(calcPos, forestRows)
+			targets[i].actualPos = actualParentPos
+		}
+
+		slices.SortFunc(targets, func(a, b targetPair) bool {
+			return a.calcPos < b.calcPos
+		})
+	}
+
+	return proofHashes, nil
+}
+
+// deTwinPairsAt removes sibling pairs from targets using calculated positions,
+// walking up actualPos with ReadAt for concurrent safety.
+func (f *Forest) deTwinPairsAt(targets []targetPair, snap *ForestSnapshot) ([]targetPair, error) {
+	for i := 0; i < len(targets)-1; i++ {
+		if targets[i].calcPos|1 == targets[i+1].calcPos {
+			targets[i].calcPos = Parent(targets[i].calcPos, f.forestRows)
+
+			// Walk up actualPos to find where the node actually is.
+			actualPos := targets[i].actualPos
+			currentHash, err := f.readHashForProof(actualPos, snap)
+			if err != nil {
+				return nil, err
+			}
+			parentPos := Parent(actualPos, f.forestRows)
+			parentH, err := f.readHashAt(parentPos)
+			if err != nil {
+				return nil, err
+			}
+			for parentH == currentHash {
+				actualPos = parentPos
+				parentPos = Parent(actualPos, f.forestRows)
+				parentH, err = f.readHashAt(parentPos)
+				if err != nil {
+					return nil, err
+				}
+			}
+			targets[i].actualPos = parentPos
+
+			targets = append(targets[:i+1], targets[i+2:]...)
+			i--
+		}
+	}
+
+	return targets, nil
 }
