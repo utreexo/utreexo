@@ -2,13 +2,14 @@
 // The region covers the full data file address space but pages are
 // demand-paged by the kernel, so only touched pages consume physical memory.
 // A second mmap region serves as a bitmap tracking which slots are occupied.
-// A dense list of non-zero bitmap word indices makes ForEach fast regardless
-// of how large or sparse the address space is.
+// A [dirtyMinWord, dirtyMaxWord] range bounds where set bits can live, so
+// ForEach and Clear avoid scanning the entire sparse bitmap.
 package mmapcache
 
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"math/bits"
 )
 
@@ -26,13 +27,17 @@ const maxRegionSize = 1 << (30 + 10*(^uint(0)>>63))
 type Store struct {
 	data       []byte // mmap'd data region (demand-paged)
 	bitmap     []byte // mmap'd bitmap region (demand-paged), read as uint64 words
-	dirty      []int  // dense list of bitmap word indices with set bits; enables fast iteration in ForEach/Clear without scanning the entire sparse bitmap
-	dirtySet   []byte // 1 bit per bitmap word; dedup guard so markDirty can check in O(1) whether a word index is already in the dirty list
 	entrySize  int
 	slots      int // total number of slots
 	words      int // number of uint64 words in bitmap
 	maxEntries int
 	totalCount int
+
+	// Inclusive range of bitmap word indices that may contain set bits.
+	// ForEach, Clear, and DeleteAbove scan only this range. Initialized
+	// to (MaxInt, -1) which represents an empty range.
+	dirtyMinWord int
+	dirtyMaxWord int
 }
 
 // New creates a Store for entries of the given byte size.
@@ -58,22 +63,15 @@ func New(entrySize int, maxBytes int64) (*Store, error) {
 		return nil, fmt.Errorf("mmapcache: mmap bitmap %d bytes: %w", bitmapSize, err)
 	}
 
-	dirtySetSize := (words + 7) / 8
-	dirtySet, err := mmapAnon(max(dirtySetSize, 1))
-	if err != nil {
-		mmapRelease(data)
-		mmapRelease(bitmap)
-		return nil, fmt.Errorf("mmapcache: mmap dirtySet %d bytes: %w", dirtySetSize, err)
-	}
-
 	return &Store{
-		data:       data,
-		bitmap:     bitmap,
-		dirtySet:   dirtySet,
-		entrySize:  entrySize,
-		slots:      slots,
-		words:      words,
-		maxEntries: int(maxBytes) / entrySize,
+		data:         data,
+		bitmap:       bitmap,
+		entrySize:    entrySize,
+		slots:        slots,
+		words:        words,
+		maxEntries:   int(maxBytes) / entrySize,
+		dirtyMinWord: math.MaxInt,
+		dirtyMaxWord: -1,
 	}, nil
 }
 
@@ -90,18 +88,14 @@ func (s *Store) setWord(w int, v uint64) {
 	binary.LittleEndian.PutUint64(s.bitmap[w*8:], v)
 }
 
-// isDirty returns true if bitmap word w is tracked in the dirty list.
-func (s *Store) isDirty(w int) bool {
-	return s.dirtySet[w/8]>>(uint(w)%8)&1 != 0
-}
-
-// markDirty adds bitmap word w to the dirty list if not already present.
-func (s *Store) markDirty(w int) {
-	if s.isDirty(w) {
-		return
+// extendDirtyRange widens [dirtyMinWord, dirtyMaxWord] to include w.
+func (s *Store) extendDirtyRange(w int) {
+	if w < s.dirtyMinWord {
+		s.dirtyMinWord = w
 	}
-	s.dirtySet[w/8] |= 1 << (uint(w) % 8)
-	s.dirty = append(s.dirty, w)
+	if w > s.dirtyMaxWord {
+		s.dirtyMaxWord = w
+	}
 }
 
 // Get retrieves the data at the given byte offset. Returns nil, false if
@@ -137,8 +131,8 @@ func (s *Store) Put(offset int64, data []byte) error {
 	w, bit := slot/bitsPerWord, uint(slot)%bitsPerWord
 	word := s.word(w)
 	if word>>bit&1 == 0 {
-		s.markDirty(w)
 		s.setWord(w, word|1<<bit)
+		s.extendDirtyRange(w)
 		s.totalCount++
 	}
 	return nil
@@ -170,10 +164,15 @@ func (s *Store) Delete(offset int64) {
 func (s *Store) DeleteAbove(size int64) {
 	startSlot := int(size) / s.entrySize
 	startWord := startSlot / bitsPerWord
-	for _, w := range s.dirty {
-		if w < startWord {
-			continue
-		}
+	lo := s.dirtyMinWord
+	hi := s.dirtyMaxWord
+	if lo > hi {
+		return
+	}
+	if startWord > lo {
+		lo = startWord
+	}
+	for w := lo; w <= hi; w++ {
 		word := s.word(w)
 		if word == 0 {
 			continue
@@ -193,12 +192,14 @@ func (s *Store) DeleteAbove(size int64) {
 // Clear removes all entries. The mmap regions remain allocated so the
 // store can be reused without re-mapping.
 func (s *Store) Clear() {
-	for _, w := range s.dirty {
-		s.setWord(w, 0)
-		s.dirtySet[w/8] &^= 1 << (uint(w) % 8)
+	for w := s.dirtyMinWord; w <= s.dirtyMaxWord; w++ {
+		if s.word(w) != 0 {
+			s.setWord(w, 0)
+		}
 	}
-	s.dirty = s.dirty[:0]
 	s.totalCount = 0
+	s.dirtyMinWord = math.MaxInt
+	s.dirtyMaxWord = -1
 }
 
 // Close releases all mmap regions back to the OS.
@@ -211,17 +212,12 @@ func (s *Store) Close() {
 		mmapRelease(s.bitmap)
 		s.bitmap = nil
 	}
-	if s.dirtySet != nil {
-		mmapRelease(s.dirtySet)
-		s.dirtySet = nil
-	}
-	s.dirty = nil
 	s.totalCount = 0
 }
 
 // ForEach iterates over all cached entries, calling fn for each one.
 func (s *Store) ForEach(fn func(offset int64, data []byte)) {
-	for _, w := range s.dirty {
+	for w := s.dirtyMinWord; w <= s.dirtyMaxWord; w++ {
 		word := s.word(w)
 		for word != 0 {
 			bit := bits.TrailingZeros64(word)
