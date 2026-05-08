@@ -86,8 +86,11 @@ func newCachedRWS(underlying forestFile, entrySize int, maxCacheBytes int64) (*c
 	}, nil
 }
 
-// ReadAt reads len(p) bytes starting at byte offset off.
-// It checks the cache first, then falls through to the underlying file.
+// ReadAt reads len(p) bytes starting at byte offset off, checking the cache
+// first and falling through to the underlying file on miss. Follows the
+// io.ReaderAt contract: short reads return (n, io.EOF), and reads entirely
+// past the underlying file size return (0, io.EOF). Callers that want
+// "unwritten position reads as zero" semantics must handle io.EOF themselves.
 func (c *cachedRWS) ReadAt(p []byte, off int64) (int, error) {
 	if cached, ok := c.cache.get(off); ok {
 		n := copy(p, cached)
@@ -100,6 +103,24 @@ func (c *cachedRWS) ReadAt(p []byte, off int64) (int, error) {
 		return 0, io.EOF
 	}
 	return c.underlying.ReadAt(p, off)
+}
+
+// WriteAt writes p to the cache at byte offset off. Like Write, the data
+// length must match the cache's entry size; unlike Write, it does not
+// advance the seek position, making it safe for concurrent disjoint-offset
+// writes from multiple goroutines.
+func (c *cachedRWS) WriteAt(p []byte, off int64) (int, error) {
+	if len(p) != c.cache.entrySize() {
+		return 0, fmt.Errorf("expected %d bytes, got %d", c.cache.entrySize(), len(p))
+	}
+	if err := c.cache.put(off, p); err != nil {
+		return 0, err
+	}
+	end := off + int64(len(p))
+	if end > c.maxWritten {
+		c.maxWritten = end
+	}
+	return len(p), nil
 }
 
 // Read returns data from the cache if present, otherwise reads from
