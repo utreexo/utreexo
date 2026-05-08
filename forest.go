@@ -58,8 +58,9 @@ func dataFileSize(forestRows uint8) int64 {
 var _ Utreexo = (*Forest)(nil)
 
 // forestFile is the interface required for the main data file.
+// All I/O is positional; there is no shared seek position to coordinate
+// across goroutines.
 type forestFile interface {
-	io.ReadWriteSeeker
 	io.ReaderAt
 	io.WriterAt
 }
@@ -281,7 +282,8 @@ func readBlockCounts(file io.ReaderAt, size int64) ([]uint32, error) {
 }
 
 // newForest creates a new Forest backed by the given file.
-// The file should be an io.ReadWriteSeeker (e.g., *os.File).
+// The file must satisfy the forestFile interface (ReadAt + WriteAt);
+// *os.File satisfies it natively.
 // blockCountsFile stores the uint32 add-count per block; numLeaves is derived
 // from the cumulative sum of all block counts.
 // metaFile stores recordMode (bytes 0-31), numLeaves (bytes 32-63), and consistency hash (bytes 64-95).

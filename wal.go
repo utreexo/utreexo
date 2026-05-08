@@ -522,7 +522,7 @@ func (w *wal) recoverFromJournal(underlying []forestFile) error {
 
 // syncFile calls Sync() on f if it supports it (e.g. *os.File).
 // For implementations without Sync (e.g. memFile), this is a no-op.
-func syncFile(f io.ReadWriteSeeker) error {
+func syncFile(f any) error {
 	if syncer, ok := f.(interface{ Sync() error }); ok {
 		return syncer.Sync()
 	}

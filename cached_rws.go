@@ -39,8 +39,8 @@ type cacheStore interface {
 	close()
 }
 
-// cachedRWS wraps an io.ReadWriteSeeker, buffering all writes in memory.
-// Reads check the buffer first (exact offset match), then fall through to
+// cachedRWS wraps a forestFile, buffering all writes in memory. Reads
+// check the buffer first (exact offset match), then fall through to
 // the underlying file on miss. This enables atomic modifications: call
 // Flush to commit buffered writes, or Discard to throw them away.
 //
