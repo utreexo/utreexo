@@ -77,6 +77,20 @@ func (m *memFile) ReadAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
+// WriteAt writes p at byte offset off, growing the backing slice with
+// zero bytes if off+len(p) extends past the current size. Does not
+// advance the seek position; safe alongside concurrent disjoint reads
+// (callers serialize their own writes — Truncate/extension is not
+// guarded against concurrent ReadAt).
+func (m *memFile) WriteAt(p []byte, off int64) (int, error) {
+	needed := off + int64(len(p)) - int64(len(m.data))
+	if needed > 0 {
+		m.data = append(m.data, make([]byte, needed)...)
+	}
+	n := copy(m.data[off:], p)
+	return n, nil
+}
+
 func (m *memFile) Truncate(size int64) error {
 	if size < int64(len(m.data)) {
 		m.data = m.data[:size]
