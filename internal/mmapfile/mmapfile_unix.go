@@ -81,6 +81,24 @@ func (m *mmapFile) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// WriteAt writes p to the mapped region at byte offset off. Unlike Write
+// it does not advance the seek position, so concurrent calls at disjoint
+// offsets are safe. The mapping size is fixed at Open time; writes wholly
+// or partially past size return a short-write error.
+func (m *mmapFile) WriteAt(p []byte, off int64) (int, error) {
+	if m.data == nil {
+		return 0, errClosed
+	}
+	if off < 0 || off >= m.size {
+		return 0, fmt.Errorf("mmapFile: write at %d beyond size %d", off, m.size)
+	}
+	n := copy(m.data[off:m.size], p)
+	if n < len(p) {
+		return n, fmt.Errorf("mmapFile: short write at %d (wrote %d of %d)", off, n, len(p))
+	}
+	return n, nil
+}
+
 func (m *mmapFile) Seek(offset int64, whence int) (int64, error) {
 	if m.data == nil {
 		return 0, errClosed
