@@ -61,6 +61,7 @@ var _ Utreexo = (*Forest)(nil)
 type forestFile interface {
 	io.ReadWriteSeeker
 	io.ReaderAt
+	io.WriterAt
 }
 
 // positionMap value packing: upper 17 bits = addIndex, lower 47 bits = position
@@ -729,43 +730,31 @@ func (f *Forest) posToFileOffset(position uint64) int64 {
 	return rowBaseOffset(row, f.forestRows) + int64(position-rowStart)*32
 }
 
-// readHash reads the hash at the given position from the file.
+// readHash reads the hash at the given position from the file using ReadAt.
+// Positions that have never been written (read past EOF) yield a zero Hash,
+// matching the forest's "unwritten = empty" semantics.
+// Safe for concurrent use with other readHash/writeHash calls on disjoint
+// positions (no shared seek position).
 func (f *Forest) readHash(position uint64) (Hash, error) {
 	offset := f.posToFileOffset(position)
-	_, err := f.file.Seek(offset, io.SeekStart)
-	if err != nil {
-		return Hash{}, fmt.Errorf("seek to position %d: %w", position, err)
-	}
-
 	var hash Hash
-	n, err := f.file.Read(hash[:])
+	_, err := f.file.ReadAt(hash[:], offset)
+	if err == io.EOF {
+		return Hash{}, nil
+	}
 	if err != nil {
-		return Hash{}, fmt.Errorf("read at position %d: %w", position, err)
+		return Hash{}, err
 	}
-	if n != 32 {
-		return Hash{}, fmt.Errorf("short read at position %d: got %d bytes", position, n)
-	}
-
 	return hash, nil
 }
 
-// writeHash writes the hash at the given position to the file.
+// writeHash writes the hash at the given position to the file using WriteAt.
+// Safe for concurrent use with other readHash/writeHash calls on disjoint
+// positions (no shared seek position).
 func (f *Forest) writeHash(position uint64, hash Hash) error {
 	offset := f.posToFileOffset(position)
-	_, err := f.file.Seek(offset, io.SeekStart)
-	if err != nil {
-		return fmt.Errorf("seek to position %d: %w", position, err)
-	}
-
-	n, err := f.file.Write(hash[:])
-	if err != nil {
-		return fmt.Errorf("write at position %d: %w", position, err)
-	}
-	if n != 32 {
-		return fmt.Errorf("short write at position %d: wrote %d bytes", position, n)
-	}
-
-	return nil
+	_, err := f.file.WriteAt(hash[:], offset)
+	return err
 }
 
 // appendBlockCount appends a block's add count to the block counts file.
