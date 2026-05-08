@@ -292,11 +292,7 @@ func (w *wal) applyFromCaches(bestHash [32]byte) error {
 			if applyErr != nil {
 				return
 			}
-			if _, err := c.underlying.Seek(offset, io.SeekStart); err != nil {
-				applyErr = fmt.Errorf("file %d seek to %d: %w", i, offset, err)
-				return
-			}
-			if _, err := c.underlying.Write(data); err != nil {
+			if _, err := c.underlying.WriteAt(data, offset); err != nil {
 				applyErr = fmt.Errorf("file %d write at %d: %w", i, offset, err)
 				return
 			}
@@ -312,11 +308,7 @@ func (w *wal) applyFromCaches(bestHash [32]byte) error {
 		if bitmapErr != nil {
 			return
 		}
-		if _, err := w.bitmapFile.Seek(offset, io.SeekStart); err != nil {
-			bitmapErr = fmt.Errorf("bitmap file seek to %d: %w", offset, err)
-			return
-		}
-		if _, err := w.bitmapFile.Write(data); err != nil {
+		if _, err := w.bitmapFile.WriteAt(data, offset); err != nil {
 			bitmapErr = fmt.Errorf("bitmap file write at %d: %w", offset, err)
 			return
 		}
@@ -327,10 +319,7 @@ func (w *wal) applyFromCaches(bestHash [32]byte) error {
 
 	// Write bestHash to metaFile at bestHashOffset.
 	metaFile := w.cached[metaFileIdx].underlying
-	if _, err := metaFile.Seek(bestHashOffset, io.SeekStart); err != nil {
-		return fmt.Errorf("metaFile seek: %w", err)
-	}
-	if _, err := metaFile.Write(bestHash[:]); err != nil {
+	if _, err := metaFile.WriteAt(bestHash[:], bestHashOffset); err != nil {
 		return fmt.Errorf("metaFile write bestHash: %w", err)
 	}
 

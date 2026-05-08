@@ -144,11 +144,7 @@ func (c *cachedRWS) Read(p []byte) (int, error) {
 		return n, nil
 	}
 	// Fall through to underlying file.
-	_, err := c.underlying.Seek(c.pos, io.SeekStart)
-	if err != nil {
-		return 0, err
-	}
-	n, err := c.underlying.Read(p)
+	n, err := c.underlying.ReadAt(p, c.pos)
 	c.pos += int64(n)
 	return n, err
 }
@@ -194,13 +190,7 @@ func (c *cachedRWS) Flush() error {
 		if flushErr != nil {
 			return
 		}
-		_, err := c.underlying.Seek(offset, io.SeekStart)
-		if err != nil {
-			flushErr = err
-			return
-		}
-		_, err = c.underlying.Write(data)
-		if err != nil {
+		if _, err := c.underlying.WriteAt(data, offset); err != nil {
 			flushErr = err
 			return
 		}

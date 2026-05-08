@@ -326,10 +326,11 @@ func newForest(file forestFile, blockCountsFile, metaFile forestFile, bitmap *de
 	}
 
 	// Read consistency hash from metaFile (bytes 64-95, written atomically by WAL).
-	// Zero hash on first run or if metaFile is empty.
+	// Zero hash on first run or if metaFile is empty (io.EOF leaves the buffer zeroed).
 	var consistencyHash [32]byte
-	metaFile.Seek(bestHashOffset, io.SeekStart)
-	metaFile.Read(consistencyHash[:])
+	if _, err := metaFile.ReadAt(consistencyHash[:], bestHashOffset); err != nil && err != io.EOF {
+		return nil, fmt.Errorf("read consistency hash: %w", err)
+	}
 
 	// Create Swiss Table for position map. Size based on numLeaves or
 	// expectedMaxLeaves (whichever is larger) to avoid costly resizes.
@@ -578,16 +579,11 @@ func (f *Forest) rebuildPositionMap() error {
 	go func() {
 		defer close(hashCh)
 
-		if _, err := f.file.Seek(0, io.SeekStart); err != nil {
-			hashErrCh <- err
-			return
-		}
-
 		for pos := uint64(0); pos < f.NumLeaves; pos += batchSize {
 			n := min(uint64(batchSize), f.NumLeaves-pos)
 
 			buf := make([]byte, n*32)
-			if _, err := io.ReadFull(f.file, buf); err != nil {
+			if _, err := f.file.ReadAt(buf, f.posToFileOffset(pos)); err != nil {
 				hashErrCh <- err
 				return
 			}
@@ -637,12 +633,8 @@ func (f *Forest) rebuildPositionMap() error {
 // loadMetadata reads recordMode (bytes 0-31) and numLeaves (bytes 32-63)
 // from the metaFile. Each field occupies one 32-byte entry.
 func (f *Forest) loadMetadata() error {
-	_, err := f.metaFile.Seek(0, io.SeekStart)
-	if err != nil {
-		return err
-	}
 	var buf [64]byte
-	_, err = f.metaFile.Read(buf[:])
+	_, err := f.metaFile.ReadAt(buf[:], 0)
 	if err == io.EOF {
 		// Fresh database, no metadata yet.
 		return nil
@@ -662,34 +654,29 @@ func (f *Forest) loadMetadata() error {
 // match the cachedRWS entry size. Both writes go through the WAL-protected
 // cachedRWS, so they are crash-safe.
 func (f *Forest) saveMetadata() error {
-	_, err := f.metaFile.Seek(0, io.SeekStart)
-	if err != nil {
-		return err
-	}
-
 	var recordModeBuf [32]byte
 	if f.recordMode {
 		recordModeBuf[0] = 1
 	}
-	if _, err := f.metaFile.Write(recordModeBuf[:]); err != nil {
+	if _, err := f.metaFile.WriteAt(recordModeBuf[:], 0); err != nil {
 		return err
 	}
 
 	var numLeavesBuf [32]byte
 	binary.LittleEndian.PutUint64(numLeavesBuf[:], f.NumLeaves)
-	_, err = f.metaFile.Write(numLeavesBuf[:])
+	_, err := f.metaFile.WriteAt(numLeavesBuf[:], 32)
 	return err
 }
 
 // ReadConsistencyHash reads the consistency hash from metaFile (bytes 64-95).
-// The hash is written atomically by WAL.Flush().
+// The hash is written atomically by WAL.Flush(). Returns a zero hash on a
+// fresh database where the metaFile has not yet been written that far.
 func (f *Forest) ReadConsistencyHash() ([32]byte, error) {
 	var hash [32]byte
-	_, err := f.metaFile.Seek(bestHashOffset, io.SeekStart)
-	if err != nil {
-		return hash, err
+	_, err := f.metaFile.ReadAt(hash[:], bestHashOffset)
+	if err == io.EOF {
+		return hash, nil
 	}
-	_, err = io.ReadFull(f.metaFile, hash[:])
 	return hash, err
 }
 
