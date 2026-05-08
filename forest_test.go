@@ -91,6 +91,10 @@ func (m *memFile) WriteAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
+func (m *memFile) Size() int64 {
+	return int64(len(m.data))
+}
+
 func (m *memFile) Truncate(size int64) error {
 	if size < int64(len(m.data)) {
 		m.data = m.data[:size]
@@ -733,7 +737,7 @@ func TestForestNoFlushBeforeWAL(t *testing.T) {
 
 	// Restart a new forest from the flushed underlying files.
 	tmpDir2 := t.TempDir()
-	bitmap2, err := loadDeletedBitmap(underlyingDelFile)
+	bitmap2, err := loadDeletedBitmap(underlyingDelFile, underlyingDelFile.Size())
 	require.NoError(t, err)
 	forest2, err := newForest(
 		underlyingFile, underlyingBlockCountsFile, underlyingMetaFile, bitmap2,
@@ -799,7 +803,7 @@ func TestForestCrashRecovery(t *testing.T) {
 
 	// Underlying files still only have block-200 data.
 	tmpDir2 := t.TempDir()
-	preRecoveryBitmap, err := loadDeletedBitmap(delFile)
+	preRecoveryBitmap, err := loadDeletedBitmap(delFile, delFile.Size())
 	require.NoError(t, err)
 	preRecoveryForest, err := newForest(
 		mainFile, blockCountsFile, metaFile, preRecoveryBitmap,
@@ -1250,7 +1254,7 @@ func TestForestBlockCountsReconciliation(t *testing.T) {
 			require.Equal(t, tc.numLeaves, forest.NumLeaves)
 
 			// Read back block counts and verify they were trimmed.
-			got, err := readBlockCounts(blockCountsFile)
+			got, err := readBlockCounts(blockCountsFile, blockCountsFile.Size())
 			require.NoError(t, err)
 
 			if tc.expectedCounts == nil {

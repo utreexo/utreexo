@@ -57,17 +57,13 @@ type cachedRWS struct {
 	baseSize   int64 // underlying file size at wrap time
 }
 
-// newCachedRWS creates a cachedRWS wrapping the given io.ReadWriteSeeker.
-// It seeks to the end of the underlying file to determine its current size,
-// which is needed for correct SeekEnd behavior (e.g. append patterns).
-// entrySize specifies the fixed record size (4, 8, or 32 bytes).
-// maxCacheBytes controls when overflowed() signals that a flush is needed.
-// If maxCacheBytes is 0, defaultMaxCacheMemory is used.
-func newCachedRWS(underlying forestFile, entrySize int, maxCacheBytes int64) (*cachedRWS, error) {
-	size, err := underlying.Seek(0, io.SeekEnd)
-	if err != nil {
-		return nil, err
-	}
+// newCachedRWS creates a cachedRWS wrapping the given forestFile.
+// initialSize is the underlying file's current byte size; the caller is
+// expected to know it (e.g. via Stat for *os.File or the size passed to
+// mmapfile.Open). entrySize specifies the fixed record size (4, 8, or 32
+// bytes). maxCacheBytes controls when overflowed() signals that a flush
+// is needed; if 0, defaultMaxCacheMemory is used.
+func newCachedRWS(underlying forestFile, entrySize int, maxCacheBytes, initialSize int64) (*cachedRWS, error) {
 	if maxCacheBytes <= 0 {
 		maxCacheBytes = defaultMaxCacheMemory
 	}
@@ -80,10 +76,16 @@ func newCachedRWS(underlying forestFile, entrySize int, maxCacheBytes int64) (*c
 	return &cachedRWS{
 		underlying: underlying,
 		cache:      cache,
-		pos:        size,
-		maxWritten: size,
-		baseSize:   size,
+		pos:        initialSize,
+		maxWritten: initialSize,
+		baseSize:   initialSize,
 	}, nil
+}
+
+// Size returns the cachedRWS's current logical size, including any cached
+// writes that haven't been flushed to the underlying file yet.
+func (c *cachedRWS) Size() int64 {
+	return c.maxWritten
 }
 
 // ReadAt reads len(p) bytes starting at byte offset off, checking the cache
@@ -200,13 +202,9 @@ func (c *cachedRWS) Flush() error {
 	}
 	c.cache.clear()
 
-	// Update baseSize so subsequent reads can reach the newly flushed data
-	// in the underlying file.
-	size, err := c.underlying.Seek(0, io.SeekEnd)
-	if err != nil {
-		return err
-	}
-	c.baseSize = size
+	// All cached writes have been applied to the underlying file, so the
+	// underlying's new size is exactly maxWritten.
+	c.baseSize = c.maxWritten
 	return nil
 }
 
@@ -227,18 +225,13 @@ func (c *cachedRWS) FlushNeeded() bool {
 	return c.cache.overflowed()
 }
 
-// resetAfterFlush clears the cache and updates baseSize/maxWritten to
-// reflect the current underlying file size. This should be called after
-// writes have been applied to the underlying file (e.g. by the WAL),
-// so that a subsequent Discard resets to the correct post-flush baseline.
+// resetAfterFlush clears the cache and updates baseSize to reflect the
+// current underlying file size. This should be called after writes have
+// been applied to the underlying file (e.g. by the WAL), so that a
+// subsequent Discard resets to the correct post-flush baseline.
 func (c *cachedRWS) resetAfterFlush() error {
 	c.cache.clear()
-	size, err := c.underlying.Seek(0, io.SeekEnd)
-	if err != nil {
-		return err
-	}
-	c.baseSize = size
-	c.maxWritten = size
+	c.baseSize = c.maxWritten
 	c.pos = 0
 	return nil
 }

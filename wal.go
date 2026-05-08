@@ -111,21 +111,30 @@ func newWAL(journal io.ReadWriteSeeker, bitmapFile forestFile, files ...walFile)
 		bitmapFile: bitmapFile,
 	}
 
-	// Replay any committed journal entries before creating caches,
-	// since newCachedRWS reads the underlying file size.
+	// Replay any committed journal entries before creating caches: each
+	// cachedRWS snapshots the underlying file's size at construction, so
+	// any recovery-time growth must already be reflected.
 	if err := w.recoverFromJournal(underlying); err != nil {
 		return nil, fmt.Errorf("wal recover: %w", err)
 	}
 
 	// Load bitmap from the (possibly recovered) underlying file.
-	bitmap, err := loadDeletedBitmap(w.bitmapFile)
+	bitmapSize, err := fileSize(w.bitmapFile)
+	if err != nil {
+		return nil, fmt.Errorf("wal bitmap size: %w", err)
+	}
+	bitmap, err := loadDeletedBitmap(w.bitmapFile, bitmapSize)
 	if err != nil {
 		return nil, fmt.Errorf("wal load bitmap: %w", err)
 	}
 	w.bitmap = bitmap
 
 	for i, f := range files {
-		c, err := newCachedRWS(f.File, f.EntrySize, f.MaxCacheBytes)
+		size, err := fileSize(f.File)
+		if err != nil {
+			return nil, fmt.Errorf("wal file %d size: %w", i, err)
+		}
+		c, err := newCachedRWS(f.File, f.EntrySize, f.MaxCacheBytes, size)
 		if err != nil {
 			return nil, fmt.Errorf("wal wrap file %d: %w", i, err)
 		}
@@ -336,7 +345,11 @@ func (w *wal) Discard() error {
 	// Reload bitmap from the underlying file to revert in-memory mutations.
 	// Unlike cachedRWS (which is a read-through cache over the underlying file),
 	// the bitmap is fully in-memory, so we must explicitly restore it.
-	bitmap, err := loadDeletedBitmap(w.bitmapFile)
+	bitmapSize, err := fileSize(w.bitmapFile)
+	if err != nil {
+		return fmt.Errorf("wal discard: bitmap size: %w", err)
+	}
+	bitmap, err := loadDeletedBitmap(w.bitmapFile, bitmapSize)
 	if err != nil {
 		return fmt.Errorf("wal discard: reload bitmap: %w", err)
 	}
@@ -389,11 +402,7 @@ func applyEntries(entries []journalEntry, underlying []forestFile) error {
 		if int(e.fileIdx) >= len(underlying) {
 			return fmt.Errorf("wal: fileIdx %d out of range (have %d files)", e.fileIdx, len(underlying))
 		}
-		f := underlying[e.fileIdx]
-		if _, err := f.Seek(e.offset, io.SeekStart); err != nil {
-			return err
-		}
-		if _, err := f.Write(e.data); err != nil {
+		if _, err := underlying[e.fileIdx].WriteAt(e.data, e.offset); err != nil {
 			return err
 		}
 	}

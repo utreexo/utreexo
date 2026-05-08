@@ -121,6 +121,11 @@ func (m *mmapFile) Seek(offset int64, whence int) (int64, error) {
 	return abs, nil
 }
 
+// Size returns the mapped region's size, fixed at Open time.
+func (m *mmapFile) Size() int64 {
+	return m.size
+}
+
 // Sync flushes the mapped pages to stable storage via fsync.
 func (m *mmapFile) Sync() error {
 	if m.data == nil {

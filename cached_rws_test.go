@@ -16,7 +16,7 @@ func TestCachedRWSReadWrite(t *testing.T) {
 	_, err := underlying.Write(hash[:])
 	require.NoError(t, err)
 
-	c, err := newCachedRWS(underlying, 32, 0)
+	c, err := newCachedRWS(underlying, 32, 0, underlying.Size())
 	require.NoError(t, err)
 
 	// Read from underlying (cache miss).
@@ -63,7 +63,7 @@ func TestCachedRWSSeekEndAppend(t *testing.T) {
 	_, err := underlying.Write(header[:])
 	require.NoError(t, err)
 
-	c, err := newCachedRWS(underlying, 8, 0)
+	c, err := newCachedRWS(underlying, 8, 0, underlying.Size())
 	require.NoError(t, err)
 
 	// Append three 8-byte entries via SeekEnd.
@@ -90,7 +90,7 @@ func TestCachedRWSSeekEndAppend(t *testing.T) {
 func TestCachedRWSFlush(t *testing.T) {
 	underlying := newMemFile()
 
-	c, err := newCachedRWS(underlying, 32, 0)
+	c, err := newCachedRWS(underlying, 32, 0, underlying.Size())
 	require.NoError(t, err)
 
 	// Write two hashes at different offsets.
@@ -139,7 +139,7 @@ func TestCachedRWSDiscard(t *testing.T) {
 	_, err := underlying.Write(origHash[:])
 	require.NoError(t, err)
 
-	c, err := newCachedRWS(underlying, 32, 0)
+	c, err := newCachedRWS(underlying, 32, 0, underlying.Size())
 	require.NoError(t, err)
 
 	// Write a different hash at offset 0.
@@ -185,7 +185,7 @@ func TestCachedRWSReadAfterWrite(t *testing.T) {
 	_, err := underlying.Write(stale[:])
 	require.NoError(t, err)
 
-	c, err := newCachedRWS(underlying, 32, 0)
+	c, err := newCachedRWS(underlying, 32, 0, underlying.Size())
 	require.NoError(t, err)
 
 	// Write a fresh hash at the same offset.

@@ -64,6 +64,25 @@ type forestFile interface {
 	io.WriterAt
 }
 
+// fileSize asks f for its current byte size, preferring an explicit
+// Size() int64 method (cachedRWS, mmapFile, memFile) and falling back
+// to Stat() (e.g. *os.File). This avoids wrapping *os.File just to
+// expose a Size method — callers that have one in hand can pass it
+// through directly.
+func fileSize(f any) (int64, error) {
+	if s, ok := f.(interface{ Size() int64 }); ok {
+		return s.Size(), nil
+	}
+	if s, ok := f.(interface{ Stat() (os.FileInfo, error) }); ok {
+		st, err := s.Stat()
+		if err != nil {
+			return 0, err
+		}
+		return st.Size(), nil
+	}
+	return 0, fmt.Errorf("fileSize: %T has no Size or Stat method", f)
+}
+
 // positionMap value packing: upper 17 bits = addIndex, lower 47 bits = position
 // Supports up to 2^47 (~140 trillion) leaves and 2^17 (131,072) adds per block.
 const (
@@ -151,12 +170,8 @@ func (b *deletedBitmap) clearDirty() {
 
 // loadDeletedBitmap reads a bitmap file into a new deletedBitmap.
 // The file stores uint64 words in little-endian format, one per 8 bytes.
-func loadDeletedBitmap(file io.ReadSeeker) (*deletedBitmap, error) {
-	size, err := file.Seek(0, io.SeekEnd)
-	if err != nil {
-		return nil, err
-	}
-
+// size is the bitmap file's current byte length.
+func loadDeletedBitmap(file io.ReaderAt, size int64) (*deletedBitmap, error) {
 	if size == 0 {
 		return newDeletedBitmap(0), nil
 	}
@@ -165,12 +180,8 @@ func loadDeletedBitmap(file io.ReadSeeker) (*deletedBitmap, error) {
 		return nil, fmt.Errorf("bitmap file size %d is not a multiple of 8", size)
 	}
 
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-
 	buf := make([]byte, size)
-	if _, err := io.ReadFull(file, buf); err != nil {
+	if _, err := file.ReadAt(buf, 0); err != nil && err != io.EOF {
 		return nil, err
 	}
 
@@ -249,23 +260,16 @@ type Forest struct {
 }
 
 // readBlockCounts reads all uint32 entries from a block counts file
-// and returns them as a slice.
-func readBlockCounts(file io.ReadSeeker) ([]uint32, error) {
-	size, err := file.Seek(0, io.SeekEnd)
-	if err != nil {
-		return nil, err
-	}
+// and returns them as a slice. size is the file's current byte length.
+func readBlockCounts(file io.ReaderAt, size int64) ([]uint32, error) {
 	if size == 0 {
 		return nil, nil
 	}
 	if size%4 != 0 {
 		return nil, fmt.Errorf("block counts file size %d is not a multiple of 4", size)
 	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
 	buf := make([]byte, size)
-	if _, err := io.ReadFull(file.(io.Reader), buf); err != nil {
+	if _, err := file.ReadAt(buf, 0); err != nil && err != io.EOF {
 		return nil, err
 	}
 	n := size / 4
@@ -307,7 +311,11 @@ func newForest(file forestFile, blockCountsFile, metaFile forestFile, bitmap *de
 	// After undo-without-flush crashes, the block counts file may have
 	// stale entries at the end (one per undo). Remove entries from the
 	// end until the sum no longer exceeds numLeaves.
-	counts, err := readBlockCounts(blockCountsFile)
+	bcSize, err := fileSize(blockCountsFile)
+	if err != nil {
+		return nil, fmt.Errorf("blockCountsFile size: %w", err)
+	}
+	counts, err := readBlockCounts(blockCountsFile, bcSize)
 	if err != nil {
 		return nil, fmt.Errorf("read blockCountsFile: %w", err)
 	}
@@ -557,7 +565,11 @@ func (f *Forest) rebuildPositionMap() error {
 	}
 
 	// Load block counts from file into a local slice.
-	blockAdds, err := readBlockCounts(f.blockCountsFile)
+	bcSize, err := fileSize(f.blockCountsFile)
+	if err != nil {
+		return fmt.Errorf("blockCountsFile size: %w", err)
+	}
+	blockAdds, err := readBlockCounts(f.blockCountsFile, bcSize)
 	if err != nil {
 		return fmt.Errorf("read block counts: %w", err)
 	}
@@ -746,10 +758,14 @@ func (f *Forest) writeHash(position uint64, hash Hash) error {
 
 // appendBlockCount appends a block's add count to the block counts file.
 func (f *Forest) appendBlockCount(count uint32) error {
-	if _, err := f.blockCountsFile.Seek(0, io.SeekEnd); err != nil {
+	off, err := fileSize(f.blockCountsFile)
+	if err != nil {
 		return err
 	}
-	return binary.Write(f.blockCountsFile, binary.LittleEndian, count)
+	var buf [4]byte
+	binary.LittleEndian.PutUint32(buf[:], count)
+	_, err = f.blockCountsFile.WriteAt(buf[:], off)
+	return err
 }
 
 // add adds a single leaf to the forest.
