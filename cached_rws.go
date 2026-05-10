@@ -3,6 +3,7 @@ package utreexo
 import (
 	"fmt"
 	"io"
+	"sync/atomic"
 )
 
 const (
@@ -52,8 +53,8 @@ type cacheStore interface {
 type cachedRWS struct {
 	underlying forestFile
 	cache      cacheStore
-	maxWritten int64 // highest byte offset ever written (logical file size)
-	baseSize   int64 // underlying file size at last flush
+	maxWritten atomic.Int64 // highest byte offset ever written (logical file size)
+	baseSize   int64        // underlying file size at last flush
 }
 
 // newCachedRWS creates a cachedRWS wrapping the given forestFile.
@@ -72,18 +73,19 @@ func newCachedRWS(underlying forestFile, entrySize int, maxCacheBytes, initialSi
 		return nil, err
 	}
 
-	return &cachedRWS{
+	c := &cachedRWS{
 		underlying: underlying,
 		cache:      cache,
-		maxWritten: initialSize,
 		baseSize:   initialSize,
-	}, nil
+	}
+	c.maxWritten.Store(initialSize)
+	return c, nil
 }
 
 // Size returns the cachedRWS's current logical size, including any cached
 // writes that haven't been flushed to the underlying file yet.
 func (c *cachedRWS) Size() int64 {
-	return c.maxWritten
+	return c.maxWritten.Load()
 }
 
 // ReadAt reads len(p) bytes starting at byte offset off, checking the cache
@@ -116,8 +118,14 @@ func (c *cachedRWS) WriteAt(p []byte, off int64) (int, error) {
 		return 0, err
 	}
 	end := off + int64(len(p))
-	if end > c.maxWritten {
-		c.maxWritten = end
+	for {
+		old := c.maxWritten.Load()
+		if end <= old {
+			break
+		}
+		if c.maxWritten.CompareAndSwap(old, end) {
+			break
+		}
 	}
 	return len(p), nil
 }
@@ -141,14 +149,14 @@ func (c *cachedRWS) Flush() error {
 
 	// All cached writes have been applied to the underlying file, so the
 	// underlying's new size is exactly maxWritten.
-	c.baseSize = c.maxWritten
+	c.baseSize = c.maxWritten.Load()
 	return nil
 }
 
 // Discard drops all buffered writes without touching the underlying file.
 func (c *cachedRWS) Discard() {
 	c.cache.clear()
-	c.maxWritten = c.baseSize
+	c.maxWritten.Store(c.baseSize)
 }
 
 // Close releases resources held by the cache (e.g. mmap regions).
@@ -167,6 +175,6 @@ func (c *cachedRWS) FlushNeeded() bool {
 // subsequent Discard resets to the correct post-flush baseline.
 func (c *cachedRWS) resetAfterFlush() error {
 	c.cache.clear()
-	c.baseSize = c.maxWritten
+	c.baseSize = c.maxWritten.Load()
 	return nil
 }

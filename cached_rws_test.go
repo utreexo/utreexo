@@ -143,7 +143,7 @@ func TestCachedRWSDiscard(t *testing.T) {
 	require.Equal(t, 0, c.cache.count())
 
 	// maxWritten should be reset to baseSize.
-	require.Equal(t, c.baseSize, c.maxWritten)
+	require.Equal(t, c.baseSize, c.maxWritten.Load())
 
 	// Read from offset 0 should return the original hash (from underlying).
 	var got [32]byte
