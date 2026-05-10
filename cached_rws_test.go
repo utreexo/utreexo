@@ -2,6 +2,7 @@ package utreexo
 
 import (
 	"encoding/binary"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -176,4 +177,49 @@ func TestCachedRWSReadAfterWrite(t *testing.T) {
 	_, err = c.ReadAt(got[:], 0)
 	require.NoError(t, err)
 	require.Equal(t, fresh, Hash(got))
+}
+
+func TestCachedRWSConcurrentDisjointWrites(t *testing.T) {
+	underlying := newMemFile()
+
+	c, err := newCachedRWS(underlying, 32, 0, underlying.Size())
+	require.NoError(t, err)
+
+	const numWriters = 64
+	hashes := make([]Hash, numWriters)
+	for i := range hashes {
+		hashes[i] = testHashFromInt(i + 1)
+	}
+
+	// Release all goroutines simultaneously to maximize overlap.
+	// Each writer targets its own disjoint 32-byte slot and writes into
+	// its own slot in errs, so the slice itself is race-free.
+	start := make(chan struct{})
+	errs := make([]error, numWriters)
+	var wg sync.WaitGroup
+	wg.Add(numWriters)
+	for i := 0; i < numWriters; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = c.WriteAt(hashes[i][:], int64(i)*32)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		require.NoErrorf(t, err, "writer %d", i)
+	}
+
+	// Every disjoint write should be readable from cache at its own offset.
+	for i := 0; i < numWriters; i++ {
+		var got [32]byte
+		n, err := c.ReadAt(got[:], int64(i)*32)
+		require.NoError(t, err)
+		require.Equal(t, 32, n)
+		require.Equalf(t, hashes[i], Hash(got), "offset %d", i*32)
+	}
+
+	require.Equal(t, int64(numWriters)*32, c.Size())
 }
