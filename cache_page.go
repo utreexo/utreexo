@@ -9,7 +9,7 @@ const (
 
 // cachePage is a fixed-size page that stores cache entries as slots within a
 // contiguous byte array. A bitmap tracks which slots are occupied, allowing
-// direct lookup, insert, and delete by slot index without per-entry map overhead.
+// direct lookup and insert by slot index without per-entry map overhead.
 type cachePage struct {
 	data    [cachePageSize]byte
 	present []uint64 // bitmap: 1 bit per slot
@@ -24,11 +24,6 @@ func (pg *cachePage) isPresent(slot int) bool {
 // setPresent marks the given slot as occupied in the bitmap.
 func (pg *cachePage) setPresent(slot int) {
 	pg.present[slot/bitsPerWord] |= 1 << (uint(slot) % bitsPerWord)
-}
-
-// clearPresent marks the given slot as empty in the bitmap.
-func (pg *cachePage) clearPresent(slot int) {
-	pg.present[slot/bitsPerWord] &^= 1 << (uint(slot) % bitsPerWord)
 }
 
 // pageCacheStore implements cacheStore using fixed-size pages indexed by
@@ -111,46 +106,6 @@ func (p *pageCacheStore) put(offset int64, data []byte) error {
 		p.totalCount++
 	}
 	return nil
-}
-
-// delete removes the cached entry at the given byte offset. If the page becomes
-// empty, it is freed from the map.
-func (p *pageCacheStore) delete(offset int64) {
-	pageNum, slot := p.pageAndSlot(offset)
-	pg := p.pages[pageNum]
-	if pg == nil || !pg.isPresent(slot) {
-		return
-	}
-	pg.clearPresent(slot)
-	pg.count--
-	p.totalCount--
-	if pg.count == 0 {
-		delete(p.pages, pageNum)
-	}
-}
-
-// deleteAbove removes all cached entries at byte offsets >= size.
-func (p *pageCacheStore) deleteAbove(size int64) {
-	boundaryPage := size / cachePageSize
-	for pageNum, pg := range p.pages {
-		if pageNum > boundaryPage {
-			p.totalCount -= pg.count
-			delete(p.pages, pageNum)
-		} else if pageNum == boundaryPage {
-			// Clear slots at offsets >= size within the boundary page.
-			boundarySlot := int(size%cachePageSize) / p.entrySize_
-			for slot := boundarySlot; slot < p.slotsPerPage; slot++ {
-				if pg.isPresent(slot) {
-					pg.clearPresent(slot)
-					pg.count--
-					p.totalCount--
-				}
-			}
-			if pg.count == 0 {
-				delete(p.pages, pageNum)
-			}
-		}
-	}
 }
 
 // clear removes all cached entries and frees all pages.

@@ -20,12 +20,6 @@ type cacheStore interface {
 	// put stores data at the given offset. len(data) must equal entrySize().
 	put(offset int64, data []byte) error
 
-	// delete removes the entry at the given offset.
-	delete(offset int64)
-
-	// deleteAbove removes all entries at offsets >= size (used for truncation).
-	deleteAbove(size int64)
-
 	// clear removes all entries from the cache.
 	clear()
 
@@ -235,32 +229,5 @@ func (c *cachedRWS) resetAfterFlush() error {
 	c.baseSize = size
 	c.maxWritten = size
 	c.pos = 0
-	return nil
-}
-
-// Truncate truncates the underlying file to the specified size.
-// It also invalidates any cached writes beyond the new size and updates
-// the internal size tracking.
-func (c *cachedRWS) Truncate(size int64) error {
-	truncater, ok := c.underlying.(interface{ Truncate(int64) error })
-	if !ok {
-		return fmt.Errorf("underlying file does not support Truncate")
-	}
-	if err := truncater.Truncate(size); err != nil {
-		return err
-	}
-
-	// Invalidate cached writes beyond the new size.
-	c.cache.deleteAbove(size)
-
-	// Update size tracking.
-	c.baseSize = size
-	if c.maxWritten > size {
-		c.maxWritten = size
-	}
-	if c.pos > size {
-		c.pos = size
-	}
-
 	return nil
 }

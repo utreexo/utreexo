@@ -18,8 +18,6 @@ func newMmapCacheStore(entrySize int, maxBytes int64) (*mmapCacheStore, error) {
 
 func (m *mmapCacheStore) get(offset int64) ([]byte, bool)     { return m.s.Get(offset) }
 func (m *mmapCacheStore) put(offset int64, data []byte) error { return m.s.Put(offset, data) }
-func (m *mmapCacheStore) delete(offset int64)                 { m.s.Delete(offset) }
-func (m *mmapCacheStore) deleteAbove(size int64)              { m.s.DeleteAbove(size) }
 func (m *mmapCacheStore) clear()                              { m.s.Clear() }
 func (m *mmapCacheStore) forEach(fn func(int64, []byte))      { m.s.ForEach(fn) }
 func (m *mmapCacheStore) overflowed() bool                    { return m.s.Overflowed() }

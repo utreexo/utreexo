@@ -144,52 +144,6 @@ func (s *Store) Put(offset int64, data []byte) error {
 	return nil
 }
 
-// Delete removes the entry at the given byte offset.
-//
-// The slot calculation (offset / entrySize * entrySize) is equivalent to using
-// the offset directly when it is already aligned to entrySize. The integer
-// division provides implicit alignment protection by snapping misaligned
-// offsets to the nearest slot boundary.
-func (s *Store) Delete(offset int64) {
-	slot := int(offset) / s.entrySize
-	w, bit := slot/bitsPerWord, uint(slot)%bitsPerWord
-	word := s.word(w)
-	if word>>bit&1 == 0 {
-		return
-	}
-	s.setWord(w, word&^(1<<bit))
-	s.totalCount--
-}
-
-// DeleteAbove removes all entries at offsets >= size (used for truncation).
-//
-// The slot calculation (offset / entrySize * entrySize) is equivalent to using
-// the offset directly when it is already aligned to entrySize. The integer
-// division provides implicit alignment protection by snapping misaligned
-// offsets to the nearest slot boundary.
-func (s *Store) DeleteAbove(size int64) {
-	startSlot := int(size) / s.entrySize
-	startWord := startSlot / bitsPerWord
-	for _, w := range s.dirty {
-		if w < startWord {
-			continue
-		}
-		word := s.word(w)
-		if word == 0 {
-			continue
-		}
-		var mask uint64
-		if w == startWord {
-			// Keep bits below startSlot within this word.
-			keepBits := uint(startSlot) % bitsPerWord
-			mask = (1 << keepBits) - 1
-		}
-		cleared := bits.OnesCount64(word) - bits.OnesCount64(word&mask)
-		s.setWord(w, word&mask)
-		s.totalCount -= cleared
-	}
-}
-
 // Clear removes all entries. The mmap regions remain allocated so the
 // store can be reused without re-mapping.
 func (s *Store) Clear() {

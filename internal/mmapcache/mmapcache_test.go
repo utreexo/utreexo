@@ -142,114 +142,6 @@ func TestPutOverwrite(t *testing.T) {
 	require.Equal(t, 1, s.Count())
 }
 
-func TestDelete(t *testing.T) {
-	const entrySize = 8
-
-	tests := []struct {
-		name      string
-		putSlots  []int
-		delSlot   int
-		wantCount int
-	}{
-		{name: "delete existing", putSlots: []int{0, 1, 2}, delSlot: 1, wantCount: 2},
-		{name: "delete non-existing", putSlots: []int{0}, delSlot: 5, wantCount: 1},
-		{name: "delete only entry", putSlots: []int{0}, delSlot: 0, wantCount: 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := newTestStore(t, entrySize, 1<<20)
-			for _, slot := range tt.putSlots {
-				s.Put(int64(slot*entrySize), make([]byte, entrySize))
-			}
-
-			s.Delete(int64(tt.delSlot * entrySize))
-
-			require.Equal(t, tt.wantCount, s.Count())
-			_, ok := s.Get(int64(tt.delSlot * entrySize))
-			require.False(t, ok, "deleted entry still accessible")
-		})
-	}
-}
-
-func TestDeleteAbove(t *testing.T) {
-	const entrySize = 8
-
-	tests := []struct {
-		name           string
-		maxBytes       int64
-		putSlots       []int
-		threshold      int
-		wantAlive      []int
-		wantDead       []int
-		wantOverflowed bool
-	}{
-		{
-			name:      "delete upper half",
-			maxBytes:  1 << 20,
-			putSlots:  []int{0, 1, 2, 3, 4},
-			threshold: 2,
-			wantAlive: []int{0, 1},
-			wantDead:  []int{2, 3, 4},
-		},
-		{
-			name:      "threshold above all",
-			maxBytes:  1 << 20,
-			putSlots:  []int{0, 1, 2},
-			threshold: 10,
-			wantAlive: []int{0, 1, 2},
-			wantDead:  nil,
-		},
-		{
-			name:      "threshold at zero",
-			maxBytes:  1 << 20,
-			putSlots:  []int{0, 1, 2},
-			threshold: 0,
-			wantAlive: nil,
-			wantDead:  []int{0, 1, 2},
-		},
-		{
-			name:      "across word boundary",
-			maxBytes:  1 << 20,
-			putSlots:  []int{63, 64, 65},
-			threshold: 64,
-			wantAlive: []int{63},
-			wantDead:  []int{64, 65},
-		},
-		{
-			name:           "resets overflowed",
-			maxBytes:       24, // maxEntries = 3
-			putSlots:       []int{0, 1, 2, 3},
-			threshold:      2,
-			wantAlive:      []int{0, 1},
-			wantDead:       []int{2, 3},
-			wantOverflowed: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := newTestStore(t, entrySize, tt.maxBytes)
-			for _, slot := range tt.putSlots {
-				s.Put(int64(slot*entrySize), make([]byte, entrySize))
-			}
-
-			s.DeleteAbove(int64(tt.threshold * entrySize))
-
-			require.Equal(t, len(tt.wantAlive), s.Count())
-			require.Equal(t, tt.wantOverflowed, s.Overflowed())
-			for _, slot := range tt.wantAlive {
-				_, ok := s.Get(int64(slot * entrySize))
-				require.True(t, ok, "slot %d should be alive", slot)
-			}
-			for _, slot := range tt.wantDead {
-				_, ok := s.Get(int64(slot * entrySize))
-				require.False(t, ok, "slot %d should be dead", slot)
-			}
-		})
-	}
-}
-
 func TestClear(t *testing.T) {
 	const entrySize = 8
 
@@ -365,49 +257,6 @@ func TestForEach(t *testing.T) {
 				require.True(t, ok, "offset %d not visited", off)
 				require.Equal(t, want, got, "offset %d", off)
 			}
-		})
-	}
-}
-
-func TestForEachSkipsDeleted(t *testing.T) {
-	const entrySize = 8
-
-	tests := []struct {
-		name      string
-		putSlots  []int
-		delSlots  []int
-		wantCount int
-	}{
-		{name: "delete none", putSlots: []int{0, 1, 2}, delSlots: []int{}, wantCount: 3},
-		{name: "delete middle", putSlots: []int{0, 1, 2}, delSlots: []int{1}, wantCount: 2},
-		{name: "delete first", putSlots: []int{0, 1, 2}, delSlots: []int{0}, wantCount: 2},
-		{name: "delete last", putSlots: []int{0, 1, 2}, delSlots: []int{2}, wantCount: 2},
-		{name: "delete all", putSlots: []int{0, 1, 2}, delSlots: []int{0, 1, 2}, wantCount: 0},
-		{name: "delete multiple", putSlots: []int{0, 1, 2, 3}, delSlots: []int{1, 3}, wantCount: 2},
-		{name: "delete all in word", putSlots: []int{0, 1, 2, 3, 4}, delSlots: []int{0, 1, 2, 3, 4}, wantCount: 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := newTestStore(t, entrySize, 1<<20)
-			for _, slot := range tt.putSlots {
-				s.Put(int64(slot*entrySize), make([]byte, entrySize))
-			}
-
-			deleted := make(map[int64]struct{})
-			for _, slot := range tt.delSlots {
-				off := int64(slot * entrySize)
-				s.Delete(off)
-				deleted[off] = struct{}{}
-			}
-
-			count := 0
-			s.ForEach(func(offset int64, data []byte) {
-				_, wasDel := deleted[offset]
-				require.False(t, wasDel, "ForEach visited deleted entry at offset %d", offset)
-				count++
-			})
-			require.Equal(t, tt.wantCount, count)
 		})
 	}
 }
@@ -555,16 +404,6 @@ func TestLargeScale(t *testing.T) {
 	visited := 0
 	s.ForEach(func(offset int64, data []byte) { visited++ })
 	require.Equal(t, n, visited)
-
-	// Delete half, verify count and ForEach.
-	for i := 0; i < n/2; i++ {
-		s.Delete(int64(slots[i] * entrySize))
-	}
-	require.Equal(t, n-n/2, s.Count())
-
-	visited = 0
-	s.ForEach(func(offset int64, data []byte) { visited++ })
-	require.Equal(t, n-n/2, visited)
 
 	// Clear, verify empty.
 	s.Clear()
