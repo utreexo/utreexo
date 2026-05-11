@@ -3,16 +3,17 @@
 // demand-paged by the kernel, so only touched pages consume physical memory.
 // A separate presence bitmap tracks which slots have cached data (for Get).
 // A separate dirty bitmap tracks which slots were written since the last
-// Clear (for ForEach). [min,max] ranges over each bitmap bound the scan so
-// iteration cost stays proportional to live data, not to the virtual
-// address space.
+// Clear (for ForEach). Atomic range tracking [dirtyMinWord, dirtyMaxWord]
+// bounds the ForEach scan without any mutex or dense list, making Put fully
+// lock-free.
 package mmapcache
 
 import (
-	"encoding/binary"
 	"fmt"
 	"math"
 	"math/bits"
+	"sync/atomic"
+	"unsafe"
 )
 
 const bitsPerWord = 64
@@ -27,12 +28,16 @@ const maxRegionSize = 1 << (30 + 10*(^uint(0)>>63))
 
 // Store is an mmap-backed cache for fixed-size entries.
 //
-// Two parallel bitmaps cover the slot space:
-//   - bitmap: presence — set when a slot has cached data (read by Get).
-//   - dirtyBitmap: dirty — set on Put, cleared by Clear (read by ForEach).
-//
-// Dirty bits are always a subset of presence bits, so a presence-range
-// scan dominates a dirty-range scan.
+// Concurrency:
+//   - Get and Put on disjoint slots may run concurrently without external
+//     synchronization. Put is lock-free in this case (atomic CAS on bitmap
+//     words plus atomic min/max updates for range tracking).
+//   - Put on the same slot, or Get concurrent with a Put that overwrites
+//     that same slot, races on the data region (the byte copy is not
+//     atomic and is not fenced for re-writes). Callers must serialize
+//     same-slot access externally.
+//   - ForEach, Clear, and Close are NOT safe to call concurrently with
+//     any other method.
 type Store struct {
 	data        []byte // mmap'd data region (demand-paged)
 	bitmap      []byte // mmap'd presence bitmap; tracks which slots have cached data for Get
@@ -42,17 +47,17 @@ type Store struct {
 	slots      int // total number of slots
 	words      int // number of uint64 words in each bitmap
 	maxEntries int
-	totalCount int // count of dirty bits
+	totalCount atomic.Int64
 
-	// Inclusive range of dirty bitmap word indices that may have set bits.
-	// ForEach scans only this range.
-	dirtyMinWord int
-	dirtyMaxWord int
+	// Atomic range of dirty bitmap word indices. ForEach scans only
+	// [dirtyMinWord, dirtyMaxWord]. Initialized to empty (min > max).
+	dirtyMinWord atomic.Int64
+	dirtyMaxWord atomic.Int64
 
-	// Inclusive range of presence bitmap word indices that may have set
-	// bits. Clear scans only this range.
-	presMinWord int
-	presMaxWord int
+	// Atomic range of presence bitmap word indices. Clear uses this to
+	// find all present entries.
+	presMinWord atomic.Int64
+	presMaxWord atomic.Int64
 }
 
 // New creates a Store for entries of the given byte size.
@@ -84,114 +89,157 @@ func New(entrySize int, maxBytes int64) (*Store, error) {
 		return nil, fmt.Errorf("mmapcache: mmap dirtyBitmap %d bytes: %w", bitmapSize, err)
 	}
 
-	return &Store{
-		data:         data,
-		bitmap:       bitmap,
-		dirtyBitmap:  dirtyBitmap,
-		entrySize:    entrySize,
-		slots:        slots,
-		words:        words,
-		maxEntries:   int(maxBytes) / entrySize,
-		dirtyMinWord: math.MaxInt,
-		dirtyMaxWord: -1,
-		presMinWord:  math.MaxInt,
-		presMaxWord:  -1,
-	}, nil
+	s := &Store{
+		data:        data,
+		bitmap:      bitmap,
+		dirtyBitmap: dirtyBitmap,
+		entrySize:   entrySize,
+		slots:       slots,
+		words:       words,
+		maxEntries:  int(maxBytes) / entrySize,
+	}
+	// Initialize range sentinels to "empty".
+	s.dirtyMinWord.Store(math.MaxInt64)
+	s.dirtyMaxWord.Store(-1)
+	s.presMinWord.Store(math.MaxInt64)
+	s.presMaxWord.Store(-1)
+	return s, nil
 }
 
 // EntrySize returns the fixed size of each entry in bytes.
 func (s *Store) EntrySize() int { return s.entrySize }
 
-// wordAt reads the w-th uint64 from the given bitmap.
-func wordAt(bm []byte, w int) uint64 {
-	return binary.LittleEndian.Uint64(bm[w*8:])
+// bmWordPtr returns a *uint64 view of the w-th 8-byte word in the given
+// bitmap, suitable for use with sync/atomic. The address is naturally
+// aligned (w*8 is a multiple of 8 and the mmap base is page-aligned), which
+// is required for the atomic ops to be sound.
+func bmWordPtr(bm []byte, w int64) *uint64 {
+	return (*uint64)(unsafe.Pointer(&bm[w*8]))
 }
 
-// setWordAt writes the w-th uint64 in the given bitmap.
-func setWordAt(bm []byte, w int, v uint64) {
-	binary.LittleEndian.PutUint64(bm[w*8:], v)
-}
-
-// extendDirtyRange widens [dirtyMinWord, dirtyMaxWord] to include w.
-func (s *Store) extendDirtyRange(w int) {
-	if w < s.dirtyMinWord {
-		s.dirtyMinWord = w
-	}
-	if w > s.dirtyMaxWord {
-		s.dirtyMaxWord = w
+// atomicMinInt64 atomically updates *addr = min(*addr, val).
+func atomicMinInt64(addr *atomic.Int64, val int64) {
+	for {
+		old := addr.Load()
+		if val >= old {
+			return
+		}
+		if addr.CompareAndSwap(old, val) {
+			return
+		}
 	}
 }
 
-// extendPresRange widens [presMinWord, presMaxWord] to include w.
-func (s *Store) extendPresRange(w int) {
-	if w < s.presMinWord {
-		s.presMinWord = w
-	}
-	if w > s.presMaxWord {
-		s.presMaxWord = w
+// atomicMaxInt64 atomically updates *addr = max(*addr, val).
+func atomicMaxInt64(addr *atomic.Int64, val int64) {
+	for {
+		old := addr.Load()
+		if val <= old {
+			return
+		}
+		if addr.CompareAndSwap(old, val) {
+			return
+		}
 	}
 }
 
 // Get retrieves the data at the given byte offset. Returns nil, false if
 // the offset has no cached entry. The returned slice aliases internal storage.
 //
-// The slot calculation (offset / entrySize * entrySize) is equivalent to using
-// the offset directly when it is already aligned to entrySize. The integer
-// division provides implicit alignment protection by snapping misaligned
-// offsets to the nearest slot boundary.
+// Lock-free: uses an atomic bitmap load. Safe to call concurrently with
+// Put/Get on disjoint slots. Concurrent with a Put that overwrites this
+// same slot, the returned bytes may be torn — see the Store doc.
 func (s *Store) Get(offset int64) ([]byte, bool) {
-	slot := int(offset) / s.entrySize
-	w, bit := slot/bitsPerWord, uint(slot)%bitsPerWord
-	if wordAt(s.bitmap, w)>>bit&1 == 0 {
+	entrySize := int64(s.entrySize)
+	slot := offset / entrySize
+	w, bit := slot/bitsPerWord, uint(slot%bitsPerWord)
+
+	if atomic.LoadUint64(bmWordPtr(s.bitmap, w))>>bit&1 == 0 {
 		return nil, false
 	}
-	start := slot * s.entrySize
-	return s.data[start : start+s.entrySize], true
+	start := slot * entrySize
+	return s.data[start : start+entrySize], true
 }
 
 // Put stores data at the given byte offset. len(data) must equal EntrySize().
+//
+// Lock-free with respect to other slots: uses atomic CAS on the presence and
+// dirty bitmaps and atomic min/max updates for range tracking. Same-slot
+// concurrency (two Puts, or a Put overwriting while another goroutine Gets)
+// races on the data region and must be serialized externally — see the
+// Store doc.
 func (s *Store) Put(offset int64, data []byte) error {
 	if len(data) != s.entrySize {
 		return fmt.Errorf("mmapcache: Put: len(data)=%d, want %d", len(data), s.entrySize)
 	}
-	slot := int(offset) / s.entrySize
-	start := slot * s.entrySize
-	copy(s.data[start:start+s.entrySize], data)
-	w, bit := slot/bitsPerWord, uint(slot)%bitsPerWord
+	entrySize := int64(s.entrySize)
+	slot := offset / entrySize
+	start := slot * entrySize
+
+	// Data copy to disjoint slot — safe without lock.
+	copy(s.data[start:start+entrySize], data)
+
+	w, bit := slot/bitsPerWord, uint(slot%bitsPerWord)
 	mask := uint64(1) << bit
 
-	// Set presence bit (read by Get for cache hits).
-	if presWord := wordAt(s.bitmap, w); presWord&mask == 0 {
-		setWordAt(s.bitmap, w, presWord|mask)
-		s.extendPresRange(w)
+	// Presence is set before dirty so the invariant dirty ⊆ presence
+	// holds at every observable moment.
+	presPtr := bmWordPtr(s.bitmap, w)
+	for {
+		old := atomic.LoadUint64(presPtr)
+		if old&mask != 0 {
+			break // already present
+		}
+		if atomic.CompareAndSwapUint64(presPtr, old, old|mask) {
+			atomicMinInt64(&s.presMinWord, w)
+			atomicMaxInt64(&s.presMaxWord, w)
+			break
+		}
 	}
-	// Set dirty bit (read by ForEach for flush iteration).
-	if dirtyWord := wordAt(s.dirtyBitmap, w); dirtyWord&mask == 0 {
-		setWordAt(s.dirtyBitmap, w, dirtyWord|mask)
-		s.extendDirtyRange(w)
-		s.totalCount++
+
+	// Set dirty bitmap bit (for ForEach iteration).
+	dirtyPtr := bmWordPtr(s.dirtyBitmap, w)
+	for {
+		old := atomic.LoadUint64(dirtyPtr)
+		if old&mask != 0 {
+			// Already dirty — nothing to do.
+			return nil
+		}
+		if atomic.CompareAndSwapUint64(dirtyPtr, old, old|mask) {
+			s.totalCount.Add(1)
+			atomicMinInt64(&s.dirtyMinWord, w)
+			atomicMaxInt64(&s.dirtyMaxWord, w)
+			return nil
+		}
 	}
-	return nil
 }
 
 // Clear removes all entries. The mmap regions remain allocated so the
 // store can be reused without re-mapping.
+//
+// NOT safe for concurrent use with Get/Put.
 func (s *Store) Clear() {
-	for w := s.presMinWord; w <= s.presMaxWord; w++ {
-		if wordAt(s.bitmap, w) != 0 {
-			setWordAt(s.bitmap, w, 0)
+	// Clear presence bitmap in its tracked range.
+	lo := s.presMinWord.Load()
+	hi := s.presMaxWord.Load()
+	for w := lo; w <= hi; w++ {
+		if atomic.LoadUint64(bmWordPtr(s.bitmap, w)) != 0 {
+			atomic.StoreUint64(bmWordPtr(s.bitmap, w), 0)
 		}
 	}
-	for w := s.dirtyMinWord; w <= s.dirtyMaxWord; w++ {
-		if wordAt(s.dirtyBitmap, w) != 0 {
-			setWordAt(s.dirtyBitmap, w, 0)
+	// Clear dirty bitmap in its tracked range.
+	dlo := s.dirtyMinWord.Load()
+	dhi := s.dirtyMaxWord.Load()
+	for w := dlo; w <= dhi; w++ {
+		if atomic.LoadUint64(bmWordPtr(s.dirtyBitmap, w)) != 0 {
+			atomic.StoreUint64(bmWordPtr(s.dirtyBitmap, w), 0)
 		}
 	}
-	s.totalCount = 0
-	s.dirtyMinWord = math.MaxInt
-	s.dirtyMaxWord = -1
-	s.presMinWord = math.MaxInt
-	s.presMaxWord = -1
+	s.totalCount.Store(0)
+	s.dirtyMinWord.Store(math.MaxInt64)
+	s.dirtyMaxWord.Store(-1)
+	s.presMinWord.Store(math.MaxInt64)
+	s.presMaxWord.Store(-1)
 }
 
 // Close releases all mmap regions back to the OS.
@@ -208,26 +256,31 @@ func (s *Store) Close() {
 		mmapRelease(s.dirtyBitmap)
 		s.dirtyBitmap = nil
 	}
-	s.totalCount = 0
+	s.totalCount.Store(0)
 }
 
 // ForEach iterates over all dirty entries (written since last Clear),
-// calling fn for each one.
+// calling fn for each one. Uses atomic range tracking to bound the scan.
+//
+// NOT safe for concurrent use with Put.
 func (s *Store) ForEach(fn func(offset int64, data []byte)) {
-	for w := s.dirtyMinWord; w <= s.dirtyMaxWord; w++ {
-		word := wordAt(s.dirtyBitmap, w)
+	entrySize := int64(s.entrySize)
+	lo := s.dirtyMinWord.Load()
+	hi := s.dirtyMaxWord.Load()
+	for w := lo; w <= hi; w++ {
+		word := atomic.LoadUint64(bmWordPtr(s.dirtyBitmap, w))
 		for word != 0 {
 			bit := bits.TrailingZeros64(word)
-			slot := w*bitsPerWord + bit
-			start := slot * s.entrySize
-			fn(int64(start), s.data[start:start+s.entrySize])
+			slot := w*bitsPerWord + int64(bit)
+			start := slot * entrySize
+			fn(start, s.data[start:start+entrySize])
 			word &= word - 1
 		}
 	}
 }
 
 // Overflowed returns true if the cache has exceeded its memory budget.
-func (s *Store) Overflowed() bool { return s.totalCount > s.maxEntries }
+func (s *Store) Overflowed() bool { return int(s.totalCount.Load()) > s.maxEntries }
 
 // Count returns the total number of dirty entries.
-func (s *Store) Count() int { return s.totalCount }
+func (s *Store) Count() int { return int(s.totalCount.Load()) }
