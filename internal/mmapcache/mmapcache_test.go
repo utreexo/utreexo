@@ -412,3 +412,26 @@ func TestLargeScale(t *testing.T) {
 		t.Fatal("ForEach visited entry after Clear")
 	})
 }
+
+// TestCountTracksDirtyNotPresence verifies that Count tracks dirty
+// transitions, not presence transitions. After resetDirty, presence
+// is preserved but the dirty bitmap and totalCount are zeroed, so
+// re-Putting an already-present slot must re-dirty it and bump Count.
+// Catches a bug where totalCount.Add lives in the presence CAS branch:
+// a re-Put would find presence already set, skip the increment, and
+// leave Count at 0 despite the slot being dirty again.
+func TestCountTracksDirtyNotPresence(t *testing.T) {
+	const entrySize = 8
+	s := newTestStore(t, entrySize, 1<<20)
+
+	require.NoError(t, s.Put(0, make([]byte, entrySize)))
+	require.Equal(t, 1, s.Count())
+
+	s.resetDirty()
+	require.Equal(t, 0, s.Count())
+
+	// Slot 0 is still present (resetDirty leaves presence alone) but
+	// no longer dirty. Re-putting must re-dirty and bump Count.
+	require.NoError(t, s.Put(0, make([]byte, entrySize)))
+	require.Equal(t, 1, s.Count(), "Count must track dirty bits, not presence")
+}
