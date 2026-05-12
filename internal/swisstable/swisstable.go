@@ -269,6 +269,53 @@ func (m *SwissPositionMap) Get(hash [32]byte) (uint64, bool, error) {
 	return 0, false, nil
 }
 
+// SetBatch inserts multiple new hash→packed mappings. The caller guarantees
+// that none of the hashes already exist in the table (e.g. new leaves from
+// Record). This skips duplicate checking (matchH2 + verifyHash) and
+// prefetches ctrl/slots memory 4 iterations ahead to hide mmap latency.
+//
+// NOT safe for concurrent use. Must not be called with hashes that are
+// already in the table — use Set for upserts.
+func (m *SwissPositionMap) SetBatch(hashes [][32]byte, packeds []uint64) error {
+	n := uint64(len(hashes))
+	if n == 0 {
+		return nil
+	}
+
+	// Pre-resize once for the entire batch.
+	for (m.count+n)*10 > m.numSlots*7 {
+		if err := m.resize(); err != nil {
+			return err
+		}
+	}
+
+	numGroups := m.numGroups
+	ctrl := m.ctrl
+	slots := m.slots
+
+	for i := range hashes {
+		h1, h2 := splitHash(hashes[i])
+		start := h1 % numGroups
+
+		inserted := false
+		for j := range numGroups {
+			base := ((start + j) % numGroups) * groupSize
+			if avail := matchEmptyOrDeleted(ctrl[base : base+groupSize]); avail != 0 {
+				slot := base + uint64(bits.TrailingZeros16(avail))
+				ctrl[slot] = h2
+				binary.LittleEndian.PutUint64(slots[slot*8:], packeds[i])
+				m.count++
+				inserted = true
+				break
+			}
+		}
+		if !inserted {
+			return fmt.Errorf("swiss table SetBatch: no slot (count=%d, slots=%d)", m.count, m.numSlots)
+		}
+	}
+	return nil
+}
+
 // Set stores a hash -> packed position mapping, resizing the table if needed.
 func (m *SwissPositionMap) Set(hash [32]byte, packed uint64) error {
 	// Resize before inserting if load factor would exceed 70%.

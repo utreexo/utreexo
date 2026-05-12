@@ -797,29 +797,84 @@ func BenchmarkSwissGet(b *testing.B) {
 }
 
 func BenchmarkSwissSet(b *testing.B) {
+	const totalEntries = 1 << 20
+
 	tmpDir := b.TempDir()
 	dataPath := tmpDir + "/data"
 
 	dataFile, _ := os.Create(dataPath)
-	numEntries := b.N
-	if numEntries > 100000 {
-		numEntries = 100000
-	}
+	defer dataFile.Close()
 
-	hashes := make([][32]byte, numEntries)
-	for i := range numEntries {
+	hashes := make([][32]byte, totalEntries)
+	for i := range totalEntries {
 		hashes[i] = testHashFromInt(i)
 		dataFile.Write(hashes[i][:])
 	}
 	dataFile.Seek(0, 0)
 
-	m, _, _ := NewSwissPositionMap(tmpDir+"/ctrl", tmpDir+"/slots", uint64(numEntries), [32]byte{}, fileHashSource{dataFile}, testPositionMask)
-	defer m.Close()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		b.StopTimer()
+		os.Remove(tmpDir + "/ctrl")
+		os.Remove(tmpDir + "/slots")
+		m, _, _ := NewSwissPositionMap(tmpDir+"/ctrl", tmpDir+"/slots", uint64(totalEntries), [32]byte{}, fileHashSource{dataFile}, testPositionMask)
+		b.StartTimer()
+
+		for i := range totalEntries {
+			if err := m.Set(hashes[i], uint64(i)); err != nil {
+				b.Fatal(err)
+			}
+		}
+
+		b.StopTimer()
+		m.Close()
+		b.StartTimer()
+	}
+	b.SetBytes(int64(totalEntries) * 32)
+}
+
+func BenchmarkSwissSetBatch(b *testing.B) {
+	const batchSize = 4096
+	const totalEntries = 1 << 20
+
+	tmpDir := b.TempDir()
+	dataPath := tmpDir + "/data"
+	dataFile, _ := os.Create(dataPath)
+	defer dataFile.Close()
+
+	hashes := make([][32]byte, totalEntries)
+	for i := range totalEntries {
+		hashes[i] = testHashFromInt(i)
+		dataFile.Write(hashes[i][:])
+	}
+	dataFile.Seek(0, 0)
+
+	packeds := make([]uint64, batchSize)
+	for i := range batchSize {
+		packeds[i] = uint64(i)
+	}
 
 	b.ResetTimer()
-	for i := range b.N {
-		m.Set(hashes[i%numEntries], uint64(i%numEntries))
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		os.Remove(tmpDir + "/ctrl")
+		os.Remove(tmpDir + "/slots")
+		m, _, _ := NewSwissPositionMap(tmpDir+"/ctrl", tmpDir+"/slots", uint64(totalEntries), [32]byte{}, fileHashSource{dataFile}, testPositionMask)
+		b.StartTimer()
+
+		for off := 0; off+batchSize <= totalEntries; off += batchSize {
+			if err := m.SetBatch(hashes[off:off+batchSize], packeds); err != nil {
+				b.Fatal(err)
+			}
+		}
+
+		b.StopTimer()
+		m.Close()
+		b.StartTimer()
 	}
+	b.SetBytes(int64(totalEntries) * 32)
 }
 
 // BenchmarkGoMapGet benchmarks native Go map for comparison.
