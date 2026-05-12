@@ -24,12 +24,19 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"math/bits"
 	"os"
 	"slices"
 	"syscall"
 )
+
+// HashSource is the dataFile abstraction used by SwissPositionMap to verify
+// hashes by position. Returning the [32]byte by value (instead of taking an
+// io.ReaderAt with a []byte buffer) avoids escape-through-interface allocs
+// on every verifyHash call.
+type HashSource interface {
+	HashAt(off int64) ([32]byte, error)
+}
 
 // Control byte constants.
 const (
@@ -65,7 +72,7 @@ type SwissPositionMap struct {
 	numGroups uint64 // numSlots / groupSize
 
 	// For hash verification (we don't store hashes, we verify from source)
-	dataFile io.ReaderAt
+	dataFile HashSource
 	posMask  uint64 // mask to extract position from packed value
 
 	// Entry count
@@ -80,7 +87,7 @@ type SwissPositionMap struct {
 // Returns the map and a bool indicating if rebuild is needed (consistency hash mismatch).
 // Pass a zero hash to force rebuild. posMask is applied to packed values to
 // extract the leaf position for hash verification against dataFile.
-func NewSwissPositionMap(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHash [32]byte, dataFile io.ReaderAt, posMask uint64) (*SwissPositionMap, bool, error) {
+func NewSwissPositionMap(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHash [32]byte, dataFile HashSource, posMask uint64) (*SwissPositionMap, bool, error) {
 	if dataFile == nil {
 		return nil, false, fmt.Errorf("dataFile must not be nil")
 	}
@@ -453,12 +460,12 @@ func splitHash(hash [32]byte) (h1 uint64, h2 byte) {
 // to expected. The position (extracted via posMask) must correspond to a
 // valid 32-byte hash entry in dataFile at offset position*32.
 func (m *SwissPositionMap) verifyHash(packed uint64, expected [32]byte) (bool, error) {
-	var buf [32]byte
 	pos := packed & m.posMask
-	if _, err := m.dataFile.ReadAt(buf[:], int64(pos*32)); err != nil {
+	h, err := m.dataFile.HashAt(int64(pos * 32))
+	if err != nil {
 		return false, fmt.Errorf("read hash at position %d: %w", pos, err)
 	}
-	return buf == expected, nil
+	return h == expected, nil
 }
 
 // ----------------------------------------------------------------------------
@@ -643,9 +650,9 @@ func (m *SwissPositionMap) resize() error {
 	}
 
 	for _, packed := range entries {
-		var hash [32]byte
 		pos := int64((packed & posMask) * 32)
-		if _, err := m.dataFile.ReadAt(hash[:], pos); err != nil {
+		hash, err := m.dataFile.HashAt(pos)
+		if err != nil {
 			restoreOld()
 			return fmt.Errorf("resize rehash read: %w", err)
 		}

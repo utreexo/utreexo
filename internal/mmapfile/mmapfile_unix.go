@@ -75,6 +75,18 @@ func (m *mmapFile) WriteAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
+// HashAt returns the 32 bytes at off as a [32]byte value, read directly
+// from the mapped region without going through io.ReaderAt.
+func (m *mmapFile) HashAt(off int64) ([32]byte, error) {
+	if m.data == nil {
+		return [32]byte{}, errClosed
+	}
+	if off < 0 || off+32 > m.size {
+		return [32]byte{}, io.EOF
+	}
+	return *(*[32]byte)(m.data[off : off+32]), nil
+}
+
 // Size returns the mapped region's size, fixed at Open time.
 func (m *mmapFile) Size() int64 {
 	return m.size
