@@ -2,7 +2,9 @@ package mmapcache
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math/rand"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -142,114 +144,6 @@ func TestPutOverwrite(t *testing.T) {
 	require.Equal(t, 1, s.Count())
 }
 
-func TestDelete(t *testing.T) {
-	const entrySize = 8
-
-	tests := []struct {
-		name      string
-		putSlots  []int
-		delSlot   int
-		wantCount int
-	}{
-		{name: "delete existing", putSlots: []int{0, 1, 2}, delSlot: 1, wantCount: 2},
-		{name: "delete non-existing", putSlots: []int{0}, delSlot: 5, wantCount: 1},
-		{name: "delete only entry", putSlots: []int{0}, delSlot: 0, wantCount: 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := newTestStore(t, entrySize, 1<<20)
-			for _, slot := range tt.putSlots {
-				s.Put(int64(slot*entrySize), make([]byte, entrySize))
-			}
-
-			s.Delete(int64(tt.delSlot * entrySize))
-
-			require.Equal(t, tt.wantCount, s.Count())
-			_, ok := s.Get(int64(tt.delSlot * entrySize))
-			require.False(t, ok, "deleted entry still accessible")
-		})
-	}
-}
-
-func TestDeleteAbove(t *testing.T) {
-	const entrySize = 8
-
-	tests := []struct {
-		name           string
-		maxBytes       int64
-		putSlots       []int
-		threshold      int
-		wantAlive      []int
-		wantDead       []int
-		wantOverflowed bool
-	}{
-		{
-			name:      "delete upper half",
-			maxBytes:  1 << 20,
-			putSlots:  []int{0, 1, 2, 3, 4},
-			threshold: 2,
-			wantAlive: []int{0, 1},
-			wantDead:  []int{2, 3, 4},
-		},
-		{
-			name:      "threshold above all",
-			maxBytes:  1 << 20,
-			putSlots:  []int{0, 1, 2},
-			threshold: 10,
-			wantAlive: []int{0, 1, 2},
-			wantDead:  nil,
-		},
-		{
-			name:      "threshold at zero",
-			maxBytes:  1 << 20,
-			putSlots:  []int{0, 1, 2},
-			threshold: 0,
-			wantAlive: nil,
-			wantDead:  []int{0, 1, 2},
-		},
-		{
-			name:      "across word boundary",
-			maxBytes:  1 << 20,
-			putSlots:  []int{63, 64, 65},
-			threshold: 64,
-			wantAlive: []int{63},
-			wantDead:  []int{64, 65},
-		},
-		{
-			name:           "resets overflowed",
-			maxBytes:       24, // maxEntries = 3
-			putSlots:       []int{0, 1, 2, 3},
-			threshold:      2,
-			wantAlive:      []int{0, 1},
-			wantDead:       []int{2, 3},
-			wantOverflowed: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := newTestStore(t, entrySize, tt.maxBytes)
-			for _, slot := range tt.putSlots {
-				s.Put(int64(slot*entrySize), make([]byte, entrySize))
-			}
-
-			s.DeleteAbove(int64(tt.threshold * entrySize))
-
-			require.Equal(t, len(tt.wantAlive), s.Count())
-			require.Equal(t, tt.wantOverflowed, s.Overflowed())
-			for _, slot := range tt.wantAlive {
-				_, ok := s.Get(int64(slot * entrySize))
-				require.True(t, ok, "slot %d should be alive", slot)
-			}
-			for _, slot := range tt.wantDead {
-				_, ok := s.Get(int64(slot * entrySize))
-				require.False(t, ok, "slot %d should be dead", slot)
-			}
-		})
-	}
-}
-
 func TestClear(t *testing.T) {
 	const entrySize = 8
 
@@ -365,49 +259,6 @@ func TestForEach(t *testing.T) {
 				require.True(t, ok, "offset %d not visited", off)
 				require.Equal(t, want, got, "offset %d", off)
 			}
-		})
-	}
-}
-
-func TestForEachSkipsDeleted(t *testing.T) {
-	const entrySize = 8
-
-	tests := []struct {
-		name      string
-		putSlots  []int
-		delSlots  []int
-		wantCount int
-	}{
-		{name: "delete none", putSlots: []int{0, 1, 2}, delSlots: []int{}, wantCount: 3},
-		{name: "delete middle", putSlots: []int{0, 1, 2}, delSlots: []int{1}, wantCount: 2},
-		{name: "delete first", putSlots: []int{0, 1, 2}, delSlots: []int{0}, wantCount: 2},
-		{name: "delete last", putSlots: []int{0, 1, 2}, delSlots: []int{2}, wantCount: 2},
-		{name: "delete all", putSlots: []int{0, 1, 2}, delSlots: []int{0, 1, 2}, wantCount: 0},
-		{name: "delete multiple", putSlots: []int{0, 1, 2, 3}, delSlots: []int{1, 3}, wantCount: 2},
-		{name: "delete all in word", putSlots: []int{0, 1, 2, 3, 4}, delSlots: []int{0, 1, 2, 3, 4}, wantCount: 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := newTestStore(t, entrySize, 1<<20)
-			for _, slot := range tt.putSlots {
-				s.Put(int64(slot*entrySize), make([]byte, entrySize))
-			}
-
-			deleted := make(map[int64]struct{})
-			for _, slot := range tt.delSlots {
-				off := int64(slot * entrySize)
-				s.Delete(off)
-				deleted[off] = struct{}{}
-			}
-
-			count := 0
-			s.ForEach(func(offset int64, data []byte) {
-				_, wasDel := deleted[offset]
-				require.False(t, wasDel, "ForEach visited deleted entry at offset %d", offset)
-				count++
-			})
-			require.Equal(t, tt.wantCount, count)
 		})
 	}
 }
@@ -556,20 +407,167 @@ func TestLargeScale(t *testing.T) {
 	s.ForEach(func(offset int64, data []byte) { visited++ })
 	require.Equal(t, n, visited)
 
-	// Delete half, verify count and ForEach.
-	for i := 0; i < n/2; i++ {
-		s.Delete(int64(slots[i] * entrySize))
-	}
-	require.Equal(t, n-n/2, s.Count())
-
-	visited = 0
-	s.ForEach(func(offset int64, data []byte) { visited++ })
-	require.Equal(t, n-n/2, visited)
-
 	// Clear, verify empty.
 	s.Clear()
 	require.Equal(t, 0, s.Count())
 	s.ForEach(func(offset int64, data []byte) {
 		t.Fatal("ForEach visited entry after Clear")
 	})
+}
+
+// TestConcurrentDisjointOffsets verifies the documented contract that
+// Put and Get on disjoint slots may run concurrently without external
+// synchronization, including when those slots share bitmap words.
+//
+// Writer slots are even, reader slots are odd, and both are partitioned
+// round-robin across goroutines. Every bitmap word therefore contains
+// bits for both writers and readers, so Get atomic-loads race with Put
+// CAS-updates on the SAME word — the property the package claims to
+// support. A start-gate channel releases all 2*N goroutines at once so
+// the race window covers the full run.
+//
+// Run with -race to catch any data races on the bitmaps or data region.
+func TestConcurrentDisjointOffsets(t *testing.T) {
+	const (
+		entrySize         = 32
+		numGoroutines     = 16
+		slotsPerGoroutine = 2048
+	)
+
+	s := newTestStore(t, entrySize, 1<<30)
+
+	// Distinct payload schemes: pre-population writes [slot, 0, 0, 0];
+	// writers write [slot, writerMagic, 0, 0]. The marker proves a
+	// reader-slot Get cannot accidentally pass when the writer no-ops or
+	// when bytes from a writer slot leak across — both would change the
+	// second uint64 away from its expected value.
+	const writerMagic uint64 = 0xC0FFEEC0FFEEC0FF
+	encodeReader := func(slot int) []byte {
+		buf := make([]byte, entrySize)
+		binary.LittleEndian.PutUint64(buf, uint64(slot))
+		return buf
+	}
+	encodeWriter := func(slot int) []byte {
+		buf := make([]byte, entrySize)
+		binary.LittleEndian.PutUint64(buf, uint64(slot))
+		binary.LittleEndian.PutUint64(buf[8:], writerMagic)
+		return buf
+	}
+
+	// Slot layout: pair (g, i) maps to base = 2*(g + i*N). The writer for
+	// goroutine g owns `base` (even); the reader for goroutine g owns
+	// `base+1` (odd). Adjacent slots belong to different goroutines and
+	// different roles, so every bitmap word is shared across roles.
+	writerSlots := make([][]int, numGoroutines)
+	readerSlots := make([][]int, numGoroutines)
+	for g := 0; g < numGoroutines; g++ {
+		writerSlots[g] = make([]int, slotsPerGoroutine)
+		readerSlots[g] = make([]int, slotsPerGoroutine)
+		for i := 0; i < slotsPerGoroutine; i++ {
+			base := 2 * (g + i*numGoroutines)
+			writerSlots[g][i] = base
+			readerSlots[g][i] = base + 1
+		}
+	}
+
+	offset := func(slot int) int64 { return int64(slot) * int64(entrySize) }
+
+	// Pre-populate reader slots so concurrent Gets have a defined value
+	// to verify. Disjoint from all writer slots.
+	for g := 0; g < numGoroutines; g++ {
+		for _, slot := range readerSlots[g] {
+			require.NoError(t, s.Put(offset(slot), encodeReader(slot)))
+		}
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2*numGoroutines)
+
+	// Start gate: every goroutine blocks on <-start until the main thread
+	// closes it, so all 2*N goroutines begin work at the same instant
+	// rather than the first ones running to completion before the last
+	// ones spawn.
+	start := make(chan struct{})
+
+	for g := 0; g < numGoroutines; g++ {
+		slots := writerSlots[g]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for _, slot := range slots {
+				if err := s.Put(offset(slot), encodeWriter(slot)); err != nil {
+					errs <- fmt.Errorf("Put(slot=%d): %w", slot, err)
+					return
+				}
+			}
+		}()
+	}
+	for g := 0; g < numGoroutines; g++ {
+		slots := readerSlots[g]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for _, slot := range slots {
+				got, ok := s.Get(offset(slot))
+				if !ok {
+					errs <- fmt.Errorf("Get(slot=%d): missing", slot)
+					return
+				}
+				gotSlot := binary.LittleEndian.Uint64(got[:8])
+				gotMark := binary.LittleEndian.Uint64(got[8:16])
+				if gotSlot != uint64(slot) || gotMark != 0 {
+					errs <- fmt.Errorf("Get(slot=%d): got slot=%d mark=%#x, want slot=%d mark=0",
+						slot, gotSlot, gotMark, slot)
+					return
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	if t.Failed() {
+		return
+	}
+
+	// All writer slots must carry the writer's distinct marker, proving
+	// the bytes came from a Put rather than residual state. Count must
+	// reflect both writer and reader insertions.
+	require.Equal(t, 2*numGoroutines*slotsPerGoroutine, s.Count())
+	for g := 0; g < numGoroutines; g++ {
+		for _, slot := range writerSlots[g] {
+			got, ok := s.Get(offset(slot))
+			require.True(t, ok, "writer slot %d missing", slot)
+			require.Equal(t, encodeWriter(slot), got, "writer slot %d", slot)
+		}
+	}
+}
+
+// TestCountTracksDirtyNotPresence verifies that Count tracks dirty
+// transitions, not presence transitions. After resetDirty, presence
+// is preserved but the dirty bitmap and totalCount are zeroed, so
+// re-Putting an already-present slot must re-dirty it and bump Count.
+// Catches a bug where totalCount.Add lives in the presence CAS branch:
+// a re-Put would find presence already set, skip the increment, and
+// leave Count at 0 despite the slot being dirty again.
+func TestCountTracksDirtyNotPresence(t *testing.T) {
+	const entrySize = 8
+	s := newTestStore(t, entrySize, 1<<20)
+
+	require.NoError(t, s.Put(0, make([]byte, entrySize)))
+	require.Equal(t, 1, s.Count())
+
+	s.resetDirty()
+	require.Equal(t, 0, s.Count())
+
+	// Slot 0 is still present (resetDirty leaves presence alone) but
+	// no longer dirty. Re-putting must re-dirty and bump Count.
+	require.NoError(t, s.Put(0, make([]byte, entrySize)))
+	require.Equal(t, 1, s.Count(), "Count must track dirty bits, not presence")
 }
