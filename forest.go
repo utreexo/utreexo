@@ -58,9 +58,30 @@ func dataFileSize(forestRows uint8) int64 {
 var _ Utreexo = (*Forest)(nil)
 
 // forestFile is the interface required for the main data file.
+// All I/O is positional; there is no shared seek position to coordinate
+// across goroutines.
 type forestFile interface {
-	io.ReadWriteSeeker
 	io.ReaderAt
+	io.WriterAt
+}
+
+// fileSize asks f for its current byte size, preferring an explicit
+// Size() int64 method (cachedRWS, mmapFile, memFile) and falling back
+// to Stat() (e.g. *os.File). This avoids wrapping *os.File just to
+// expose a Size method — callers that have one in hand can pass it
+// through directly.
+func fileSize(f any) (int64, error) {
+	if s, ok := f.(interface{ Size() int64 }); ok {
+		return s.Size(), nil
+	}
+	if s, ok := f.(interface{ Stat() (os.FileInfo, error) }); ok {
+		st, err := s.Stat()
+		if err != nil {
+			return 0, err
+		}
+		return st.Size(), nil
+	}
+	return 0, fmt.Errorf("fileSize: %T has no Size or Stat method", f)
 }
 
 // positionMap value packing: upper 17 bits = addIndex, lower 47 bits = position
@@ -150,12 +171,8 @@ func (b *deletedBitmap) clearDirty() {
 
 // loadDeletedBitmap reads a bitmap file into a new deletedBitmap.
 // The file stores uint64 words in little-endian format, one per 8 bytes.
-func loadDeletedBitmap(file io.ReadSeeker) (*deletedBitmap, error) {
-	size, err := file.Seek(0, io.SeekEnd)
-	if err != nil {
-		return nil, err
-	}
-
+// size is the bitmap file's current byte length.
+func loadDeletedBitmap(file io.ReaderAt, size int64) (*deletedBitmap, error) {
 	if size == 0 {
 		return newDeletedBitmap(0), nil
 	}
@@ -164,12 +181,8 @@ func loadDeletedBitmap(file io.ReadSeeker) (*deletedBitmap, error) {
 		return nil, fmt.Errorf("bitmap file size %d is not a multiple of 8", size)
 	}
 
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-
 	buf := make([]byte, size)
-	if _, err := io.ReadFull(file, buf); err != nil {
+	if _, err := file.ReadAt(buf, 0); err != nil && err != io.EOF {
 		return nil, err
 	}
 
@@ -248,23 +261,16 @@ type Forest struct {
 }
 
 // readBlockCounts reads all uint32 entries from a block counts file
-// and returns them as a slice.
-func readBlockCounts(file io.ReadSeeker) ([]uint32, error) {
-	size, err := file.Seek(0, io.SeekEnd)
-	if err != nil {
-		return nil, err
-	}
+// and returns them as a slice. size is the file's current byte length.
+func readBlockCounts(file io.ReaderAt, size int64) ([]uint32, error) {
 	if size == 0 {
 		return nil, nil
 	}
 	if size%4 != 0 {
 		return nil, fmt.Errorf("block counts file size %d is not a multiple of 4", size)
 	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
 	buf := make([]byte, size)
-	if _, err := io.ReadFull(file.(io.Reader), buf); err != nil {
+	if _, err := file.ReadAt(buf, 0); err != nil && err != io.EOF {
 		return nil, err
 	}
 	n := size / 4
@@ -276,7 +282,8 @@ func readBlockCounts(file io.ReadSeeker) ([]uint32, error) {
 }
 
 // newForest creates a new Forest backed by the given file.
-// The file should be an io.ReadWriteSeeker (e.g., *os.File).
+// The file must satisfy the forestFile interface (ReadAt + WriteAt);
+// *os.File satisfies it natively.
 // blockCountsFile stores the uint32 add-count per block; numLeaves is derived
 // from the cumulative sum of all block counts.
 // metaFile stores recordMode (bytes 0-31), numLeaves (bytes 32-63), and consistency hash (bytes 64-95).
@@ -306,7 +313,11 @@ func newForest(file forestFile, blockCountsFile, metaFile forestFile, bitmap *de
 	// After undo-without-flush crashes, the block counts file may have
 	// stale entries at the end (one per undo). Remove entries from the
 	// end until the sum no longer exceeds numLeaves.
-	counts, err := readBlockCounts(blockCountsFile)
+	bcSize, err := fileSize(blockCountsFile)
+	if err != nil {
+		return nil, fmt.Errorf("blockCountsFile size: %w", err)
+	}
+	counts, err := readBlockCounts(blockCountsFile, bcSize)
 	if err != nil {
 		return nil, fmt.Errorf("read blockCountsFile: %w", err)
 	}
@@ -325,10 +336,11 @@ func newForest(file forestFile, blockCountsFile, metaFile forestFile, bitmap *de
 	}
 
 	// Read consistency hash from metaFile (bytes 64-95, written atomically by WAL).
-	// Zero hash on first run or if metaFile is empty.
+	// Zero hash on first run or if metaFile is empty (io.EOF leaves the buffer zeroed).
 	var consistencyHash [32]byte
-	metaFile.Seek(bestHashOffset, io.SeekStart)
-	metaFile.Read(consistencyHash[:])
+	if _, err := metaFile.ReadAt(consistencyHash[:], bestHashOffset); err != nil && err != io.EOF {
+		return nil, fmt.Errorf("read consistency hash: %w", err)
+	}
 
 	// Create Swiss Table for position map. Size based on numLeaves or
 	// expectedMaxLeaves (whichever is larger) to avoid costly resizes.
@@ -555,7 +567,11 @@ func (f *Forest) rebuildPositionMap() error {
 	}
 
 	// Load block counts from file into a local slice.
-	blockAdds, err := readBlockCounts(f.blockCountsFile)
+	bcSize, err := fileSize(f.blockCountsFile)
+	if err != nil {
+		return fmt.Errorf("blockCountsFile size: %w", err)
+	}
+	blockAdds, err := readBlockCounts(f.blockCountsFile, bcSize)
 	if err != nil {
 		return fmt.Errorf("read block counts: %w", err)
 	}
@@ -577,16 +593,11 @@ func (f *Forest) rebuildPositionMap() error {
 	go func() {
 		defer close(hashCh)
 
-		if _, err := f.file.Seek(0, io.SeekStart); err != nil {
-			hashErrCh <- err
-			return
-		}
-
 		for pos := uint64(0); pos < f.NumLeaves; pos += batchSize {
 			n := min(uint64(batchSize), f.NumLeaves-pos)
 
 			buf := make([]byte, n*32)
-			if _, err := io.ReadFull(f.file, buf); err != nil {
+			if _, err := f.file.ReadAt(buf, f.posToFileOffset(pos)); err != nil {
 				hashErrCh <- err
 				return
 			}
@@ -636,12 +647,8 @@ func (f *Forest) rebuildPositionMap() error {
 // loadMetadata reads recordMode (bytes 0-31) and numLeaves (bytes 32-63)
 // from the metaFile. Each field occupies one 32-byte entry.
 func (f *Forest) loadMetadata() error {
-	_, err := f.metaFile.Seek(0, io.SeekStart)
-	if err != nil {
-		return err
-	}
 	var buf [64]byte
-	_, err = f.metaFile.Read(buf[:])
+	_, err := f.metaFile.ReadAt(buf[:], 0)
 	if err == io.EOF {
 		// Fresh database, no metadata yet.
 		return nil
@@ -661,34 +668,29 @@ func (f *Forest) loadMetadata() error {
 // match the cachedRWS entry size. Both writes go through the WAL-protected
 // cachedRWS, so they are crash-safe.
 func (f *Forest) saveMetadata() error {
-	_, err := f.metaFile.Seek(0, io.SeekStart)
-	if err != nil {
-		return err
-	}
-
 	var recordModeBuf [32]byte
 	if f.recordMode {
 		recordModeBuf[0] = 1
 	}
-	if _, err := f.metaFile.Write(recordModeBuf[:]); err != nil {
+	if _, err := f.metaFile.WriteAt(recordModeBuf[:], 0); err != nil {
 		return err
 	}
 
 	var numLeavesBuf [32]byte
 	binary.LittleEndian.PutUint64(numLeavesBuf[:], f.NumLeaves)
-	_, err = f.metaFile.Write(numLeavesBuf[:])
+	_, err := f.metaFile.WriteAt(numLeavesBuf[:], 32)
 	return err
 }
 
 // ReadConsistencyHash reads the consistency hash from metaFile (bytes 64-95).
-// The hash is written atomically by WAL.Flush().
+// The hash is written atomically by WAL.Flush(). Returns a zero hash on a
+// fresh database where the metaFile has not yet been written that far.
 func (f *Forest) ReadConsistencyHash() ([32]byte, error) {
 	var hash [32]byte
-	_, err := f.metaFile.Seek(bestHashOffset, io.SeekStart)
-	if err != nil {
-		return hash, err
+	_, err := f.metaFile.ReadAt(hash[:], bestHashOffset)
+	if err == io.EOF {
+		return hash, nil
 	}
-	_, err = io.ReadFull(f.metaFile, hash[:])
 	return hash, err
 }
 
@@ -729,51 +731,43 @@ func (f *Forest) posToFileOffset(position uint64) int64 {
 	return rowBaseOffset(row, f.forestRows) + int64(position-rowStart)*32
 }
 
-// readHash reads the hash at the given position from the file.
+// readHash reads the hash at the given position from the file using ReadAt.
+// Positions that have never been written (read past EOF) yield a zero Hash,
+// matching the forest's "unwritten = empty" semantics.
+// Safe for concurrent use with other readHash/writeHash calls on disjoint
+// positions (no shared seek position).
 func (f *Forest) readHash(position uint64) (Hash, error) {
 	offset := f.posToFileOffset(position)
-	_, err := f.file.Seek(offset, io.SeekStart)
-	if err != nil {
-		return Hash{}, fmt.Errorf("seek to position %d: %w", position, err)
-	}
-
 	var hash Hash
-	n, err := f.file.Read(hash[:])
+	_, err := f.file.ReadAt(hash[:], offset)
+	if err == io.EOF {
+		return Hash{}, nil
+	}
 	if err != nil {
-		return Hash{}, fmt.Errorf("read at position %d: %w", position, err)
+		return Hash{}, err
 	}
-	if n != 32 {
-		return Hash{}, fmt.Errorf("short read at position %d: got %d bytes", position, n)
-	}
-
 	return hash, nil
 }
 
-// writeHash writes the hash at the given position to the file.
+// writeHash writes the hash at the given position to the file using WriteAt.
+// Safe for concurrent use with other readHash/writeHash calls on disjoint
+// positions (no shared seek position).
 func (f *Forest) writeHash(position uint64, hash Hash) error {
 	offset := f.posToFileOffset(position)
-	_, err := f.file.Seek(offset, io.SeekStart)
-	if err != nil {
-		return fmt.Errorf("seek to position %d: %w", position, err)
-	}
-
-	n, err := f.file.Write(hash[:])
-	if err != nil {
-		return fmt.Errorf("write at position %d: %w", position, err)
-	}
-	if n != 32 {
-		return fmt.Errorf("short write at position %d: wrote %d bytes", position, n)
-	}
-
-	return nil
+	_, err := f.file.WriteAt(hash[:], offset)
+	return err
 }
 
 // appendBlockCount appends a block's add count to the block counts file.
 func (f *Forest) appendBlockCount(count uint32) error {
-	if _, err := f.blockCountsFile.Seek(0, io.SeekEnd); err != nil {
+	off, err := fileSize(f.blockCountsFile)
+	if err != nil {
 		return err
 	}
-	return binary.Write(f.blockCountsFile, binary.LittleEndian, count)
+	var buf [4]byte
+	binary.LittleEndian.PutUint32(buf[:], count)
+	_, err = f.blockCountsFile.WriteAt(buf[:], off)
+	return err
 }
 
 // add adds a single leaf to the forest.

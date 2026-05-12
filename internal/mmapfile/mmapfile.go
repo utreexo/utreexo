@@ -7,14 +7,14 @@ import (
 	"io"
 )
 
-// File is the interface returned by Open. It combines the read/write/seek
-// and random-read capabilities needed by the forest data file, plus
-// Close for resource cleanup.
+// File is the interface returned by Open. It provides positional
+// (ReaderAt/WriterAt) access to the forest data file, plus Close for
+// resource cleanup.
 //
 // Sync is discovered dynamically via type assertion by the WAL's
 // syncFile helper, so it is not part of this interface.
 type File interface {
-	io.ReadWriteSeeker
 	io.ReaderAt
+	io.WriterAt
 	io.Closer
 }

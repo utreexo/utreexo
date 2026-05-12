@@ -3,6 +3,7 @@ package utreexo
 import (
 	"fmt"
 	"io"
+	"sync/atomic"
 )
 
 const (
@@ -39,8 +40,8 @@ type cacheStore interface {
 	close()
 }
 
-// cachedRWS wraps an io.ReadWriteSeeker, buffering all writes in memory.
-// Reads check the buffer first (exact offset match), then fall through to
+// cachedRWS wraps a forestFile, buffering all writes in memory. Reads
+// check the buffer first (exact offset match), then fall through to
 // the underlying file on miss. This enables atomic modifications: call
 // Flush to commit buffered writes, or Discard to throw them away.
 //
@@ -52,22 +53,17 @@ type cacheStore interface {
 type cachedRWS struct {
 	underlying forestFile
 	cache      cacheStore
-	pos        int64 // current seek position
-	maxWritten int64 // highest byte offset written (for SeekEnd)
-	baseSize   int64 // underlying file size at wrap time
+	maxWritten atomic.Int64 // highest byte offset ever written (logical file size)
+	baseSize   int64        // underlying file size at last flush
 }
 
-// newCachedRWS creates a cachedRWS wrapping the given io.ReadWriteSeeker.
-// It seeks to the end of the underlying file to determine its current size,
-// which is needed for correct SeekEnd behavior (e.g. append patterns).
-// entrySize specifies the fixed record size (4, 8, or 32 bytes).
-// maxCacheBytes controls when overflowed() signals that a flush is needed.
-// If maxCacheBytes is 0, defaultMaxCacheMemory is used.
-func newCachedRWS(underlying forestFile, entrySize int, maxCacheBytes int64) (*cachedRWS, error) {
-	size, err := underlying.Seek(0, io.SeekEnd)
-	if err != nil {
-		return nil, err
-	}
+// newCachedRWS creates a cachedRWS wrapping the given forestFile.
+// initialSize is the underlying file's current byte size; the caller is
+// expected to know it (e.g. via Stat for *os.File or the size passed to
+// mmapfile.Open). entrySize specifies the fixed record size (4, 8, or 32
+// bytes). maxCacheBytes controls when overflowed() signals that a flush
+// is needed; if 0, defaultMaxCacheMemory is used.
+func newCachedRWS(underlying forestFile, entrySize int, maxCacheBytes, initialSize int64) (*cachedRWS, error) {
 	if maxCacheBytes <= 0 {
 		maxCacheBytes = defaultMaxCacheMemory
 	}
@@ -77,17 +73,26 @@ func newCachedRWS(underlying forestFile, entrySize int, maxCacheBytes int64) (*c
 		return nil, err
 	}
 
-	return &cachedRWS{
+	c := &cachedRWS{
 		underlying: underlying,
 		cache:      cache,
-		pos:        size,
-		maxWritten: size,
-		baseSize:   size,
-	}, nil
+		baseSize:   initialSize,
+	}
+	c.maxWritten.Store(initialSize)
+	return c, nil
 }
 
-// ReadAt reads len(p) bytes starting at byte offset off.
-// It checks the cache first, then falls through to the underlying file.
+// Size returns the cachedRWS's current logical size, including any cached
+// writes that haven't been flushed to the underlying file yet.
+func (c *cachedRWS) Size() int64 {
+	return c.maxWritten.Load()
+}
+
+// ReadAt reads len(p) bytes starting at byte offset off, checking the cache
+// first and falling through to the underlying file on miss. Follows the
+// io.ReaderAt contract: short reads return (n, io.EOF), and reads entirely
+// past the underlying file size return (0, io.EOF). Callers that want
+// "unwritten position reads as zero" semantics must handle io.EOF themselves.
 func (c *cachedRWS) ReadAt(p []byte, off int64) (int, error) {
 	if cached, ok := c.cache.get(off); ok {
 		n := copy(p, cached)
@@ -102,68 +107,27 @@ func (c *cachedRWS) ReadAt(p []byte, off int64) (int, error) {
 	return c.underlying.ReadAt(p, off)
 }
 
-// Read returns data from the cache if present, otherwise reads from
-// the underlying file. Positions beyond the underlying file size
-// return zeros without touching the file.
-func (c *cachedRWS) Read(p []byte) (int, error) {
-	if cached, ok := c.cache.get(c.pos); ok {
-		n := copy(p, cached)
-		c.pos += int64(n)
-		return n, nil
-	}
-	// If the read is entirely beyond the underlying file, return zeros
-	// without touching it. This avoids extending an in-memory file (or
-	// hitting EOF on a real file) for positions that only exist in the cache.
-	if c.pos >= c.baseSize {
-		for i := range p {
-			p[i] = 0
-		}
-		n := len(p)
-		c.pos += int64(n)
-		return n, nil
-	}
-	// Fall through to underlying file.
-	_, err := c.underlying.Seek(c.pos, io.SeekStart)
-	if err != nil {
-		return 0, err
-	}
-	n, err := c.underlying.Read(p)
-	c.pos += int64(n)
-	return n, err
-}
-
-// Write stores data in the cache at the current position. The data length
-// must match the cache's entry size (4, 8, or 32 bytes).
-func (c *cachedRWS) Write(p []byte) (int, error) {
+// WriteAt writes p to the cache at byte offset off. The data length must
+// match the cache's entry size. Safe for concurrent disjoint-offset
+// writes from multiple goroutines (no shared seek position).
+func (c *cachedRWS) WriteAt(p []byte, off int64) (int, error) {
 	if len(p) != c.cache.entrySize() {
 		return 0, fmt.Errorf("expected %d bytes, got %d", c.cache.entrySize(), len(p))
 	}
-	if err := c.cache.put(c.pos, p); err != nil {
+	if err := c.cache.put(off, p); err != nil {
 		return 0, err
 	}
-
-	n := len(p)
-	c.pos += int64(n)
-	if c.pos > c.maxWritten {
-		c.maxWritten = c.pos
+	end := off + int64(len(p))
+	for {
+		old := c.maxWritten.Load()
+		if end <= old {
+			break
+		}
+		if c.maxWritten.CompareAndSwap(old, end) {
+			break
+		}
 	}
-	return n, nil
-}
-
-// Seek sets the position for the next Read or Write. For SeekEnd,
-// the end is defined as maxWritten (the highest position written to).
-func (c *cachedRWS) Seek(offset int64, whence int) (int64, error) {
-	switch whence {
-	case io.SeekStart:
-		c.pos = offset
-	case io.SeekCurrent:
-		c.pos += offset
-	case io.SeekEnd:
-		c.pos = c.maxWritten + offset
-	default:
-		return 0, fmt.Errorf("cachedRWS: invalid whence %d", whence)
-	}
-	return c.pos, nil
+	return len(p), nil
 }
 
 // Flush writes all cached data to the underlying file and clears the cache.
@@ -173,13 +137,7 @@ func (c *cachedRWS) Flush() error {
 		if flushErr != nil {
 			return
 		}
-		_, err := c.underlying.Seek(offset, io.SeekStart)
-		if err != nil {
-			flushErr = err
-			return
-		}
-		_, err = c.underlying.Write(data)
-		if err != nil {
+		if _, err := c.underlying.WriteAt(data, offset); err != nil {
 			flushErr = err
 			return
 		}
@@ -189,21 +147,16 @@ func (c *cachedRWS) Flush() error {
 	}
 	c.cache.clear()
 
-	// Update baseSize so subsequent reads can reach the newly flushed data
-	// in the underlying file.
-	size, err := c.underlying.Seek(0, io.SeekEnd)
-	if err != nil {
-		return err
-	}
-	c.baseSize = size
+	// All cached writes have been applied to the underlying file, so the
+	// underlying's new size is exactly maxWritten.
+	c.baseSize = c.maxWritten.Load()
 	return nil
 }
 
 // Discard drops all buffered writes without touching the underlying file.
 func (c *cachedRWS) Discard() {
 	c.cache.clear()
-	c.maxWritten = c.baseSize
-	c.pos = 0
+	c.maxWritten.Store(c.baseSize)
 }
 
 // Close releases resources held by the cache (e.g. mmap regions).
@@ -216,18 +169,12 @@ func (c *cachedRWS) FlushNeeded() bool {
 	return c.cache.overflowed()
 }
 
-// resetAfterFlush clears the cache and updates baseSize/maxWritten to
-// reflect the current underlying file size. This should be called after
-// writes have been applied to the underlying file (e.g. by the WAL),
-// so that a subsequent Discard resets to the correct post-flush baseline.
+// resetAfterFlush clears the cache and updates baseSize to reflect the
+// current underlying file size. This should be called after writes have
+// been applied to the underlying file (e.g. by the WAL), so that a
+// subsequent Discard resets to the correct post-flush baseline.
 func (c *cachedRWS) resetAfterFlush() error {
 	c.cache.clear()
-	size, err := c.underlying.Seek(0, io.SeekEnd)
-	if err != nil {
-		return err
-	}
-	c.baseSize = size
-	c.maxWritten = size
-	c.pos = 0
+	c.baseSize = c.maxWritten.Load()
 	return nil
 }

@@ -125,18 +125,16 @@ func TestWALBasicFlush(t *testing.T) {
 
 	// Write a hash to file 0.
 	h := testHashFromInt(1)
-	_, err = w.Cached(0).Seek(0, io.SeekStart)
-	require.NoError(t, err)
-	_, err = w.Cached(0).Write(h[:])
+	_, err = w.Cached(0).WriteAt(h[:], 0)
 	require.NoError(t, err)
 
 	// Mark a position as deleted in the bitmap (backed by files[0]).
 	w.Bitmap().set(42)
 
 	// Write 4 bytes to blockCounts (Cached(1)).
-	_, err = w.Cached(1).Seek(0, io.SeekStart)
-	require.NoError(t, err)
-	err = binary.Write(w.Cached(1), binary.LittleEndian, int32(7))
+	var blockCountBuf [4]byte
+	binary.LittleEndian.PutUint32(blockCountBuf[:], 7)
+	_, err = w.Cached(1).WriteAt(blockCountBuf[:], 0)
 	require.NoError(t, err)
 
 	// Underlying files should still be empty.
@@ -477,9 +475,7 @@ func TestWALDiscard(t *testing.T) {
 
 	// Write data to cache.
 	h := testHashFromInt(1)
-	_, err = w.Cached(0).Seek(0, io.SeekStart)
-	require.NoError(t, err)
-	_, err = w.Cached(0).Write(h[:])
+	_, err = w.Cached(0).WriteAt(h[:], 0)
 	require.NoError(t, err)
 
 	// Mutate bitmap.
@@ -519,9 +515,7 @@ func TestWALMultipleFlushes(t *testing.T) {
 
 	// First flush: write hash at offset 0.
 	h1 := testHashFromInt(1)
-	_, err = w.Cached(0).Seek(0, io.SeekStart)
-	require.NoError(t, err)
-	_, err = w.Cached(0).Write(h1[:])
+	_, err = w.Cached(0).WriteAt(h1[:], 0)
 	require.NoError(t, err)
 	require.NoError(t, w.Flush([32]byte{}))
 
@@ -529,9 +523,7 @@ func TestWALMultipleFlushes(t *testing.T) {
 
 	// Second flush: write hash at offset 32.
 	h2 := testHashFromInt(2)
-	_, err = w.Cached(0).Seek(32, io.SeekStart)
-	require.NoError(t, err)
-	_, err = w.Cached(0).Write(h2[:])
+	_, err = w.Cached(0).WriteAt(h2[:], 32)
 	require.NoError(t, err)
 	require.NoError(t, w.Flush([32]byte{}))
 
@@ -617,7 +609,7 @@ func TestWALForestIntegration(t *testing.T) {
 
 	// Restart forest from flushed underlying files and verify roots match.
 	tmpDir2 := t.TempDir()
-	bitmap2, err := loadDeletedBitmap(delFile)
+	bitmap2, err := loadDeletedBitmap(delFile, delFile.Size())
 	require.NoError(t, err)
 	forest2, err := newForest(mainFile, blockCountsFile, metaFile, bitmap2, tmpDir2+"/ctrl", tmpDir2+"/slots", 10, 0)
 	require.NoError(t, err)
@@ -794,9 +786,7 @@ func TestWALFlushNeeded(t *testing.T) {
 	// Write enough entries to overflow the tiny cache.
 	for i := range 100 {
 		h := testHashFromInt(i)
-		_, err = w.Cached(0).Seek(int64(i)*32, io.SeekStart)
-		require.NoError(t, err)
-		_, err = w.Cached(0).Write(h[:])
+		_, err = w.Cached(0).WriteAt(h[:], int64(i)*32)
 		require.NoError(t, err)
 	}
 

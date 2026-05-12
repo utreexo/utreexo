@@ -18,7 +18,6 @@ var errClosed = errors.New("mmapFile: use after close")
 type mmapFile struct {
 	data []byte   // mmap'd region; nil after Close
 	file *os.File // kept for Sync (fsync) and final close
-	pos  int64
 	size int64
 }
 
@@ -59,48 +58,26 @@ func (m *mmapFile) ReadAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
-func (m *mmapFile) Read(p []byte) (int, error) {
-	n, err := m.ReadAt(p, m.pos)
-	m.pos += int64(n)
-	return n, err
-}
-
-func (m *mmapFile) Write(p []byte) (int, error) {
+// WriteAt writes p to the mapped region at byte offset off. Concurrent
+// calls at disjoint offsets are safe. The mapping size is fixed at Open
+// time; writes wholly or partially past size return a short-write error.
+func (m *mmapFile) WriteAt(p []byte, off int64) (int, error) {
 	if m.data == nil {
 		return 0, errClosed
 	}
-	start := m.pos
-	if start < 0 || start >= m.size {
-		return 0, fmt.Errorf("mmapFile: write at %d beyond size %d", start, m.size)
+	if off < 0 || off >= m.size {
+		return 0, fmt.Errorf("mmapFile: write at %d beyond size %d", off, m.size)
 	}
-	n := copy(m.data[start:m.size], p)
-	m.pos += int64(n)
+	n := copy(m.data[off:m.size], p)
 	if n < len(p) {
-		return n, fmt.Errorf("mmapFile: short write at %d (wrote %d of %d)", start, n, len(p))
+		return n, fmt.Errorf("mmapFile: short write at %d (wrote %d of %d)", off, n, len(p))
 	}
 	return n, nil
 }
 
-func (m *mmapFile) Seek(offset int64, whence int) (int64, error) {
-	if m.data == nil {
-		return 0, errClosed
-	}
-	var abs int64
-	switch whence {
-	case io.SeekStart:
-		abs = offset
-	case io.SeekCurrent:
-		abs = m.pos + offset
-	case io.SeekEnd:
-		abs = m.size + offset
-	default:
-		return 0, fmt.Errorf("mmapFile: invalid whence %d", whence)
-	}
-	if abs < 0 {
-		return 0, fmt.Errorf("mmapFile: negative seek position %d", abs)
-	}
-	m.pos = abs
-	return abs, nil
+// Size returns the mapped region's size, fixed at Open time.
+func (m *mmapFile) Size() int64 {
+	return m.size
 }
 
 // Sync flushes the mapped pages to stable storage via fsync.
