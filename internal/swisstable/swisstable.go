@@ -584,7 +584,7 @@ func rehashInsert(ctrl []byte, slots []byte, numGroups uint64, hash [32]byte, pa
 // current session. The zeroed consistency hash ensures rebuild on restart.
 func (m *SwissPositionMap) resize() error {
 	oldNumSlots := m.numSlots
-	newNumSlots := oldNumSlots * 2
+	newNumSlots := oldNumSlots * 4
 	newNumGroups := newNumSlots / groupSize
 
 	// Copy old data before remapping. Both copies are necessary because
