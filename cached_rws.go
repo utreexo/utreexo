@@ -107,6 +107,22 @@ func (c *cachedRWS) ReadAt(p []byte, off int64) (int, error) {
 	return c.underlying.ReadAt(p, off)
 }
 
+// HashAt returns the 32 bytes at off as a [32]byte value, checking the cache
+// first and falling through to the underlying file on miss. Returning by
+// value lets callers verify hashes without allocating a buffer that would
+// otherwise escape through io.ReaderAt.
+func (c *cachedRWS) HashAt(off int64) ([32]byte, error) {
+	if cached, ok := c.cache.get(off); ok {
+		var h [32]byte
+		copy(h[:], cached)
+		return h, nil
+	}
+	if off >= c.baseSize {
+		return [32]byte{}, io.EOF
+	}
+	return c.underlying.HashAt(off)
+}
+
 // WriteAt writes p to the cache at byte offset off. The data length must
 // match the cache's entry size. Safe for concurrent disjoint-offset
 // writes from multiple goroutines (no shared seek position).

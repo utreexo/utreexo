@@ -11,10 +11,15 @@ import (
 // (ReaderAt/WriterAt) access to the forest data file, plus Close for
 // resource cleanup.
 //
+// HashAt returns the 32-byte hash at the given offset by value, letting
+// callers avoid the heap allocation that would occur if they passed a
+// stack-local [32]byte through io.ReaderAt.
+//
 // Sync is discovered dynamically via type assertion by the WAL's
 // syncFile helper, so it is not part of this interface.
 type File interface {
 	io.ReaderAt
 	io.WriterAt
 	io.Closer
+	HashAt(off int64) ([32]byte, error)
 }

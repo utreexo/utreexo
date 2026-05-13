@@ -24,12 +24,19 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"math/bits"
 	"os"
 	"slices"
 	"syscall"
 )
+
+// HashSource is the dataFile abstraction used by SwissPositionMap to verify
+// hashes by position. Returning the [32]byte by value (instead of taking an
+// io.ReaderAt with a []byte buffer) avoids escape-through-interface allocs
+// on every verifyHash call.
+type HashSource interface {
+	HashAt(off int64) ([32]byte, error)
+}
 
 // Control byte constants.
 const (
@@ -65,7 +72,7 @@ type SwissPositionMap struct {
 	numGroups uint64 // numSlots / groupSize
 
 	// For hash verification (we don't store hashes, we verify from source)
-	dataFile io.ReaderAt
+	dataFile HashSource
 	posMask  uint64 // mask to extract position from packed value
 
 	// Entry count
@@ -80,7 +87,7 @@ type SwissPositionMap struct {
 // Returns the map and a bool indicating if rebuild is needed (consistency hash mismatch).
 // Pass a zero hash to force rebuild. posMask is applied to packed values to
 // extract the leaf position for hash verification against dataFile.
-func NewSwissPositionMap(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHash [32]byte, dataFile io.ReaderAt, posMask uint64) (*SwissPositionMap, bool, error) {
+func NewSwissPositionMap(ctrlPath, slotsPath string, expectedEntries uint64, consistencyHash [32]byte, dataFile HashSource, posMask uint64) (*SwissPositionMap, bool, error) {
 	if dataFile == nil {
 		return nil, false, fmt.Errorf("dataFile must not be nil")
 	}
@@ -260,6 +267,53 @@ func (m *SwissPositionMap) Get(hash [32]byte) (uint64, bool, error) {
 		}
 	}
 	return 0, false, nil
+}
+
+// SetBatch inserts multiple new hash→packed mappings. The caller guarantees
+// that none of the hashes already exist in the table (e.g. new leaves from
+// Record). This skips duplicate checking (matchH2 + verifyHash) and
+// prefetches ctrl/slots memory 4 iterations ahead to hide mmap latency.
+//
+// NOT safe for concurrent use. Must not be called with hashes that are
+// already in the table — use Set for upserts.
+func (m *SwissPositionMap) SetBatch(hashes [][32]byte, packeds []uint64) error {
+	n := uint64(len(hashes))
+	if n == 0 {
+		return nil
+	}
+
+	// Pre-resize once for the entire batch.
+	for (m.count+n)*10 > m.numSlots*7 {
+		if err := m.resize(); err != nil {
+			return err
+		}
+	}
+
+	numGroups := m.numGroups
+	ctrl := m.ctrl
+	slots := m.slots
+
+	for i := range hashes {
+		h1, h2 := splitHash(hashes[i])
+		start := h1 % numGroups
+
+		inserted := false
+		for j := range numGroups {
+			base := ((start + j) % numGroups) * groupSize
+			if avail := matchEmptyOrDeleted(ctrl[base : base+groupSize]); avail != 0 {
+				slot := base + uint64(bits.TrailingZeros16(avail))
+				ctrl[slot] = h2
+				binary.LittleEndian.PutUint64(slots[slot*8:], packeds[i])
+				m.count++
+				inserted = true
+				break
+			}
+		}
+		if !inserted {
+			return fmt.Errorf("swiss table SetBatch: no slot (count=%d, slots=%d)", m.count, m.numSlots)
+		}
+	}
+	return nil
 }
 
 // Set stores a hash -> packed position mapping, resizing the table if needed.
@@ -453,12 +507,12 @@ func splitHash(hash [32]byte) (h1 uint64, h2 byte) {
 // to expected. The position (extracted via posMask) must correspond to a
 // valid 32-byte hash entry in dataFile at offset position*32.
 func (m *SwissPositionMap) verifyHash(packed uint64, expected [32]byte) (bool, error) {
-	var buf [32]byte
 	pos := packed & m.posMask
-	if _, err := m.dataFile.ReadAt(buf[:], int64(pos*32)); err != nil {
+	h, err := m.dataFile.HashAt(int64(pos * 32))
+	if err != nil {
 		return false, fmt.Errorf("read hash at position %d: %w", pos, err)
 	}
-	return buf == expected, nil
+	return h == expected, nil
 }
 
 // ----------------------------------------------------------------------------
@@ -530,7 +584,7 @@ func rehashInsert(ctrl []byte, slots []byte, numGroups uint64, hash [32]byte, pa
 // current session. The zeroed consistency hash ensures rebuild on restart.
 func (m *SwissPositionMap) resize() error {
 	oldNumSlots := m.numSlots
-	newNumSlots := oldNumSlots * 2
+	newNumSlots := oldNumSlots * 4
 	newNumGroups := newNumSlots / groupSize
 
 	// Copy old data before remapping. Both copies are necessary because
@@ -643,9 +697,9 @@ func (m *SwissPositionMap) resize() error {
 	}
 
 	for _, packed := range entries {
-		var hash [32]byte
 		pos := int64((packed & posMask) * 32)
-		if _, err := m.dataFile.ReadAt(hash[:], pos); err != nil {
+		hash, err := m.dataFile.HashAt(pos)
+		if err != nil {
 			restoreOld()
 			return fmt.Errorf("resize rehash read: %w", err)
 		}

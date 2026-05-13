@@ -91,6 +91,18 @@ func (m *memFile) WriteAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
+func (m *memFile) HashAt(off int64) ([32]byte, error) {
+	var h [32]byte
+	if off >= int64(len(m.data)) {
+		return h, io.EOF
+	}
+	n := copy(h[:], m.data[off:])
+	if n < 32 {
+		return h, io.EOF
+	}
+	return h, nil
+}
+
 func (m *memFile) Size() int64 {
 	return int64(len(m.data))
 }

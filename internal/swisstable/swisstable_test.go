@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -18,6 +19,40 @@ const (
 	testPositionBits = 47
 	testPositionMask = (1 << testPositionBits) - 1
 )
+
+// fileHashSource adapts *os.File to swisstable.HashSource via ReadAt. The
+// local [32]byte cannot stay on the caller's stack because it must be passed
+// through io.ReaderAt below, but by hoisting the buffer here the caller's
+// hot path stays alloc-free.
+type fileHashSource struct{ f *os.File }
+
+func (s fileHashSource) HashAt(off int64) ([32]byte, error) {
+	var h [32]byte
+	_, err := s.f.ReadAt(h[:], off)
+	return h, err
+}
+
+// mmapHashSource returns hashes by direct slice into an mmap'd file region.
+// No buffer crosses an interface boundary, so callers can read hashes
+// alloc-free.
+type mmapHashSource struct{ data []byte }
+
+func newMmapHashSource(tb testing.TB, f *os.File, size int64) mmapHashSource {
+	tb.Helper()
+	if size <= 0 {
+		return mmapHashSource{}
+	}
+	data, err := syscall.Mmap(int(f.Fd()), 0, int(size), syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		tb.Fatalf("mmap: %v", err)
+	}
+	tb.Cleanup(func() { syscall.Munmap(data) })
+	return mmapHashSource{data: data}
+}
+
+func (s mmapHashSource) HashAt(off int64) ([32]byte, error) {
+	return *(*[32]byte)(s.data[off : off+32]), nil
+}
 
 // testHashFromInt creates a deterministic hash from an integer for testing.
 func testHashFromInt(n int) [32]byte {
@@ -448,7 +483,7 @@ func newTestSwissMap(t *testing.T, numEntries int, capacity uint64) (*SwissPosit
 
 	m, _, err := NewSwissPositionMap(
 		t.TempDir()+"/ctrl", t.TempDir()+"/slots",
-		capacity, [32]byte{}, dataFile, testPositionMask,
+		capacity, [32]byte{}, fileHashSource{dataFile}, testPositionMask,
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { m.Close() })
@@ -471,7 +506,7 @@ func TestSwissPositionMapConsistency(t *testing.T) {
 		}
 		dataFile.Seek(0, 0)
 
-		m, _, err := NewSwissPositionMap(ctrlPath, slotsPath, 100, [32]byte{}, dataFile, testPositionMask)
+		m, _, err := NewSwissPositionMap(ctrlPath, slotsPath, 100, [32]byte{}, fileHashSource{dataFile}, testPositionMask)
 		require.NoError(t, err)
 		for i, h := range hashes {
 			require.NoError(t, m.Set(h, uint64(i)))
@@ -577,7 +612,7 @@ func TestSwissPositionMapConsistency(t *testing.T) {
 			require.NoError(t, err)
 			defer dataFile.Close()
 
-			m, needsRebuild, err := NewSwissPositionMap(ctrlPath, slotsPath, tc.expectedEntries, tc.reopenHash, dataFile, testPositionMask)
+			m, needsRebuild, err := NewSwissPositionMap(ctrlPath, slotsPath, tc.expectedEntries, tc.reopenHash, fileHashSource{dataFile}, testPositionMask)
 			require.NoError(t, err)
 			defer m.Close()
 
@@ -653,7 +688,7 @@ func TestSwissPositionMapConcurrentGet(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	m, _, err := NewSwissPositionMap(t.TempDir()+"/ctrl", t.TempDir()+"/slots", dataSlots, [32]byte{}, dataFile, testPositionMask)
+	m, _, err := NewSwissPositionMap(t.TempDir()+"/ctrl", t.TempDir()+"/slots", dataSlots, [32]byte{}, fileHashSource{dataFile}, testPositionMask)
 	require.NoError(t, err)
 	defer m.Close()
 
@@ -748,7 +783,7 @@ func BenchmarkSwissGet(b *testing.B) {
 	}
 	dataFile.Seek(0, 0)
 
-	m, _, _ := NewSwissPositionMap(tmpDir+"/ctrl", tmpDir+"/slots", uint64(numEntries), [32]byte{}, dataFile, testPositionMask)
+	m, _, _ := NewSwissPositionMap(tmpDir+"/ctrl", tmpDir+"/slots", uint64(numEntries), [32]byte{}, fileHashSource{dataFile}, testPositionMask)
 	defer m.Close()
 
 	for i, h := range hashes {
@@ -762,29 +797,84 @@ func BenchmarkSwissGet(b *testing.B) {
 }
 
 func BenchmarkSwissSet(b *testing.B) {
+	const totalEntries = 1 << 20
+
 	tmpDir := b.TempDir()
 	dataPath := tmpDir + "/data"
 
 	dataFile, _ := os.Create(dataPath)
-	numEntries := b.N
-	if numEntries > 100000 {
-		numEntries = 100000
-	}
+	defer dataFile.Close()
 
-	hashes := make([][32]byte, numEntries)
-	for i := range numEntries {
+	hashes := make([][32]byte, totalEntries)
+	for i := range totalEntries {
 		hashes[i] = testHashFromInt(i)
 		dataFile.Write(hashes[i][:])
 	}
 	dataFile.Seek(0, 0)
 
-	m, _, _ := NewSwissPositionMap(tmpDir+"/ctrl", tmpDir+"/slots", uint64(numEntries), [32]byte{}, dataFile, testPositionMask)
-	defer m.Close()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		b.StopTimer()
+		os.Remove(tmpDir + "/ctrl")
+		os.Remove(tmpDir + "/slots")
+		m, _, _ := NewSwissPositionMap(tmpDir+"/ctrl", tmpDir+"/slots", uint64(totalEntries), [32]byte{}, fileHashSource{dataFile}, testPositionMask)
+		b.StartTimer()
+
+		for i := range totalEntries {
+			if err := m.Set(hashes[i], uint64(i)); err != nil {
+				b.Fatal(err)
+			}
+		}
+
+		b.StopTimer()
+		m.Close()
+		b.StartTimer()
+	}
+	b.SetBytes(int64(totalEntries) * 32)
+}
+
+func BenchmarkSwissSetBatch(b *testing.B) {
+	const batchSize = 4096
+	const totalEntries = 1 << 20
+
+	tmpDir := b.TempDir()
+	dataPath := tmpDir + "/data"
+	dataFile, _ := os.Create(dataPath)
+	defer dataFile.Close()
+
+	hashes := make([][32]byte, totalEntries)
+	for i := range totalEntries {
+		hashes[i] = testHashFromInt(i)
+		dataFile.Write(hashes[i][:])
+	}
+	dataFile.Seek(0, 0)
+
+	packeds := make([]uint64, batchSize)
+	for i := range batchSize {
+		packeds[i] = uint64(i)
+	}
 
 	b.ResetTimer()
-	for i := range b.N {
-		m.Set(hashes[i%numEntries], uint64(i%numEntries))
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		os.Remove(tmpDir + "/ctrl")
+		os.Remove(tmpDir + "/slots")
+		m, _, _ := NewSwissPositionMap(tmpDir+"/ctrl", tmpDir+"/slots", uint64(totalEntries), [32]byte{}, fileHashSource{dataFile}, testPositionMask)
+		b.StartTimer()
+
+		for off := 0; off+batchSize <= totalEntries; off += batchSize {
+			if err := m.SetBatch(hashes[off:off+batchSize], packeds); err != nil {
+				b.Fatal(err)
+			}
+		}
+
+		b.StopTimer()
+		m.Close()
+		b.StartTimer()
 	}
+	b.SetBytes(int64(totalEntries) * 32)
 }
 
 // BenchmarkGoMapGet benchmarks native Go map for comparison.

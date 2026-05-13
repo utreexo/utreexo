@@ -60,9 +60,25 @@ var _ Utreexo = (*Forest)(nil)
 // forestFile is the interface required for the main data file.
 // All I/O is positional; there is no shared seek position to coordinate
 // across goroutines.
+//
+// HashAt returns the 32 bytes at the given offset by value, so callers
+// can verify hashes without passing a stack-local buffer through
+// io.ReaderAt (which would force it to escape to the heap).
 type forestFile interface {
 	io.ReaderAt
 	io.WriterAt
+	HashAt(off int64) ([32]byte, error)
+}
+
+// rawFile wraps *os.File so it satisfies forestFile. Used for auxiliary
+// files (meta, blockCounts, deleted bitmap) where HashAt is required by
+// the interface but the call path never actually exercises it.
+type rawFile struct{ *os.File }
+
+func (r rawFile) HashAt(off int64) ([32]byte, error) {
+	var h [32]byte
+	_, err := r.ReadAt(h[:], off)
+	return h, err
 }
 
 // fileSize asks f for its current byte size, preferring an explicit
@@ -478,10 +494,10 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 		dataCacheBytes = o.maxCacheMemory
 	}
 
-	wal, err := newWAL(journalFile, deletedFile,
+	wal, err := newWAL(journalFile, rawFile{deletedFile},
 		walFile{File: dataFF, EntrySize: dataEntrySize, MaxCacheBytes: dataCacheBytes},
-		walFile{File: blockCountsFile, EntrySize: blockCountsEntrySize},
-		walFile{File: metaFile, EntrySize: metaEntrySize},
+		walFile{File: rawFile{blockCountsFile}, EntrySize: blockCountsEntrySize},
+		walFile{File: rawFile{metaFile}, EntrySize: metaEntrySize},
 	)
 	if err != nil {
 		for _, c := range closers {
