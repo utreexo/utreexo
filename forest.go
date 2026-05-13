@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/utreexo/utreexo/internal/mmapfile"
 	"github.com/utreexo/utreexo/internal/swisstable"
@@ -289,6 +290,12 @@ type Forest struct {
 	// Calling Modify while in record mode would corrupt the tree.
 	// Persisted to metaFile (bytes 0-31, padded).
 	recordMode bool
+
+	// lastGeneratedLeaves tracks how many leaves the last GenerateRoots
+	// processed. Used to make subsequent calls incremental (O(k·log n)
+	// instead of O(n)). Reset to 0 on restart.
+	// Accessed atomically so GenerateRoots doesn't need f.mu.
+	lastGeneratedLeaves atomic.Uint64
 
 	// pendingDels accumulates leaf positions deleted by Record since
 	// the last Snapshot. Captured by Snapshot and cleared.
