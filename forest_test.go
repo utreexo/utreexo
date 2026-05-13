@@ -8,6 +8,7 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -21,7 +22,10 @@ func testHashFromInt(n int) Hash {
 }
 
 // memFile is an in-memory implementation of io.ReadWriteSeeker for testing.
+// mu protects concurrent ReadAt/WriteAt calls (which are safe on os.File
+// at disjoint offsets but race on a []byte slice).
 type memFile struct {
+	mu     sync.RWMutex
 	data   []byte
 	offset int64
 }
@@ -67,6 +71,8 @@ func (m *memFile) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (m *memFile) ReadAt(p []byte, off int64) (int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if off >= int64(len(m.data)) {
 		return 0, io.EOF
 	}
