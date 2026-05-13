@@ -291,10 +291,10 @@ type Forest struct {
 	// Persisted to metaFile (bytes 0-31, padded).
 	recordMode bool
 
-	// lastGeneratedLeaves tracks how many leaves the last GenerateRoots
-	// processed. Used to make subsequent calls incremental (O(k·log n)
+	// lastGeneratedLeaves tracks how many leaves the last root generation
+	// pass processed. Used to make subsequent calls incremental (O(k·log n)
 	// instead of O(n)). Reset to 0 on restart.
-	// Accessed atomically so GenerateRoots doesn't need f.mu.
+	// Accessed atomically so the root pipeline doesn't need f.mu.
 	lastGeneratedLeaves atomic.Uint64
 
 	// pendingDels accumulates leaf positions deleted by Record since
@@ -567,10 +567,17 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 
 // Flush atomically commits all cached writes through the WAL journal.
 // Only valid on forests created via OpenForest.
+//
+// Acquires f.mu to serialize against concurrent writers (Record, Modify,
+// etc.). The deletedLeafPositions bitmap is mutated under f.mu, and the
+// WAL's serializeEntries iterates that bitmap; without the lock, callers
+// running the proof pipeline race with Flush during periodic catch-up flushes.
 func (f *Forest) Flush(bestHash [32]byte) error {
 	if f.wal == nil {
 		return fmt.Errorf("flush: no WAL (use OpenForest to enable)")
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.wal.Flush(bestHash)
 }
 
