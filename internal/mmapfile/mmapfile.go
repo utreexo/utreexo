@@ -22,4 +22,9 @@ type File interface {
 	io.WriterAt
 	io.Closer
 	HashAt(off int64) ([32]byte, error)
+	// PutHashAt / PutUint32At are value-taking variants of WriteAt that
+	// avoid the local-buffer-escapes-through-interface heap alloc that
+	// the []byte form triggers at call sites.
+	PutHashAt(hash [32]byte, off int64) error
+	PutUint32At(val uint32, off int64) error
 }

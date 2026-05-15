@@ -103,6 +103,18 @@ func (m *memFile) HashAt(off int64) ([32]byte, error) {
 	return h, nil
 }
 
+func (m *memFile) PutHashAt(hash [32]byte, off int64) error {
+	_, err := m.WriteAt(hash[:], off)
+	return err
+}
+
+func (m *memFile) PutUint32At(val uint32, off int64) error {
+	var buf [4]byte
+	binary.LittleEndian.PutUint32(buf[:], val)
+	_, err := m.WriteAt(buf[:], off)
+	return err
+}
+
 func (m *memFile) Size() int64 {
 	return int64(len(m.data))
 }

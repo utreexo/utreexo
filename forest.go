@@ -68,6 +68,15 @@ type forestFile interface {
 	io.ReaderAt
 	io.WriterAt
 	HashAt(off int64) ([32]byte, error)
+
+	// PutHashAt writes a 32-byte hash by value. Equivalent to WriteAt with
+	// a 32-byte slice, but the value-typed parameter lets callers avoid
+	// the local-buffer-escapes-through-interface heap alloc that the
+	// slice form triggers.
+	PutHashAt(hash [32]byte, off int64) error
+	// PutUint32At writes a 4-byte little-endian uint32 by value. Same
+	// motivation as PutHashAt.
+	PutUint32At(val uint32, off int64) error
 }
 
 // rawFile wraps *os.File so it satisfies forestFile. Used for auxiliary
@@ -79,6 +88,18 @@ func (r rawFile) HashAt(off int64) ([32]byte, error) {
 	var h [32]byte
 	_, err := r.ReadAt(h[:], off)
 	return h, err
+}
+
+func (r rawFile) PutHashAt(hash [32]byte, off int64) error {
+	_, err := r.WriteAt(hash[:], off)
+	return err
+}
+
+func (r rawFile) PutUint32At(val uint32, off int64) error {
+	var buf [4]byte
+	binary.LittleEndian.PutUint32(buf[:], val)
+	_, err := r.WriteAt(buf[:], off)
+	return err
 }
 
 // fileSize asks f for its current byte size, preferring an explicit
