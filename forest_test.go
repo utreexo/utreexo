@@ -585,7 +585,7 @@ func FuzzForestRecord(f *testing.F) {
 			for i, add := range adds {
 				addHashes[i] = add.Hash
 			}
-			_, err = recordForest.Record(addHashes, delHashes)
+			_, _, err = recordForest.Record(addHashes, delHashes)
 			if err != nil {
 				t.Fatalf("block %d: Record error: %v", b, err)
 			}

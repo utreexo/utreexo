@@ -290,6 +290,10 @@ type Forest struct {
 	// Persisted to metaFile (bytes 0-31, padded).
 	recordMode bool
 
+	// pendingDels accumulates leaf positions deleted by Record since
+	// the last Snapshot. Captured by Snapshot and cleared.
+	pendingDels []uint64
+
 	// wal is set when created via OpenForest; nil for newForest (test/advanced usage).
 	wal *wal
 
@@ -709,14 +713,13 @@ func (f *Forest) saveMetadata() error {
 	if f.recordMode {
 		recordModeBuf[0] = 1
 	}
-	if _, err := f.metaFile.WriteAt(recordModeBuf[:], 0); err != nil {
+	if err := f.metaFile.PutHashAt(recordModeBuf, 0); err != nil {
 		return err
 	}
 
 	var numLeavesBuf [32]byte
 	binary.LittleEndian.PutUint64(numLeavesBuf[:], f.NumLeaves)
-	_, err := f.metaFile.WriteAt(numLeavesBuf[:], 32)
-	return err
+	return f.metaFile.PutHashAt(numLeavesBuf, 32)
 }
 
 // ReadConsistencyHash reads the consistency hash from metaFile (bytes 64-95).
@@ -801,10 +804,7 @@ func (f *Forest) appendBlockCount(count uint32) error {
 	if err != nil {
 		return err
 	}
-	var buf [4]byte
-	binary.LittleEndian.PutUint32(buf[:], count)
-	_, err = f.blockCountsFile.WriteAt(buf[:], off)
-	return err
+	return f.blockCountsFile.PutUint32At(count, off)
 }
 
 // add adds a single leaf to the forest.
@@ -1499,58 +1499,6 @@ func (f *Forest) ModifyAndReturnTTLs(adds []Leaf, delHashes []Hash, _ Proof) ([]
 		return nil, fmt.Errorf("save metadata: %w", err)
 	}
 
-	return addIndexes, nil
-}
-
-// Record adds and deletes elements without computing parent hashes.
-// Use during IBD for performance - call HashAll() when done to build the tree.
-// This is equivalent to Modify but defers all hashing until HashAll().
-// Returns the addIndexes for deleted leaves (for TTL tracking).
-func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	// Collect addIndexes and track deletions
-	addIndexes := make([]int32, 0, len(delHashes))
-	for _, delHash := range delHashes {
-		packed, found, err := f.positionMap.Get(delHash)
-		if err != nil {
-			return nil, fmt.Errorf("positionMap.Get: %w", err)
-		}
-		if !found {
-			return nil, fmt.Errorf("delhash %v not found in position map", delHash)
-		}
-		addIndexes = append(addIndexes, unpackIndex(packed))
-		leafPos := unpackPos(packed)
-
-		f.deletedLeafPositions.set(leafPos)
-	}
-
-	// Store leaves without computing parent hashes
-	for i, hash := range adds {
-		if hash != empty {
-			if err := f.positionMap.Set(hash, packPosIndex(f.NumLeaves, int32(i))); err != nil {
-				return nil, fmt.Errorf("positionMap.Set: %w", err)
-			}
-		}
-
-		// Always write the leaf hash (even if empty, so HashAll can read it)
-		err := f.writeHash(f.NumLeaves, hash)
-		if err != nil {
-			return nil, fmt.Errorf("write leaf: %w", err)
-		}
-
-		f.NumLeaves++
-	}
-
-	if err := f.appendBlockCount(uint32(len(adds))); err != nil {
-		return nil, fmt.Errorf("append block count: %w", err)
-	}
-
-	f.recordMode = true
-	if err := f.saveMetadata(); err != nil {
-		return nil, fmt.Errorf("save metadata: %w", err)
-	}
 	return addIndexes, nil
 }
 
