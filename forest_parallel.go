@@ -108,7 +108,7 @@ func (p *workerPool) do(fn func(wIdx, start, end int), n int) {
 // mainPool is used by the main thread (Record, parallelLeafHash).
 var mainPool = newWorkerPool(numWorkers)
 
-// pipelinePool is used by the pipeline goroutine (GenerateRoots, GenerateProof).
+// pipelinePool is used by the pipeline goroutine (GenerateRootsAndProof).
 var pipelinePool = newWorkerPool(numWorkers)
 
 // MainParallelDo splits n work items across the main thread's persistent pool

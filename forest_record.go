@@ -3,8 +3,9 @@ package utreexo
 import "fmt"
 
 // Record adds and deletes elements without computing parent hashes.
-// Use during IBD for performance; call HashAll or GenerateRoots when done to
-// build the tree. It returns add indexes and leaf positions for deleted leaves.
+// Use during IBD for performance; call HashAll or GenerateRootsAndProof when
+// done to build the tree. It returns add indexes and leaf positions for deleted
+// leaves.
 func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, []uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -91,8 +92,8 @@ func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, []uint64, error
 	return addIndexes, delPositions, nil
 }
 
-// ExitRecordMode transitions the forest out of record mode after GenerateRoots
-// has written all intermediate hashes to the data file.
+// ExitRecordMode transitions the forest out of record mode after
+// GenerateRootsAndProof has written all intermediate hashes to the data file.
 func (f *Forest) ExitRecordMode() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
