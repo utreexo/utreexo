@@ -7,3 +7,7 @@ package utreexo
 func newMmapCacheStore(entrySize int, maxBytes int64) (*pageCacheStore, error) {
 	return newPageCacheStore(entrySize, maxBytes), nil
 }
+
+// cacheImpl is the concrete cache type cachedRWS stores. See the linux
+// build's cacheImpl comment for the rationale.
+type cacheImpl = pageCacheStore
