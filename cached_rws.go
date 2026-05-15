@@ -53,7 +53,11 @@ type cacheStore interface {
 // the underlying file.
 type cachedRWS struct {
 	underlying forestFile
-	cache      cacheStore
+	// cache is the concrete production cache type (build-tagged alias).
+	// Concrete dispatch lets escape analysis see through cache.put so
+	// callers like PutHashAt can pass [32]byte by value without forcing
+	// the local to heap.
+	cache      *cacheImpl
 	maxWritten atomic.Int64 // highest byte offset ever written (logical file size)
 	baseSize   int64        // underlying file size at last flush
 }
