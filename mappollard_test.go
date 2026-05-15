@@ -1056,10 +1056,8 @@ func FuzzMapPollardTTLs(f *testing.F) {
 		m := NewMapPollard(true)
 
 		// Create forest with blockCountsFile for TTL tracking
-		memFile := newMemFile()
-		blockCountsFile := newMemFile()
 		tmpDir := t.TempDir()
-		forest, err := newForest(memFile, blockCountsFile, newMemFile(), nil, tmpDir+"/ctrl", tmpDir+"/slots", 16, 0)
+		forest, err := newForest(memCached(t, 32), memCached(t, 4), memCached(t, 32), nil, tmpDir+"/ctrl", tmpDir+"/slots", 16, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

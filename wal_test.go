@@ -611,7 +611,7 @@ func TestWALForestIntegration(t *testing.T) {
 	tmpDir2 := t.TempDir()
 	bitmap2, err := loadDeletedBitmap(delFile, delFile.Size())
 	require.NoError(t, err)
-	forest2, err := newForest(mainFile, blockCountsFile, metaFile, bitmap2, tmpDir2+"/ctrl", tmpDir2+"/slots", 10, 0)
+	forest2, err := newForest(wrapMem(t, mainFile, 32), wrapMem(t, blockCountsFile, 4), wrapMem(t, metaFile, 32), bitmap2, tmpDir2+"/ctrl", tmpDir2+"/slots", 10, 0)
 	require.NoError(t, err)
 	require.Equal(t, forest.GetRoots(), forest2.GetRoots(),
 		"roots should match after restart from WAL-flushed data")
