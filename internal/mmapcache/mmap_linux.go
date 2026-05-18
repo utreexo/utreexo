@@ -28,3 +28,13 @@ func mmapAnon(size int) ([]byte, error) {
 func mmapRelease(data []byte) {
 	_ = syscall.Munmap(data)
 }
+
+// madviseDontNeed tells the kernel to drop the physical pages backing the
+// given range. The virtual mapping stays intact; subsequent accesses fault
+// in fresh zero-filled pages. Used by Store.Clear to release resident
+// memory after a logical reset without re-mmapping the address space.
+// Errors are ignored: MADV_DONTNEED is advisory and a failure only means
+// the kernel kept pages it was free to drop, which is benign.
+func madviseDontNeed(data []byte) {
+	_ = syscall.Madvise(data, syscall.MADV_DONTNEED)
+}
