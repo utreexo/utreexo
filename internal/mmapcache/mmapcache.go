@@ -297,8 +297,14 @@ func (s *Store) Put(offset int64, data []byte) error {
 	}
 }
 
-// Clear removes all entries. The mmap regions remain allocated so the
-// store can be reused without re-mapping.
+// Clear removes all entries and releases the physical pages backing the
+// data region. The virtual mmap regions remain allocated so the store
+// can be reused without re-mapping; the kernel returns fresh zero-filled
+// pages on next access to the data region. The bitmap and dirty-bitmap
+// regions are NOT released because they are touched on every cache
+// operation and dropping them would just thrash the page tables. The
+// data region, by contrast, is accessed at scattered offsets and benefits
+// from being released.
 //
 // NOT safe for concurrent use with Get/Put.
 func (s *Store) Clear() {
@@ -313,6 +319,7 @@ func (s *Store) Clear() {
 	s.resetDirty()
 	s.presMinWord.Store(math.MaxInt64)
 	s.presMaxWord.Store(-1)
+	madviseDontNeed(s.data)
 }
 
 // Close releases all mmap regions back to the OS.
