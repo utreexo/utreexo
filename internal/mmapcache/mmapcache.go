@@ -3,7 +3,7 @@
 // demand-paged by the kernel, so only touched pages consume physical memory.
 // A bitmap tracks which slots have cached data. A second-level (coarse)
 // bitmap with one bit per 64 fine words lets ForEach and Clear skip large
-// empty regions cheaply. Atomic range tracking [dirtyMinWord, dirtyMaxWord]
+// empty regions cheaply. Atomic range tracking [minWord, maxWord]
 // further bounds the scan without any mutex or dense list, making Put fully
 // lock-free.
 package mmapcache
@@ -39,9 +39,9 @@ const maxRegionSize = 1 << (30 + 10*(^uint(0)>>63))
 //   - ForEach, Clear, and Close are NOT safe to call concurrently with
 //     any other method.
 type Store struct {
-	data         []byte // mmap'd data region (demand-paged)
-	bitmap       []byte // mmap'd bitmap; tracks which slots have cached data
-	dirtyBitmap2 []byte // mmap'd coarse bitmap; bit cw*64+cb means bitmap word cw*64+cb may be non-zero
+	data    []byte // mmap'd data region (demand-paged)
+	bitmap  []byte // mmap'd bitmap; tracks which slots have cached data
+	bitmap2 []byte // mmap'd coarse bitmap; bit cw*64+cb means bitmap word cw*64+cb may be non-zero
 
 	entrySize   int
 	slots       int // total number of slots
@@ -51,9 +51,9 @@ type Store struct {
 	totalCount  atomic.Int64
 
 	// Atomic range of bitmap word indices. ForEach and Clear scan only
-	// [dirtyMinWord, dirtyMaxWord]. Initialized to empty (min > max).
-	dirtyMinWord atomic.Int64
-	dirtyMaxWord atomic.Int64
+	// [minWord, maxWord]. Initialized to empty (min > max).
+	minWord atomic.Int64
+	maxWord atomic.Int64
 }
 
 // New creates a Store for entries of the given byte size.
@@ -83,26 +83,26 @@ func New(entrySize int, maxBytes int64) (*Store, error) {
 		mmapRelease(data)
 		return nil, fmt.Errorf("mmapcache: mmap bitmap %d bytes: %w", bitmapSize, err)
 	}
-	dirtyBitmap2, err := mmapAnon(coarseBitmapSize)
+	bitmap2, err := mmapAnon(coarseBitmapSize)
 	if err != nil {
 		mmapRelease(data)
 		mmapRelease(bitmap)
-		return nil, fmt.Errorf("mmapcache: mmap dirtyBitmap2 %d bytes: %w", coarseBitmapSize, err)
+		return nil, fmt.Errorf("mmapcache: mmap bitmap2 %d bytes: %w", coarseBitmapSize, err)
 	}
 
 	s := &Store{
-		data:         data,
-		bitmap:       bitmap,
-		dirtyBitmap2: dirtyBitmap2,
-		entrySize:    entrySize,
-		slots:        slots,
-		words:        words,
-		coarseWords:  coarseWords,
-		maxEntries:   int(maxBytes) / entrySize,
+		data:        data,
+		bitmap:      bitmap,
+		bitmap2:     bitmap2,
+		entrySize:   entrySize,
+		slots:       slots,
+		words:       words,
+		coarseWords: coarseWords,
+		maxEntries:  int(maxBytes) / entrySize,
 	}
 	// Initialize range sentinels to "empty".
-	s.dirtyMinWord.Store(math.MaxInt64)
-	s.dirtyMaxWord.Store(-1)
+	s.minWord.Store(math.MaxInt64)
+	s.maxWord.Store(-1)
 	return s, nil
 }
 
@@ -143,22 +143,21 @@ func atomicMaxInt64(addr *atomic.Int64, val int64) {
 	}
 }
 
-// forEachDirtyWord walks the coarse dirty bitmap over the tracked dirty
-// range and invokes fn(w) for each fine-word index w whose coarse bit is
-// set. Empty 4096-slot regions are skipped without inspecting their fine
-// words.
+// forEachWord walks the coarse bitmap over the tracked range and invokes
+// fn(w) for each fine-word index w whose coarse bit is set. Empty
+// 4096-slot regions are skipped without inspecting their fine words.
 //
 // NOT safe for concurrent use with Put.
-func (s *Store) forEachDirtyWord(fn func(w int64)) {
-	lo := s.dirtyMinWord.Load()
-	hi := s.dirtyMaxWord.Load()
+func (s *Store) forEachWord(fn func(w int64)) {
+	lo := s.minWord.Load()
+	hi := s.maxWord.Load()
 	if lo > hi {
 		return
 	}
 	coarseLo := lo / bitsPerWord
 	coarseHi := hi / bitsPerWord
 	for cw := coarseLo; cw <= coarseHi; cw++ {
-		cword := atomic.LoadUint64(bmWordPtr(s.dirtyBitmap2, cw))
+		cword := atomic.LoadUint64(bmWordPtr(s.bitmap2, cw))
 		for cword != 0 {
 			cbit := bits.TrailingZeros64(cword)
 			cword &= cword - 1
@@ -216,8 +215,8 @@ func (s *Store) Put(offset int64, data []byte) error {
 		}
 		if atomic.CompareAndSwapUint64(bmPtr, old, old|mask) {
 			s.totalCount.Add(1)
-			atomicMinInt64(&s.dirtyMinWord, w)
-			atomicMaxInt64(&s.dirtyMaxWord, w)
+			atomicMinInt64(&s.minWord, w)
+			atomicMaxInt64(&s.maxWord, w)
 			// If this is the first bit in the fine word, mark the
 			// corresponding coarse bit so ForEach and Clear can skip
 			// empty regions cheaply. Otherwise the coarse bit was
@@ -225,7 +224,7 @@ func (s *Store) Put(offset int64, data []byte) error {
 			if old == 0 {
 				cw := w / bitsPerWord
 				cmask := uint64(1) << uint(w%bitsPerWord)
-				coarsePtr := bmWordPtr(s.dirtyBitmap2, cw)
+				coarsePtr := bmWordPtr(s.bitmap2, cw)
 				for {
 					oldC := atomic.LoadUint64(coarsePtr)
 					if oldC&cmask != 0 {
@@ -252,17 +251,17 @@ func (s *Store) Put(offset int64, data []byte) error {
 // NOT safe for concurrent use with Get/Put.
 func (s *Store) Clear() {
 	// Walk the coarse bitmap to find fine words with set bits and clear
-	// them in a single pass. This avoids a linear scan over [dirtyMinWord,
-	// dirtyMaxWord], which spans hundreds of millions of fine words for
+	// them in a single pass. This avoids a linear scan over [minWord,
+	// maxWord], which spans hundreds of millions of fine words for
 	// sparse access patterns (e.g. the forest's row-based file layout)
 	// and is prohibitively slow under -race.
-	lo := s.dirtyMinWord.Load()
-	hi := s.dirtyMaxWord.Load()
+	lo := s.minWord.Load()
+	hi := s.maxWord.Load()
 	if lo <= hi {
 		coarseLo := lo / bitsPerWord
 		coarseHi := hi / bitsPerWord
 		for cw := coarseLo; cw <= coarseHi; cw++ {
-			cword := atomic.LoadUint64(bmWordPtr(s.dirtyBitmap2, cw))
+			cword := atomic.LoadUint64(bmWordPtr(s.bitmap2, cw))
 			if cword == 0 {
 				continue
 			}
@@ -272,12 +271,12 @@ func (s *Store) Clear() {
 				w := cw*bitsPerWord + int64(cbit)
 				atomic.StoreUint64(bmWordPtr(s.bitmap, w), 0)
 			}
-			atomic.StoreUint64(bmWordPtr(s.dirtyBitmap2, cw), 0)
+			atomic.StoreUint64(bmWordPtr(s.bitmap2, cw), 0)
 		}
 	}
 	s.totalCount.Store(0)
-	s.dirtyMinWord.Store(math.MaxInt64)
-	s.dirtyMaxWord.Store(-1)
+	s.minWord.Store(math.MaxInt64)
+	s.maxWord.Store(-1)
 	madviseDontNeed(s.data)
 }
 
@@ -291,9 +290,9 @@ func (s *Store) Close() {
 		mmapRelease(s.bitmap)
 		s.bitmap = nil
 	}
-	if s.dirtyBitmap2 != nil {
-		mmapRelease(s.dirtyBitmap2)
-		s.dirtyBitmap2 = nil
+	if s.bitmap2 != nil {
+		mmapRelease(s.bitmap2)
+		s.bitmap2 = nil
 	}
 	s.totalCount.Store(0)
 }
@@ -306,7 +305,7 @@ func (s *Store) Close() {
 func (s *Store) ForEach(fn func(offset int64, data []byte)) {
 	entrySize := int64(s.entrySize)
 	data := s.data
-	s.forEachDirtyWord(func(w int64) {
+	s.forEachWord(func(w int64) {
 		word := atomic.LoadUint64(bmWordPtr(s.bitmap, w))
 		for word != 0 {
 			bit := bits.TrailingZeros64(word)
