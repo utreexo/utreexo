@@ -178,29 +178,6 @@ func (s *Store) forEachDirtyWord(fn func(w int64)) {
 	}
 }
 
-// resetDirty zeros the dirty bitmap (both fine and coarse) over the
-// tracked range, resets totalCount, and reinitializes the dirty range
-// trackers to "empty".
-//
-// NOT safe for concurrent use with Put.
-func (s *Store) resetDirty() {
-	s.forEachDirtyWord(func(w int64) {
-		atomic.StoreUint64(bmWordPtr(s.dirtyBitmap, w), 0)
-	})
-	lo := s.dirtyMinWord.Load()
-	hi := s.dirtyMaxWord.Load()
-	if lo <= hi {
-		coarseLo := lo / bitsPerWord
-		coarseHi := hi / bitsPerWord
-		for cw := coarseLo; cw <= coarseHi; cw++ {
-			atomic.StoreUint64(bmWordPtr(s.dirtyBitmap2, cw), 0)
-		}
-	}
-	s.totalCount.Store(0)
-	s.dirtyMinWord.Store(math.MaxInt64)
-	s.dirtyMaxWord.Store(-1)
-}
-
 // Get retrieves the data at the given byte offset. Returns nil, false if
 // the offset has no cached entry. The returned slice aliases internal storage.
 //
