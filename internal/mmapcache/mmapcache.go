@@ -308,15 +308,39 @@ func (s *Store) Put(offset int64, data []byte) error {
 //
 // NOT safe for concurrent use with Get/Put.
 func (s *Store) Clear() {
-	// Clear presence bitmap in its tracked range.
-	lo := s.presMinWord.Load()
-	hi := s.presMaxWord.Load()
-	for w := lo; w <= hi; w++ {
-		if atomic.LoadUint64(bmWordPtr(s.bitmap, w)) != 0 {
-			atomic.StoreUint64(bmWordPtr(s.bitmap, w), 0)
+	// At Clear time the set of fine words with set bits in the presence
+	// bitmap equals the set with set bits in the dirty bitmap: Put sets
+	// both for the same slot, and Clear is the only thing that zeros
+	// either (Clear is not concurrent-safe with Put). So the coarse
+	// dirty bitmap identifies all fine words to clear for both presence
+	// and dirty, and we can walk it once, clearing both fine bitmaps and
+	// the coarse word inline. This avoids a linear scan over the fine
+	// presence range, which spans hundreds of millions of words for
+	// sparse access patterns (e.g. the forest's row-based file layout)
+	// and is prohibitively slow under -race.
+	lo := s.dirtyMinWord.Load()
+	hi := s.dirtyMaxWord.Load()
+	if lo <= hi {
+		coarseLo := lo / bitsPerWord
+		coarseHi := hi / bitsPerWord
+		for cw := coarseLo; cw <= coarseHi; cw++ {
+			cword := atomic.LoadUint64(bmWordPtr(s.dirtyBitmap2, cw))
+			if cword == 0 {
+				continue
+			}
+			for cword != 0 {
+				cbit := bits.TrailingZeros64(cword)
+				cword &= cword - 1
+				w := cw*bitsPerWord + int64(cbit)
+				atomic.StoreUint64(bmWordPtr(s.bitmap, w), 0)
+				atomic.StoreUint64(bmWordPtr(s.dirtyBitmap, w), 0)
+			}
+			atomic.StoreUint64(bmWordPtr(s.dirtyBitmap2, cw), 0)
 		}
 	}
-	s.resetDirty()
+	s.totalCount.Store(0)
+	s.dirtyMinWord.Store(math.MaxInt64)
+	s.dirtyMaxWord.Store(-1)
 	s.presMinWord.Store(math.MaxInt64)
 	s.presMaxWord.Store(-1)
 	madviseDontNeed(s.data)
