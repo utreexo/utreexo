@@ -8,6 +8,7 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -21,7 +22,10 @@ func testHashFromInt(n int) Hash {
 }
 
 // memFile is an in-memory implementation of io.ReadWriteSeeker for testing.
+// mu protects concurrent ReadAt/WriteAt calls (which are safe on os.File
+// at disjoint offsets but race on a []byte slice).
 type memFile struct {
+	mu     sync.RWMutex
 	data   []byte
 	offset int64
 }
@@ -67,6 +71,8 @@ func (m *memFile) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (m *memFile) ReadAt(p []byte, off int64) (int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if off >= int64(len(m.data)) {
 		return 0, io.EOF
 	}
@@ -101,6 +107,18 @@ func (m *memFile) HashAt(off int64) ([32]byte, error) {
 		return h, io.EOF
 	}
 	return h, nil
+}
+
+func (m *memFile) PutHashAt(hash [32]byte, off int64) error {
+	_, err := m.WriteAt(hash[:], off)
+	return err
+}
+
+func (m *memFile) PutUint32At(val uint32, off int64) error {
+	var buf [4]byte
+	binary.LittleEndian.PutUint32(buf[:], val)
+	_, err := m.WriteAt(buf[:], off)
+	return err
 }
 
 func (m *memFile) Size() int64 {
@@ -573,7 +591,7 @@ func FuzzForestRecord(f *testing.F) {
 			for i, add := range adds {
 				addHashes[i] = add.Hash
 			}
-			_, err = recordForest.Record(addHashes, delHashes)
+			_, _, err = recordForest.Record(addHashes, delHashes)
 			if err != nil {
 				t.Fatalf("block %d: Record error: %v", b, err)
 			}

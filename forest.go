@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/utreexo/utreexo/internal/mmapfile"
 	"github.com/utreexo/utreexo/internal/swisstable"
@@ -68,6 +69,15 @@ type forestFile interface {
 	io.ReaderAt
 	io.WriterAt
 	HashAt(off int64) ([32]byte, error)
+
+	// PutHashAt writes a 32-byte hash by value. Equivalent to WriteAt with
+	// a 32-byte slice, but the value-typed parameter lets callers avoid
+	// the local-buffer-escapes-through-interface heap alloc that the
+	// slice form triggers.
+	PutHashAt(hash [32]byte, off int64) error
+	// PutUint32At writes a 4-byte little-endian uint32 by value. Same
+	// motivation as PutHashAt.
+	PutUint32At(val uint32, off int64) error
 }
 
 // rawFile wraps *os.File so it satisfies forestFile. Used for auxiliary
@@ -79,6 +89,18 @@ func (r rawFile) HashAt(off int64) ([32]byte, error) {
 	var h [32]byte
 	_, err := r.ReadAt(h[:], off)
 	return h, err
+}
+
+func (r rawFile) PutHashAt(hash [32]byte, off int64) error {
+	_, err := r.WriteAt(hash[:], off)
+	return err
+}
+
+func (r rawFile) PutUint32At(val uint32, off int64) error {
+	var buf [4]byte
+	binary.LittleEndian.PutUint32(buf[:], val)
+	_, err := r.WriteAt(buf[:], off)
+	return err
 }
 
 // fileSize asks f for its current byte size, preferring an explicit
@@ -268,6 +290,16 @@ type Forest struct {
 	// Calling Modify while in record mode would corrupt the tree.
 	// Persisted to metaFile (bytes 0-31, padded).
 	recordMode bool
+
+	// lastGeneratedLeaves tracks how many leaves the last root generation
+	// pass processed. Used to make subsequent calls incremental (O(k·log n)
+	// instead of O(n)). Reset to 0 on restart.
+	// Accessed atomically so the root pipeline doesn't need f.mu.
+	lastGeneratedLeaves atomic.Uint64
+
+	// pendingDels accumulates leaf positions deleted by Record since
+	// the last Snapshot. Captured by Snapshot and cleared.
+	pendingDels []uint64
 
 	// wal is set when created via OpenForest; nil for newForest (test/advanced usage).
 	wal *wal
@@ -535,10 +567,17 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 
 // Flush atomically commits all cached writes through the WAL journal.
 // Only valid on forests created via OpenForest.
+//
+// Acquires f.mu to serialize against concurrent writers (Record, Modify,
+// etc.). The deletedLeafPositions bitmap is mutated under f.mu, and the
+// WAL's serializeEntries iterates that bitmap; without the lock, callers
+// running the proof pipeline race with Flush during periodic catch-up flushes.
 func (f *Forest) Flush(bestHash [32]byte) error {
 	if f.wal == nil {
 		return fmt.Errorf("flush: no WAL (use OpenForest to enable)")
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.wal.Flush(bestHash)
 }
 
@@ -688,14 +727,13 @@ func (f *Forest) saveMetadata() error {
 	if f.recordMode {
 		recordModeBuf[0] = 1
 	}
-	if _, err := f.metaFile.WriteAt(recordModeBuf[:], 0); err != nil {
+	if err := f.metaFile.PutHashAt(recordModeBuf, 0); err != nil {
 		return err
 	}
 
 	var numLeavesBuf [32]byte
 	binary.LittleEndian.PutUint64(numLeavesBuf[:], f.NumLeaves)
-	_, err := f.metaFile.WriteAt(numLeavesBuf[:], 32)
-	return err
+	return f.metaFile.PutHashAt(numLeavesBuf, 32)
 }
 
 // ReadConsistencyHash reads the consistency hash from metaFile (bytes 64-95).
@@ -780,10 +818,7 @@ func (f *Forest) appendBlockCount(count uint32) error {
 	if err != nil {
 		return err
 	}
-	var buf [4]byte
-	binary.LittleEndian.PutUint32(buf[:], count)
-	_, err = f.blockCountsFile.WriteAt(buf[:], off)
-	return err
+	return f.blockCountsFile.PutUint32At(count, off)
 }
 
 // add adds a single leaf to the forest.
@@ -1478,58 +1513,6 @@ func (f *Forest) ModifyAndReturnTTLs(adds []Leaf, delHashes []Hash, _ Proof) ([]
 		return nil, fmt.Errorf("save metadata: %w", err)
 	}
 
-	return addIndexes, nil
-}
-
-// Record adds and deletes elements without computing parent hashes.
-// Use during IBD for performance - call HashAll() when done to build the tree.
-// This is equivalent to Modify but defers all hashing until HashAll().
-// Returns the addIndexes for deleted leaves (for TTL tracking).
-func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	// Collect addIndexes and track deletions
-	addIndexes := make([]int32, 0, len(delHashes))
-	for _, delHash := range delHashes {
-		packed, found, err := f.positionMap.Get(delHash)
-		if err != nil {
-			return nil, fmt.Errorf("positionMap.Get: %w", err)
-		}
-		if !found {
-			return nil, fmt.Errorf("delhash %v not found in position map", delHash)
-		}
-		addIndexes = append(addIndexes, unpackIndex(packed))
-		leafPos := unpackPos(packed)
-
-		f.deletedLeafPositions.set(leafPos)
-	}
-
-	// Store leaves without computing parent hashes
-	for i, hash := range adds {
-		if hash != empty {
-			if err := f.positionMap.Set(hash, packPosIndex(f.NumLeaves, int32(i))); err != nil {
-				return nil, fmt.Errorf("positionMap.Set: %w", err)
-			}
-		}
-
-		// Always write the leaf hash (even if empty, so HashAll can read it)
-		err := f.writeHash(f.NumLeaves, hash)
-		if err != nil {
-			return nil, fmt.Errorf("write leaf: %w", err)
-		}
-
-		f.NumLeaves++
-	}
-
-	if err := f.appendBlockCount(uint32(len(adds))); err != nil {
-		return nil, fmt.Errorf("append block count: %w", err)
-	}
-
-	f.recordMode = true
-	if err := f.saveMetadata(); err != nil {
-		return nil, fmt.Errorf("save metadata: %w", err)
-	}
 	return addIndexes, nil
 }
 

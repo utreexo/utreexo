@@ -3,6 +3,7 @@
 package mmapfile
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -85,6 +86,28 @@ func (m *mmapFile) HashAt(off int64) ([32]byte, error) {
 		return [32]byte{}, io.EOF
 	}
 	return *(*[32]byte)(m.data[off : off+32]), nil
+}
+
+func (m *mmapFile) PutHashAt(hash [32]byte, off int64) error {
+	if m.data == nil {
+		return errClosed
+	}
+	if off < 0 || off+32 > m.size {
+		return fmt.Errorf("mmapFile: write at %d beyond size %d", off, m.size)
+	}
+	*(*[32]byte)(m.data[off : off+32]) = hash
+	return nil
+}
+
+func (m *mmapFile) PutUint32At(val uint32, off int64) error {
+	if m.data == nil {
+		return errClosed
+	}
+	if off < 0 || off+4 > m.size {
+		return fmt.Errorf("mmapFile: write at %d beyond size %d", off, m.size)
+	}
+	binary.LittleEndian.PutUint32(m.data[off:off+4], val)
+	return nil
 }
 
 // Size returns the mapped region's size, fixed at Open time.
