@@ -52,15 +52,10 @@ type Store struct {
 	maxEntries  int
 	totalCount  atomic.Int64
 
-	// Atomic range of dirty bitmap word indices. ForEach scans only
-	// [dirtyMinWord, dirtyMaxWord]. Initialized to empty (min > max).
+	// Atomic range of dirty bitmap word indices. ForEach and Clear scan
+	// only [dirtyMinWord, dirtyMaxWord]. Initialized to empty (min > max).
 	dirtyMinWord atomic.Int64
 	dirtyMaxWord atomic.Int64
-
-	// Atomic range of presence bitmap word indices. Clear uses this to
-	// find all present entries.
-	presMinWord atomic.Int64
-	presMaxWord atomic.Int64
 }
 
 // New creates a Store for entries of the given byte size.
@@ -118,8 +113,6 @@ func New(entrySize int, maxBytes int64) (*Store, error) {
 	// Initialize range sentinels to "empty".
 	s.dirtyMinWord.Store(math.MaxInt64)
 	s.dirtyMaxWord.Store(-1)
-	s.presMinWord.Store(math.MaxInt64)
-	s.presMaxWord.Store(-1)
 	return s, nil
 }
 
@@ -256,8 +249,6 @@ func (s *Store) Put(offset int64, data []byte) error {
 			break // already present
 		}
 		if atomic.CompareAndSwapUint64(presPtr, old, old|mask) {
-			atomicMinInt64(&s.presMinWord, w)
-			atomicMaxInt64(&s.presMaxWord, w)
 			break
 		}
 	}
@@ -341,8 +332,6 @@ func (s *Store) Clear() {
 	s.totalCount.Store(0)
 	s.dirtyMinWord.Store(math.MaxInt64)
 	s.dirtyMaxWord.Store(-1)
-	s.presMinWord.Store(math.MaxInt64)
-	s.presMaxWord.Store(-1)
 	madviseDontNeed(s.data)
 }
 
