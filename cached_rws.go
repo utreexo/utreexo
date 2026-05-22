@@ -1,6 +1,7 @@
 package utreexo
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"sync/atomic"
@@ -52,7 +53,11 @@ type cacheStore interface {
 // the underlying file.
 type cachedRWS struct {
 	underlying forestFile
-	cache      cacheStore
+	// cache is the concrete production cache type (build-tagged alias).
+	// Concrete dispatch lets escape analysis see through cache.put so
+	// callers like PutHashAt can pass [32]byte by value without forcing
+	// the local to heap.
+	cache      *cacheImpl
 	maxWritten atomic.Int64 // highest byte offset ever written (logical file size)
 	baseSize   int64        // underlying file size at last flush
 }
@@ -133,17 +138,48 @@ func (c *cachedRWS) WriteAt(p []byte, off int64) (int, error) {
 	if err := c.cache.put(off, p); err != nil {
 		return 0, err
 	}
-	end := off + int64(len(p))
+	c.bumpMaxWritten(off + int64(len(p)))
+	return len(p), nil
+}
+
+// PutHashAt is the value-taking 32-byte WriteAt. Callers pass the hash by
+// value so the local-array-escapes-through-interface heap alloc that the
+// []byte form causes can be avoided at the call site.
+func (c *cachedRWS) PutHashAt(hash [32]byte, off int64) error {
+	if c.cache.entrySize() != 32 {
+		return fmt.Errorf("PutHashAt: entrySize %d != 32", c.cache.entrySize())
+	}
+	if err := c.cache.put(off, hash[:]); err != nil {
+		return err
+	}
+	c.bumpMaxWritten(off + 32)
+	return nil
+}
+
+// PutUint32At is the value-taking 4-byte WriteAt. Same motivation as PutHashAt.
+func (c *cachedRWS) PutUint32At(val uint32, off int64) error {
+	if c.cache.entrySize() != 4 {
+		return fmt.Errorf("PutUint32At: entrySize %d != 4", c.cache.entrySize())
+	}
+	var buf [4]byte
+	binary.LittleEndian.PutUint32(buf[:], val)
+	if err := c.cache.put(off, buf[:]); err != nil {
+		return err
+	}
+	c.bumpMaxWritten(off + 4)
+	return nil
+}
+
+func (c *cachedRWS) bumpMaxWritten(end int64) {
 	for {
 		old := c.maxWritten.Load()
 		if end <= old {
-			break
+			return
 		}
 		if c.maxWritten.CompareAndSwap(old, end) {
-			break
+			return
 		}
 	}
-	return len(p), nil
 }
 
 // Flush writes all cached data to the underlying file and clears the cache.
@@ -183,6 +219,38 @@ func (c *cachedRWS) Close() {
 // FlushNeeded returns true if the cache has exceeded its memory threshold.
 func (c *cachedRWS) FlushNeeded() bool {
 	return c.cache.overflowed()
+}
+
+// Truncate shrinks the underlying file to size and updates cachedRWS's
+// own size tracking. Used by reconciliation logic at open time to trim
+// stale tail data (e.g. block-count entries left behind by an unflushed
+// undo before a crash). The underlying must satisfy Truncate; rawFile
+// (wrapping *os.File) and memFile do, mmapFile does not.
+//
+// maxWritten is clamped via CAS rather than a plain Store so this stays
+// safe if a future caller races it against WriteAt -- the inverse of
+// bumpMaxWritten, lowering instead of raising.
+func (c *cachedRWS) Truncate(size int64) error {
+	t, ok := c.underlying.(interface{ Truncate(int64) error })
+	if !ok {
+		return fmt.Errorf("cachedRWS: underlying does not support Truncate")
+	}
+	if err := t.Truncate(size); err != nil {
+		return err
+	}
+	if size < c.baseSize {
+		c.baseSize = size
+	}
+	for {
+		old := c.maxWritten.Load()
+		if size >= old {
+			break
+		}
+		if c.maxWritten.CompareAndSwap(old, size) {
+			break
+		}
+	}
+	return nil
 }
 
 // resetAfterFlush clears the cache and updates baseSize to reflect the

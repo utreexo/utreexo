@@ -57,7 +57,7 @@ func dataFileSize(forestRows uint8) int64 {
 // Assert that Forest implements the Utreexo interface.
 var _ Utreexo = (*Forest)(nil)
 
-// forestFile is the interface required for the main data file.
+// forestFile is the interface required for the cachedRWS underlying file.
 // All I/O is positional; there is no shared seek position to coordinate
 // across goroutines.
 //
@@ -246,9 +246,9 @@ func (b *deletedBitmap) count() int {
 type Forest struct {
 	mu sync.RWMutex // protects all fields below
 
-	file            forestFile
-	blockCountsFile forestFile // stores uint32 add-count per block, 4 bytes each
-	metaFile        forestFile // stores recordMode (bytes 0-31) + consistency hash (bytes 32-63)
+	file            *cachedRWS
+	blockCountsFile *cachedRWS // stores uint32 add-count per block, 4 bytes each
+	metaFile        *cachedRWS // stores recordMode (bytes 0-31) + consistency hash (bytes 32-63)
 	NumLeaves       uint64
 	forestRows      uint8 // Fixed maximum rows for stable position mapping
 
@@ -297,9 +297,9 @@ func readBlockCounts(file io.ReaderAt, size int64) ([]uint32, error) {
 	return counts, nil
 }
 
-// newForest creates a new Forest backed by the given file.
-// The file must satisfy the forestFile interface (ReadAt + WriteAt);
-// *os.File satisfies it natively.
+// newForest creates a new Forest backed by the given *cachedRWS files.
+// Production callers obtain these from a WAL via Cached(i); tests use
+// the memCached / wrapMem helpers to wrap an in-memory file.
 // blockCountsFile stores the uint32 add-count per block; numLeaves is derived
 // from the cumulative sum of all block counts.
 // metaFile stores recordMode (bytes 0-31), numLeaves (bytes 32-63), and consistency hash (bytes 64-95).
@@ -308,7 +308,7 @@ func readBlockCounts(file io.ReaderAt, size int64) ([]uint32, error) {
 // load it with loadDeletedBitmap.
 // posMapCtrlPath and posMapSlotsPath are file paths for the Swiss Table position map.
 // forestRows sets the maximum tree height (determines max leaves = 2^forestRows).
-func newForest(file forestFile, blockCountsFile, metaFile forestFile, bitmap *deletedBitmap, posMapCtrlPath, posMapSlotsPath string, forestRows uint8, expectedMaxLeaves uint64) (*Forest, error) {
+func newForest(file, blockCountsFile, metaFile *cachedRWS, bitmap *deletedBitmap, posMapCtrlPath, posMapSlotsPath string, forestRows uint8, expectedMaxLeaves uint64) (*Forest, error) {
 	if file == nil || blockCountsFile == nil || metaFile == nil {
 		return nil, fmt.Errorf("one of the given files are nil")
 	}
@@ -345,10 +345,8 @@ func newForest(file forestFile, blockCountsFile, metaFile forestFile, bitmap *de
 		blockTotal -= uint64(counts[len(counts)-1])
 		counts = counts[:len(counts)-1]
 	}
-	if truncater, ok := blockCountsFile.(interface{ Truncate(int64) error }); ok {
-		if err := truncater.Truncate(int64(len(counts)) * 4); err != nil {
-			return nil, fmt.Errorf("trim block counts: %w", err)
-		}
+	if err := blockCountsFile.Truncate(int64(len(counts)) * 4); err != nil {
+		return nil, fmt.Errorf("trim block counts: %w", err)
 	}
 
 	// Read consistency hash from metaFile (bytes 64-95, written atomically by WAL).

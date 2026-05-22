@@ -8,6 +8,11 @@ import "github.com/utreexo/utreexo/internal/mmapcache"
 // interface used by cachedRWS.
 type mmapCacheStore struct{ s *mmapcache.Store }
 
+// cacheImpl is the concrete cache type cachedRWS stores. Using a concrete
+// type (rather than the cacheStore interface) lets escape analysis see
+// through cache.put so callers can pass values without heap-allocating.
+type cacheImpl = mmapCacheStore
+
 func newMmapCacheStore(entrySize int, maxBytes int64) (*mmapCacheStore, error) {
 	s, err := mmapcache.New(entrySize, maxBytes)
 	if err != nil {

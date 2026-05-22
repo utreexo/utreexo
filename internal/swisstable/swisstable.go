@@ -269,51 +269,53 @@ func (m *SwissPositionMap) Get(hash [32]byte) (uint64, bool, error) {
 	return 0, false, nil
 }
 
-// SetBatch inserts multiple new hash→packed mappings. The caller guarantees
-// that none of the hashes already exist in the table (e.g. new leaves from
-// Record). This skips duplicate checking (matchH2 + verifyHash) and
-// prefetches ctrl/slots memory 4 iterations ahead to hide mmap latency.
+// Batch is a handle for inserting up to maxEntries hash→packed pairs into a
+// SwissPositionMap after a one-time resize. It lets the caller drive the
+// insert loop directly, avoiding intermediate slices for hashes and packed
+// values. Pre-resize means each Insert skips the load-factor check; no
+// duplicate check is performed (the caller guarantees new keys).
 //
-// NOT safe for concurrent use. Must not be called with hashes that are
-// already in the table — use Set for upserts.
-func (m *SwissPositionMap) SetBatch(hashes [][32]byte, packeds []uint64) error {
-	n := uint64(len(hashes))
-	if n == 0 {
-		return nil
-	}
+// NOT safe for concurrent use. The Batch is invalidated by any other
+// mutation of the map (Set, Delete, another BeginBatch).
+type Batch struct {
+	m         *SwissPositionMap
+	numGroups uint64
+	ctrl      []byte
+	slots     []byte
+}
 
-	// Pre-resize once for the entire batch.
-	for (m.count+n)*10 > m.numSlots*7 {
+// BeginBatch pre-resizes the table to hold maxEntries additional inserts and
+// returns a Batch for inserting them. See Batch for the contract.
+func (m *SwissPositionMap) BeginBatch(maxEntries uint64) (Batch, error) {
+	for (m.count+maxEntries)*10 > m.numSlots*7 {
 		if err := m.resize(); err != nil {
-			return err
+			return Batch{}, err
 		}
 	}
+	return Batch{
+		m:         m,
+		numGroups: m.numGroups,
+		ctrl:      m.ctrl,
+		slots:     m.slots,
+	}, nil
+}
 
-	numGroups := m.numGroups
-	ctrl := m.ctrl
-	slots := m.slots
-
-	for i := range hashes {
-		h1, h2 := splitHash(hashes[i])
-		start := h1 % numGroups
-
-		inserted := false
-		for j := range numGroups {
-			base := ((start + j) % numGroups) * groupSize
-			if avail := matchEmptyOrDeleted(ctrl[base : base+groupSize]); avail != 0 {
-				slot := base + uint64(bits.TrailingZeros16(avail))
-				ctrl[slot] = h2
-				binary.LittleEndian.PutUint64(slots[slot*8:], packeds[i])
-				m.count++
-				inserted = true
-				break
-			}
-		}
-		if !inserted {
-			return fmt.Errorf("swiss table SetBatch: no slot (count=%d, slots=%d)", m.count, m.numSlots)
+// Insert adds hash→packed to the table without duplicate checking or
+// load-factor resize. The caller must not exceed maxEntries inserts.
+func (b *Batch) Insert(hash [32]byte, packed uint64) error {
+	h1, h2 := splitHash(hash)
+	start := h1 % b.numGroups
+	for j := range b.numGroups {
+		base := ((start + j) % b.numGroups) * groupSize
+		if avail := matchEmptyOrDeleted(b.ctrl[base : base+groupSize]); avail != 0 {
+			slot := base + uint64(bits.TrailingZeros16(avail))
+			b.ctrl[slot] = h2
+			binary.LittleEndian.PutUint64(b.slots[slot*8:], packed)
+			b.m.count++
+			return nil
 		}
 	}
-	return nil
+	return fmt.Errorf("swiss batch insert: no slot (count=%d, slots=%d)", b.m.count, b.m.numSlots)
 }
 
 // Set stores a hash -> packed position mapping, resizing the table if needed.

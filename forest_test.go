@@ -30,6 +30,30 @@ func newMemFile() *memFile {
 	return &memFile{data: make([]byte, 0)}
 }
 
+// memCached creates a *cachedRWS over a fresh in-memory file. Tests use
+// this to construct Forest file fields, which are typed concretely as
+// *cachedRWS so escape analysis can see through writes (avoiding the
+// alloc the forestFile-interface form would force).
+func memCached(t testing.TB, entrySize int) *cachedRWS {
+	t.Helper()
+	return wrapMem(t, newMemFile(), entrySize)
+}
+
+// wrapMem wraps an existing memFile in a *cachedRWS. Used by reload-style
+// tests that share an underlying memFile across multiple Forest instances.
+// initialSize is taken from the memFile so cachedRWS knows the underlying
+// already has data — otherwise its EOF check would short-circuit reads.
+// Registers a Cleanup so the cachedRWS's mmap regions are released when
+// the test ends; without this, fuzz tests rapidly exhaust the kernel's
+// overcommit budget creating fresh 1 TiB virtual regions per Forest.
+func wrapMem(t testing.TB, m *memFile, entrySize int) *cachedRWS {
+	t.Helper()
+	c, err := newCachedRWS(m, entrySize, 0, m.Size())
+	require.NoError(t, err)
+	t.Cleanup(c.Close)
+	return c
+}
+
 func (m *memFile) Read(p []byte) (n int, err error) {
 	if m.offset >= int64(len(m.data)) {
 		// Extend with zeros for reads beyond current size
@@ -166,7 +190,7 @@ func newTestForest(t *testing.T, forestRows uint8) *Forest {
 	t.Helper()
 	tmpDir := t.TempDir()
 	forest, err := newForest(
-		newMemFile(), newMemFile(), newMemFile(), nil,
+		memCached(t, 32), memCached(t, 4), memCached(t, 32), nil,
 		tmpDir+"/ctrl", tmpDir+"/slots",
 		forestRows, 0,
 	)
@@ -454,9 +478,8 @@ func FuzzForestChain(f *testing.F) {
 		// simulate blocks with simchain
 		sc := newSimChainWithSeed(duration, seed)
 
-		memFile := newMemFile()
 		tmpDir := t.TempDir()
-		forest, err := newForest(memFile, newMemFile(), newMemFile(), nil, tmpDir+"/ctrl", tmpDir+"/slots", 16, 0)
+		forest, err := newForest(memCached(t, 32), memCached(t, 4), memCached(t, 32), nil, tmpDir+"/ctrl", tmpDir+"/slots", 16, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -541,14 +564,14 @@ func FuzzForestRecord(f *testing.F) {
 
 		// Forest using normal Modify
 		tmpDir1 := t.TempDir()
-		modifyForest, err := newForest(newMemFile(), newMemFile(), newMemFile(), nil, tmpDir1+"/ctrl", tmpDir1+"/slots", 16, 0)
+		modifyForest, err := newForest(memCached(t, 32), memCached(t, 4), memCached(t, 32), nil, tmpDir1+"/ctrl", tmpDir1+"/slots", 16, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		// Forest using Record + HashAll
 		tmpDir2 := t.TempDir()
-		recordForest, err := newForest(newMemFile(), newMemFile(), newMemFile(), nil, tmpDir2+"/ctrl", tmpDir2+"/slots", 16, 0)
+		recordForest, err := newForest(memCached(t, 32), memCached(t, 4), memCached(t, 32), nil, tmpDir2+"/ctrl", tmpDir2+"/slots", 16, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -650,9 +673,8 @@ func FuzzTreeBuilding(f *testing.F) {
 			}
 		}
 
-		memFile := newMemFile()
 		tmpDir := t.TempDir()
-		forest, err := newForest(memFile, newMemFile(), newMemFile(), nil, tmpDir+"/ctrl", tmpDir+"/slots", 17, 0)
+		forest, err := newForest(memCached(t, 32), memCached(t, 4), memCached(t, 32), nil, tmpDir+"/ctrl", tmpDir+"/slots", 17, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -752,7 +774,7 @@ func TestForestNoFlushBeforeWAL(t *testing.T) {
 	bitmap2, err := loadDeletedBitmap(underlyingDelFile, underlyingDelFile.Size())
 	require.NoError(t, err)
 	forest2, err := newForest(
-		underlyingFile, underlyingBlockCountsFile, underlyingMetaFile, bitmap2,
+		wrapMem(t, underlyingFile, 32), wrapMem(t, underlyingBlockCountsFile, 4), wrapMem(t, underlyingMetaFile, 32), bitmap2,
 		tmpDir2+"/ctrl", tmpDir2+"/slots", 10, 0,
 	)
 	require.NoError(t, err)
@@ -818,7 +840,7 @@ func TestForestCrashRecovery(t *testing.T) {
 	preRecoveryBitmap, err := loadDeletedBitmap(delFile, delFile.Size())
 	require.NoError(t, err)
 	preRecoveryForest, err := newForest(
-		mainFile, blockCountsFile, metaFile, preRecoveryBitmap,
+		wrapMem(t, mainFile, 32), wrapMem(t, blockCountsFile, 4), wrapMem(t, metaFile, 32), preRecoveryBitmap,
 		tmpDir2+"/ctrl", tmpDir2+"/slots", 16, 0,
 	)
 	require.NoError(t, err)
@@ -1002,6 +1024,13 @@ func TestForestRebuildPositionMap(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.Equal(t, uint64(0), forest.positionMap.Count(), "positionMap should be empty after clearing")
+
+	// rebuildPositionMap does multi-entry batch reads, which the cachedRWS
+	// cache (single-entry storage) cannot serve. Flush so the reads go
+	// through to the underlying memFile. In production, rebuild only runs
+	// at startup with an empty cache, so this happens implicitly.
+	require.NoError(t, forest.file.Flush())
+	require.NoError(t, forest.blockCountsFile.Flush())
 
 	err := forest.rebuildPositionMap()
 	require.NoError(t, err)
@@ -1259,7 +1288,7 @@ func TestForestBlockCountsReconciliation(t *testing.T) {
 			// Call newForest which triggers reconciliation and rebuildPositionMap.
 			tmpDir := t.TempDir()
 			forest, err := newForest(
-				mainFile, blockCountsFile, metaFile, nil,
+				wrapMem(t, mainFile, 32), wrapMem(t, blockCountsFile, 4), wrapMem(t, metaFile, 32), nil,
 				tmpDir+"/ctrl", tmpDir+"/slots", 10, 0,
 			)
 			require.NoError(t, err)
