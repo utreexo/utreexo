@@ -576,6 +576,10 @@ func FuzzForestRecord(f *testing.F) {
 			t.Fatal(err)
 		}
 
+		if err := recordForest.EnterRecordMode(); err != nil {
+			t.Fatal(err)
+		}
+
 		// Process all blocks with both approaches
 		for b := 0; b <= 100; b++ {
 			adds, _, delHashes := sc.NextBlock(numAdds)
@@ -618,6 +622,51 @@ func FuzzForestRecord(f *testing.F) {
 			t.Fatalf("HashAll error: %v", err)
 		}
 	})
+}
+
+func TestMutationsBlockedInRecordMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	forest, err := newForest(memCached(t, 32), memCached(t, 4), memCached(t, 32), nil, tmpDir+"/ctrl", tmpDir+"/slots", 16, 0)
+	require.NoError(t, err)
+	require.NoError(t, forest.EnterRecordMode())
+
+	// While in record mode the hashing mutation paths must refuse to run. Each
+	// guard fires before any argument is read, so empty inputs are fine.
+	err = forest.Modify(nil, nil, Proof{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "record mode")
+
+	_, err = forest.ModifyAndReturnTTLs(nil, nil, Proof{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "record mode")
+
+	err = forest.Undo(nil, Proof{}, nil, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "record mode")
+}
+
+func TestRecordRequiresRecordMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	forest, err := newForest(memCached(t, 32), memCached(t, 4), memCached(t, 32), nil, tmpDir+"/ctrl", tmpDir+"/slots", 16, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	require.False(t, forest.IsRecordMode())
+
+	// Record before entering record mode is rejected, and leaves the mode unchanged.
+	_, _, err = forest.Record([]Hash{{0x01}}, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "EnterRecordMode")
+	require.False(t, forest.IsRecordMode())
+
+	// After EnterRecordMode, Record runs.
+	if err := forest.EnterRecordMode(); err != nil {
+		t.Fatal(err)
+	}
+	require.True(t, forest.IsRecordMode())
+	if _, _, err := forest.Record([]Hash{{0x01}}, nil); err != nil {
+		t.Fatalf("Record after EnterRecordMode: %v", err)
+	}
 }
 
 // FuzzTreeBuilding tests that the trees built from adding empty hashes for deleted leaves

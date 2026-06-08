@@ -5,12 +5,17 @@ import (
 	"sync"
 )
 
-// Record adds and deletes elements without computing parent hashes.
+// Record adds and deletes elements without computing parent hashes. The forest
+// must be in record mode first (see EnterRecordMode); Record errors otherwise.
 // Use during IBD for performance; call HashAll or GenerateRoots when done to
 // build the tree. It returns add indexes and leaf positions for deleted leaves.
 func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, []uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if !f.recordMode {
+		return nil, nil, fmt.Errorf("cannot call Record outside record mode; call EnterRecordMode first")
+	}
 
 	// writeAddHashes runs in a background goroutine: the file offsets it
 	// writes are disjoint from positionMap and deletedLeafPositions, so it
@@ -60,7 +65,6 @@ func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, []uint64, error
 		return nil, nil, fmt.Errorf("append block count: %w", err)
 	}
 
-	f.recordMode = true
 	if err := f.saveMetadata(); err != nil {
 		return nil, nil, fmt.Errorf("save metadata: %w", err)
 	}
@@ -149,6 +153,25 @@ func (f *Forest) writeAddHashes(adds []Hash, startPos uint64) error {
 		if err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// EnterRecordMode transitions the forest into record mode, the deferred-hashing
+// state in which Record runs. The normal mutation paths (Modify, Undo,
+// ModifyAndReturnTTLs) refuse to run until HashAll or ExitRecordMode returns the
+// forest to normal mode.
+func (f *Forest) EnterRecordMode() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.recordMode {
+		return nil
+	}
+
+	f.recordMode = true
+	if err := f.saveMetadata(); err != nil {
+		return fmt.Errorf("save metadata: %w", err)
 	}
 	return nil
 }
