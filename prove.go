@@ -2304,41 +2304,41 @@ func (c *CachingScheduleTracker) String() string {
 	// Write deletions
 	sb.WriteString("  deletions:\n")
 	for i, del := range c.deletions {
-		sb.WriteString(fmt.Sprintf("    [%d]: %v (translated %v)\n",
-			i, del, translatePositions(del, CSTTotalRows, TreeRows(c.numLeaves[i]))))
+		fmt.Fprintf(&sb, "    [%d]: %v (translated %v)\n",
+			i, del, translatePositions(del, CSTTotalRows, TreeRows(c.numLeaves[i])))
 	}
 
 	// Write ttls
 	sb.WriteString("  ttls:\n")
 	for i, ttl := range c.ttls {
-		sb.WriteString(fmt.Sprintf("    [%d]: %v\n",
-			i, ttl))
+		fmt.Fprintf(&sb, "    [%d]: %v\n",
+			i, ttl)
 	}
 
 	// Write numAdds
-	sb.WriteString(fmt.Sprintf("  numAdds: %v\n", c.numAdds))
+	fmt.Fprintf(&sb, "  numAdds: %v\n", c.numAdds)
 
 	// Write numLeaves
-	sb.WriteString(fmt.Sprintf("  numLeaves: %v\n", c.numLeaves))
+	fmt.Fprintf(&sb, "  numLeaves: %v\n", c.numLeaves)
 
 	// Write toDestroy
 	sb.WriteString("  toDestroy:\n")
 	for i, td := range c.toDestroy {
-		sb.WriteString(fmt.Sprintf("    [%d]: %v (translated %v)\n",
-			i, td, translatePositions(td, CSTTotalRows, TreeRows(c.numLeaves[i]))))
+		fmt.Fprintf(&sb, "    [%d]: %v (translated %v)\n",
+			i, td, translatePositions(td, CSTTotalRows, TreeRows(c.numLeaves[i])))
 	}
 
 	// Write roots
 	sb.WriteString("  roots:\n")
 	for i, rootList := range c.roots {
-		sb.WriteString(fmt.Sprintf("    [%d]: [", i))
+		fmt.Fprintf(&sb, "    [%d]: [", i)
 		for j, root := range rootList {
 			if j > 0 {
 				sb.WriteString(", ")
 			}
-			sb.WriteString(fmt.Sprintf("{pos: %d (translated %d), isZombie: %t}",
+			fmt.Fprintf(&sb, "{pos: %d (translated %d), isZombie: %t}",
 				root.pos, translatePos(root.pos, CSTTotalRows, TreeRows(c.numLeaves[i])),
-				root.isZombie))
+				root.isZombie)
 		}
 		sb.WriteString("]\n")
 	}
