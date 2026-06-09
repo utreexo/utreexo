@@ -4,6 +4,39 @@ import (
 	"github.com/utreexo/utreexo/internal/rowwalk"
 )
 
+// processAddsParallel rebuilds the interior hashes for the leaves appended
+// between prevLeaves and totalLeaves, walking each affected position up to its
+// root one row at a time. At every row the rehash collapses each appended
+// sibling pair to a single parent computation; the per-row work is fanned
+// across the pipeline worker pool once a row reaches minParallelSize.
+func (f *Forest) processAddsParallel(prevLeaves, totalLeaves uint64, forestRows uint8) error {
+	numAdds := int(totalLeaves - prevLeaves)
+	if numAdds == 0 {
+		return nil
+	}
+
+	affected := make([]uint64, numAdds)
+	for i := range affected {
+		affected[i] = prevLeaves + uint64(i)
+	}
+
+	parents := make([]uint64, numAdds)
+	nextAffected := make([]uint64, 0, numAdds)
+
+	for row := uint8(0); row < forestRows && len(affected) > 0; row++ {
+		var err error
+		parents, err = f.rehashAddRow(affected, parents, row, totalLeaves, forestRows)
+		if err != nil {
+			return err
+		}
+
+		nextAffected = rowwalk.CollectNext(parents, nextAffected)
+		affected, nextAffected = nextAffected, affected
+	}
+
+	return nil
+}
+
 // rehashAddRow recomputes the parent of every appended position in affected
 // for one row, writing each new parent hash to the file, and returns those
 // parent positions. The right half of a sibling pair is recorded with
