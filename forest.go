@@ -677,19 +677,20 @@ func (f *Forest) loadMetadata() error {
 	return nil
 }
 
-// saveMetadata writes recordMode (bytes 0-31) and numLeaves (bytes 32-63)
-// to the metaFile. Each field is written as a separate 32-byte entry to
-// match the cachedRWS entry size. Both writes go through the WAL-protected
-// cachedRWS, so they are crash-safe.
-func (f *Forest) saveMetadata() error {
+// saveRecordMode writes the recordMode flag to the metaFile (bytes 0-31, with
+// the flag in byte 0). The write goes through the WAL-protected cachedRWS, so
+// it is crash-safe.
+func (f *Forest) saveRecordMode() error {
 	var recordModeBuf [32]byte
 	if f.recordMode {
 		recordModeBuf[0] = 1
 	}
-	if err := f.metaFile.PutHashAt(recordModeBuf, 0); err != nil {
-		return err
-	}
+	return f.metaFile.PutHashAt(recordModeBuf, 0)
+}
 
+// saveNumLeaves writes numLeaves to the metaFile (bytes 32-63). The write goes
+// through the WAL-protected cachedRWS, so it is crash-safe.
+func (f *Forest) saveNumLeaves() error {
 	var numLeavesBuf [32]byte
 	binary.LittleEndian.PutUint64(numLeavesBuf[:], f.NumLeaves)
 	return f.metaFile.PutHashAt(numLeavesBuf, 32)
@@ -1179,8 +1180,8 @@ func (f *Forest) undoInternal(numAdds uint64, delHashes []Hash) error {
 	// Persist the decremented numLeaves through the WAL-protected meta file.
 	// The stale block counts entry is left on disk; it will be trimmed on
 	// the next startup if a crash occurs before the next flush.
-	if err := f.saveMetadata(); err != nil {
-		return fmt.Errorf("save metadata: %w", err)
+	if err := f.saveNumLeaves(); err != nil {
+		return fmt.Errorf("save num leaves: %w", err)
 	}
 
 	// Step 2: Look up deleted positions from positionMap
@@ -1416,8 +1417,8 @@ func (f *Forest) Modify(adds []Leaf, delHashes []Hash, _ Proof) error {
 	if err := f.appendBlockCount(uint32(len(adds))); err != nil {
 		return fmt.Errorf("append block count: %w", err)
 	}
-	if err := f.saveMetadata(); err != nil {
-		return fmt.Errorf("save metadata: %w", err)
+	if err := f.saveNumLeaves(); err != nil {
+		return fmt.Errorf("save num leaves: %w", err)
 	}
 
 	return nil
@@ -1468,8 +1469,8 @@ func (f *Forest) ModifyAndReturnTTLs(adds []Leaf, delHashes []Hash, _ Proof) ([]
 	if err := f.appendBlockCount(uint32(len(adds))); err != nil {
 		return nil, fmt.Errorf("append block count: %w", err)
 	}
-	if err := f.saveMetadata(); err != nil {
-		return nil, fmt.Errorf("save metadata: %w", err)
+	if err := f.saveNumLeaves(); err != nil {
+		return nil, fmt.Errorf("save num leaves: %w", err)
 	}
 
 	return addIndexes, nil
@@ -1532,8 +1533,8 @@ func (f *Forest) HashAll() error {
 	}
 
 	f.recordMode = false
-	if err := f.saveMetadata(); err != nil {
-		return fmt.Errorf("save metadata: %w", err)
+	if err := f.saveRecordMode(); err != nil {
+		return fmt.Errorf("save record mode: %w", err)
 	}
 
 	return nil

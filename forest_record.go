@@ -65,8 +65,8 @@ func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, []uint64, error
 		return nil, nil, fmt.Errorf("append block count: %w", err)
 	}
 
-	if err := f.saveMetadata(); err != nil {
-		return nil, nil, fmt.Errorf("save metadata: %w", err)
+	if err := f.saveNumLeaves(); err != nil {
+		return nil, nil, fmt.Errorf("save num leaves: %w", err)
 	}
 	return addIndexes, delPositions, nil
 }
@@ -170,8 +170,8 @@ func (f *Forest) EnterRecordMode() error {
 	}
 
 	f.recordMode = true
-	if err := f.saveMetadata(); err != nil {
-		return fmt.Errorf("save metadata: %w", err)
+	if err := f.saveRecordMode(); err != nil {
+		return fmt.Errorf("save record mode: %w", err)
 	}
 	return nil
 }
@@ -187,8 +187,8 @@ func (f *Forest) ExitRecordMode() error {
 	}
 
 	f.recordMode = false
-	if err := f.saveMetadata(); err != nil {
-		return fmt.Errorf("save metadata: %w", err)
+	if err := f.saveRecordMode(); err != nil {
+		return fmt.Errorf("save record mode: %w", err)
 	}
 	return nil
 }

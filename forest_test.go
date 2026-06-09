@@ -669,6 +669,52 @@ func TestRecordRequiresRecordMode(t *testing.T) {
 	}
 }
 
+func TestMetadataFieldsPersistIndependently(t *testing.T) {
+	tmpDir := t.TempDir()
+	forest, err := newForest(memCached(t, 32), memCached(t, 4), memCached(t, 32), nil, tmpDir+"/ctrl", tmpDir+"/slots", 16, 0)
+	require.NoError(t, err)
+
+	// readMeta returns the recordMode flag (byte 0 of the entry at offset 0) and
+	// numLeaves (the entry at offset 32) as currently stored in the meta file.
+	readMeta := func() (recordMode bool, numLeaves uint64) {
+		rmEntry, err := forest.metaFile.HashAt(0)
+		require.NoError(t, err)
+		nlEntry, err := forest.metaFile.HashAt(32)
+		require.NoError(t, err)
+		return rmEntry[0] != 0, binary.LittleEndian.Uint64(nlEntry[:])
+	}
+
+	// Persist a baseline. Reading the flag back as true (a non-default value)
+	// confirms saveRecordMode actually wrote it; a never-stored flag would read
+	// back as EOF or false.
+	forest.recordMode = true
+	forest.NumLeaves = 42
+	require.NoError(t, forest.saveRecordMode())
+	require.NoError(t, forest.saveNumLeaves())
+	rm, nl := readMeta()
+	require.True(t, rm)
+	require.Equal(t, uint64(42), nl)
+
+	// saveNumLeaves updates numLeaves and must not clobber the flag: the
+	// in-memory flag is set to false as a trap, but the stored flag stays true.
+	forest.recordMode = false
+	forest.NumLeaves = 100
+	require.NoError(t, forest.saveNumLeaves())
+	rm, nl = readMeta()
+	require.True(t, rm)
+	require.Equal(t, uint64(100), nl)
+
+	// saveRecordMode updates the flag (a real true->false transition) and must
+	// not clobber numLeaves: the in-memory count is set to 999 as a trap, but
+	// the stored count stays 100.
+	forest.recordMode = false
+	forest.NumLeaves = 999
+	require.NoError(t, forest.saveRecordMode())
+	rm, nl = readMeta()
+	require.False(t, rm)
+	require.Equal(t, uint64(100), nl)
+}
+
 // FuzzTreeBuilding tests that the trees built from adding empty hashes for deleted leaves
 // have the same roots as the ones that added the actual value of the leaves and then deleted
 // them.
