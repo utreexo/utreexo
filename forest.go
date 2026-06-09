@@ -1014,31 +1014,30 @@ func (f *Forest) rehashToRoot(pos uint64, hash Hash) error {
 func (f *Forest) GetRoots() []Hash {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	return f.getRoots()
+	roots, _, _ := f.getRoots(f.NumLeaves)
+	return roots
 }
 
-// getRoots is the internal implementation of GetRoots.
+// getRoots reads the hashes at the forest's root positions for numLeaves,
+// yielding empty for a root that is itself a leaf marked deleted.
 //
 // This function is NOT safe for concurrent access.
-func (f *Forest) getRoots() []Hash {
-	rootPositions := RootPositions(f.NumLeaves, f.forestRows)
-
+func (f *Forest) getRoots(numLeaves uint64) ([]Hash, uint64, error) {
+	rootPositions := RootPositions(numLeaves, f.forestRows)
 	roots := make([]Hash, len(rootPositions))
 	for i, pos := range rootPositions {
-		// Check if this root position is a deleted leaf - return empty if so
 		if f.deletedLeafPositions.isSet(pos) {
 			roots[i] = empty
 			continue
 		}
-		hash, err := f.readHash(pos)
+		hash, err := f.readHashAt(pos)
 		if err != nil {
-			roots[i] = empty
-		} else {
-			roots[i] = hash
+			return nil, 0, fmt.Errorf("read root at position %d: %w", pos, err)
 		}
+		roots[i] = hash
 	}
 
-	return roots
+	return roots, numLeaves, nil
 }
 
 // getHash returns the hash at the logical position of the forest.

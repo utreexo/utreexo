@@ -131,7 +131,7 @@ var mainPool = newWorkerPool(numWorkers)
 // with the positionMap Get fan-out on mainPool.
 var recordBgPool = newWorkerPool(numWorkers)
 
-// pipelinePool is used by the pipeline goroutine (GenerateRoots, GenerateProof).
+// pipelinePool runs the per-row rehash work dispatched by runRowWork.
 var pipelinePool = newWorkerPool(numWorkers)
 
 // MainParallelDo splits n work items across the main thread's persistent pool
