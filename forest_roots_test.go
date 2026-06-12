@@ -323,3 +323,78 @@ func TestRehashDeletionsAndCaptureProof(t *testing.T) {
 		})
 	}
 }
+
+// TestRehashAndProveRootsMatchModify drives the same add/delete history through
+// the normal Modify path and through Record + RehashAndProve, asserting after
+// every block that RehashAndProve returns the same roots and a proof of the
+// block's deletions that verifies. The reference forest applies each block in
+// two steps — adds, then deletions — so the roots captured in between, with the
+// adds in and the deletions still present, are exactly the state the proof must
+// verify against. Per-block calls exercise the incremental path: each pass only
+// rehashes the leaves appended since the previous one. numAdds keeps every add
+// rehash past minParallelSize, and the deletion rows cross it once the sim
+// chain's spends ramp up, so the worker-pool path runs (and is exercised under
+// the race detector).
+func TestRehashAndProveRootsMatchModify(t *testing.T) {
+	const (
+		numAdds  = uint32(8192)
+		duration = uint32(0x07)
+		seed     = int64(0x07)
+		blocks   = 7
+	)
+	sc := newSimChainWithSeed(duration, seed)
+
+	dir1 := t.TempDir()
+	modifyForest, err := newForest(memCached(t, 32), memCached(t, 4), memCached(t, 32), nil, dir1+"/ctrl", dir1+"/slots", 16, 0)
+	require.NoError(t, err)
+
+	dir2 := t.TempDir()
+	recordForest, err := newForest(memCached(t, 32), memCached(t, 4), memCached(t, 32), nil, dir2+"/ctrl", dir2+"/slots", 16, 0)
+	require.NoError(t, err)
+	require.NoError(t, recordForest.EnterRecordMode())
+
+	for b := 0; b < blocks; b++ {
+		adds, _, delHashes := sc.NextBlock(numAdds)
+
+		// Adds first on the reference forest: the roots captured in between
+		// hold this block's adds with its deletions still present, which is
+		// the state the proof verifies against. Forest.Modify ignores its
+		// proof argument, so an empty proof is fine.
+		require.NoError(t, modifyForest.Modify(adds, nil, Proof{}), "block %d", b)
+		stump := Stump{Roots: modifyForest.GetRoots(), NumLeaves: modifyForest.NumLeaves}
+		require.NoError(t, modifyForest.Modify(nil, delHashes, Proof{}), "block %d", b)
+
+		addHashes := make([]Hash, len(adds))
+		for i, add := range adds {
+			addHashes[i] = add.Hash
+		}
+		_, delPositions, err := recordForest.Record(addHashes, delHashes)
+		require.NoError(t, err, "block %d", b)
+
+		roots, numLeaves, proof, err := recordForest.RehashAndProve(delPositions)
+		require.NoError(t, err, "block %d", b)
+
+		require.Equal(t, modifyForest.NumLeaves, numLeaves, "block %d numLeaves", b)
+		require.Equal(t, modifyForest.GetRoots(), roots, "block %d roots", b)
+
+		if len(delPositions) == 0 {
+			continue
+		}
+
+		// RehashAndProve sorts its targets ascending, so the del hashes must
+		// be reordered by ascending leaf position to line up with
+		// proof.Targets.
+		order := make([]int, len(delPositions))
+		for i := range order {
+			order[i] = i
+		}
+		sort.Slice(order, func(a, b int) bool { return delPositions[order[a]] < delPositions[order[b]] })
+		delByPos := make([]Hash, len(delPositions))
+		for i, idx := range order {
+			delByPos[i] = delHashes[idx]
+		}
+
+		_, err = Verify(stump, delByPos, proof)
+		require.NoError(t, err, "block %d proof", b)
+	}
+}

@@ -5,6 +5,46 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+// RehashAndProve regenerates the forest roots and, in the same deletion walk,
+// captures the inclusion proof for pendingDels.
+//
+// The sibling hashes the walk reads while recomputing deletion-path parents are
+// the proof hashes, so the proof falls out of the walk without a separate
+// traversal of the file.
+//
+// Appended leaves are rehashed before the deletion walk, so a sibling the walk
+// reads on an add path is already final. The walk writes each deletion-path
+// parent last, overwriting whatever the add pass left at that position, so the
+// masking of deleted leaves carries all the way to the roots.
+func (f *Forest) RehashAndProve(pendingDels []uint64) ([]Hash, uint64, Proof, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	totalLeaves := f.NumLeaves
+	forestRows := f.forestRows
+
+	fromLeaves := f.lastGeneratedLeaves
+	if fromLeaves == 0 || fromLeaves > totalLeaves {
+		fromLeaves = 0
+	}
+	if err := f.processAddsParallel(fromLeaves, totalLeaves, forestRows); err != nil {
+		return nil, 0, Proof{}, err
+	}
+
+	proof, err := f.rehashDeletionsAndCaptureProof(pendingDels, totalLeaves, forestRows)
+	if err != nil {
+		return nil, 0, Proof{}, err
+	}
+	f.lastGeneratedLeaves = totalLeaves
+
+	roots, numLeaves, err := f.getRoots(totalLeaves)
+	if err != nil {
+		return nil, 0, Proof{}, err
+	}
+
+	return roots, numLeaves, proof, nil
+}
+
 // rehashDeletionsAndCaptureProof rehashes the deletion paths of pendingDels and
 // assembles their inclusion proof. Walking row by row, sibling pairs that are
 // both deleted collapse into a single parent computation; an entry whose

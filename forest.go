@@ -269,6 +269,23 @@ type Forest struct {
 	// Persisted to metaFile (bytes 0-31, padded).
 	recordMode bool
 
+	// lastGeneratedLeaves is how many leaves the last RehashAndProve pass
+	// covered. Subsequent calls rehash only the leaves appended since — a
+	// contiguous range whose paths merge at every row — instead of the whole
+	// forest.
+	//
+	// The forest must track this itself rather than take a per-call count
+	// from the caller: Record can run blocks ahead of RehashAndProve when the
+	// two are pipelined, so one pass may cover several blocks of appends and
+	// only the forest knows where the previous pass stopped.
+	//
+	// Not persisted. Zero on a freshly opened forest forces a full pass,
+	// rebuilding every interior hash from the leaves and the deleted bitmap.
+	// That heals everything a crash can cut off mid-pipeline: appended leaves
+	// whose interiors were never written, and recorded deletions whose
+	// masking walk never ran. Guarded by f.mu.
+	lastGeneratedLeaves uint64
+
 	// wal is set when created via OpenForest; nil for newForest (test/advanced usage).
 	wal *wal
 
@@ -533,10 +550,17 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 
 // Flush atomically commits all cached writes through the WAL journal.
 // Only valid on forests created via OpenForest.
+//
+// Acquires f.mu to serialize against concurrent readers and writers of the
+// deletedLeafPositions bitmap: Record mutates it under f.mu and the WAL
+// iterates it while serializing, while RehashAndProve reads it. Without the
+// lock a periodic flush could race those accesses.
 func (f *Forest) Flush(bestHash [32]byte) error {
 	if f.wal == nil {
 		return fmt.Errorf("flush: no WAL (use OpenForest to enable)")
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.wal.Flush(bestHash)
 }
 
