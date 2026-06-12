@@ -2,7 +2,167 @@ package utreexo
 
 import (
 	"github.com/utreexo/utreexo/internal/rowwalk"
+	"golang.org/x/exp/slices"
 )
+
+// rehashDeletionsAndCaptureProof rehashes the deletion paths of pendingDels and
+// assembles their inclusion proof. Walking row by row, sibling pairs that are
+// both deleted collapse into a single parent computation; an entry whose
+// sibling is not also deleted is "lone", and that sibling's stored hash is a
+// proof hash for the verifier.
+//
+// The returned proof's Targets are pendingDels sorted ascending (translated to
+// defaultForestRows when the forest uses a different row count). Proof hashes
+// are ordered by row, then by position within the row, as calculateHashes
+// expects.
+func (f *Forest) rehashDeletionsAndCaptureProof(pendingDels []uint64, numLeaves uint64, forestRows uint8) (Proof, error) {
+	if len(pendingDels) == 0 {
+		return Proof{}, nil
+	}
+
+	affected, targets := sortedDeletionTargets(pendingDels, forestRows)
+
+	// Starting capacity only: a deletion path contributes one proof hash per
+	// row where it is lone, so clustered deletions need almost none while
+	// scattered ones need several per target; append grows the slice past this.
+	proofHashes := make([]Hash, 0, len(pendingDels))
+
+	for row := uint8(0); row < forestRows && len(affected) > 0; row++ {
+		parents, rowProof, err := f.rehashDeletionRow(affected, row, numLeaves, forestRows)
+		if err != nil {
+			return Proof{}, err
+		}
+		proofHashes = append(proofHashes, rowProof...)
+
+		affected = rowwalk.DropMarked(parents)
+	}
+
+	return Proof{Targets: targets, Proof: proofHashes}, nil
+}
+
+// sortedDeletionTargets returns pendingDels sorted ascending, along with the
+// proof targets: the same positions translated to defaultForestRows when the
+// forest uses a different row count.
+func sortedDeletionTargets(pendingDels []uint64, forestRows uint8) (affected, targets []uint64) {
+	affected = make([]uint64, len(pendingDels))
+	copy(affected, pendingDels)
+	slices.SortFunc(affected, uint64Less)
+
+	targets = make([]uint64, len(affected))
+	copy(targets, affected)
+	if forestRows != defaultForestRows {
+		targets = translatePositions(targets, forestRows, defaultForestRows)
+	}
+	return affected, targets
+}
+
+// rehashDeletionRow recomputes the parent of every entry in affected for one
+// row, writing the new parent hashes to the file, and returns those parent
+// positions. The right half of a sibling pair is recorded with
+// rowwalk.MarkRedundant — its left half records the shared parent — and a root
+// entry, which has no parent, with rowwalk.MarkRoot. For each lone entry — one
+// whose sibling is not also in affected — it also returns the sibling hash it
+// read; those are the proof hashes for this row, in ascending position order.
+// A sibling past the row's last occupied position contributes an empty hash
+// without touching the file, so a read error is a real I/O fault and aborts
+// the row.
+func (f *Forest) rehashDeletionRow(affected []uint64, row uint8, numLeaves uint64, forestRows uint8) ([]uint64, []Hash, error) {
+	n := len(affected)
+	parents := make([]uint64, n)
+	proofSlots := make([]Hash, n)
+	hasProof := make([]bool, n)
+
+	// The row's last occupied position. A sibling past it does not exist, so
+	// its hash is empty by position arithmetic rather than by a file read.
+	maxPos, err := maxPositionAtRow(row, forestRows, numLeaves)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// runRowWork calls work with index windows [s, e) that partition [0, n):
+	// one inline (0, n) call for a small row, or disjoint windows running
+	// concurrently on the pool workers for a large one. The windows tile the
+	// range — each begins where the previous one ends, from 0 through n — so
+	// every index is processed exactly once, and runRowWork returns only after
+	// every window has run.
+	work := func(s, e int) error {
+		for i := s; i < e; i++ {
+			pos := affected[i]
+
+			// The right half of a sibling pair is redundant: its left half
+			// computes the shared parent. affected is ascending, so the
+			// halves are adjacent, and the check only looks backward — a
+			// window that starts on a right half still sees its twin at i-1.
+			if i > 0 && affected[i-1] == leftSib(pos) {
+				rowwalk.MarkRedundant(parents, i)
+				continue
+			}
+
+			if isRootPositionTotalRows(pos, numLeaves, forestRows) {
+				if row == 0 {
+					if err := f.writeHashAt(pos, empty); err != nil {
+						return err
+					}
+				}
+				rowwalk.MarkRoot(parents, i)
+				continue
+			}
+
+			currentHash, err := f.readHashForProof(pos)
+			if err != nil {
+				return err
+			}
+
+			// pos is lone when its sibling is not also on the deletion path,
+			// making that sibling's stored hash a proof hash for the
+			// verifier. The forward look mirrors the backward skip above: a
+			// processed entry's pair can only sit directly after it.
+			lone := i+1 >= n || affected[i+1] != rightSib(pos)
+
+			sibPos := sibling(pos)
+			var sibHash Hash
+			if sibPos > maxPos {
+				sibHash = empty
+			} else {
+				h, err := f.readHashForProof(sibPos)
+				if err != nil {
+					return err
+				}
+				sibHash = h
+			}
+
+			if lone {
+				proofSlots[i] = sibHash
+				hasProof[i] = true
+			}
+
+			parentPos := Parent(pos, forestRows)
+			var newHash Hash
+			if isLeftNiece(pos) {
+				newHash = parentHash(currentHash, sibHash)
+			} else {
+				newHash = parentHash(sibHash, currentHash)
+			}
+			if err := f.writeHashAt(parentPos, newHash); err != nil {
+				return err
+			}
+			parents[i] = parentPos
+		}
+		return nil
+	}
+
+	if err := runRowWork(n, work); err != nil {
+		return nil, nil, err
+	}
+
+	proof := make([]Hash, 0, n)
+	for i := 0; i < n; i++ {
+		if hasProof[i] {
+			proof = append(proof, proofSlots[i])
+		}
+	}
+	return parents, proof, nil
+}
 
 // processAddsParallel rebuilds the interior hashes for the leaves appended
 // between prevLeaves and totalLeaves, walking each affected position up to its
@@ -148,6 +308,15 @@ func runRowWork(n int, work func(start, end int) error) error {
 		}
 	}
 	return nil
+}
+
+// readHashForProof reads the hash at position, returning empty for a deleted
+// leaf on the leaf row. Non-leaf rows always read from the file.
+func (f *Forest) readHashForProof(position uint64) (Hash, error) {
+	if DetectRow(position, f.forestRows) == 0 && f.deletedLeafPositions.isSet(position) {
+		return empty, nil
+	}
+	return f.readHashAt(position)
 }
 
 // readHashAt reads the hash at the given position. Uses the value-typed HashAt
