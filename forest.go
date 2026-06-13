@@ -33,7 +33,7 @@ const (
 	forestDeletedFileName     = "forest_deleted.dat"      // deleted-leaf bitmap, 8 bytes per word
 	forestBlockCountsFileName = "forest_blockcounts.dat"  // per-block add count, 4 bytes each
 	forestJournalFileName     = "forest_journal.dat"      // WAL journal for crash recovery
-	forestMetaFileName        = "forest_meta.dat"         // recordMode + numLeaves + consistency hash + generated leaves
+	forestMetaFileName        = "forest_meta.dat"         // persistent metadata slots; see Forest.metaFile
 	forestPosMapCtrlFileName  = "forest_posmap_ctrl.dat"  // Swiss Table control bytes, mmap'd
 	forestPosMapSlotsFileName = "forest_posmap_slots.dat" // Swiss Table slot values, mmap'd
 )
@@ -248,9 +248,26 @@ type Forest struct {
 
 	file            *cachedRWS
 	blockCountsFile *cachedRWS // stores uint32 add-count per block, 4 bytes each
-	metaFile        *cachedRWS // recordMode, numLeaves, consistency hash, generated leaves (32-byte slots)
-	NumLeaves       uint64
-	forestRows      uint8 // Fixed maximum rows for stable position mapping
+	// metaFile holds the forest's persistent metadata as four fixed-size
+	// 32-byte slots, one per field. The slot size matches the fixed record
+	// size the meta cache and the WAL use for this file. A slot past the end
+	// of the file — a fresh database, or one written before the slot existed —
+	// reads as io.EOF with the buffer left zeroed, i.e. the field's zero value.
+	//
+	//	bytes 0-31    recordMode flag: byte 0 is 1 in record mode, else 0
+	//	bytes 32-63   numLeaves: little-endian uint64 in the first 8 bytes
+	//	bytes 64-95   consistency hash: the WAL's committed bestHash
+	//	bytes 96-127  generated leaves: little-endian uint64 in the first 8 bytes
+	//
+	// recordMode, numLeaves and generated leaves are written through the
+	// WAL-protected cachedRWS, so a flush commits them atomically. The
+	// consistency hash is written straight to the underlying file by the WAL's
+	// Flush at bestHashOffset, bypassing the cache. The generated-leaves slot
+	// is RehashAndProve's resume marker; see saveGeneratedLeaves for its
+	// semantics.
+	metaFile   *cachedRWS
+	NumLeaves  uint64
+	forestRows uint8 // Fixed maximum rows for stable position mapping
 
 	// positionMap maps leaf hashes to packed (addIndex, position) values.
 	// Upper 17 bits = addIndex (index within Modify batch), lower 47 bits = position.
@@ -266,7 +283,7 @@ type Forest struct {
 
 	// recordMode is true after Record is called but before HashAll completes.
 	// Calling Modify while in record mode would corrupt the tree.
-	// Persisted to metaFile (bytes 0-31, padded).
+	// Persisted in the metaFile's recordMode slot (see the metaFile field).
 	recordMode bool
 
 	// lastGeneratedLeaves is the leaf count through which the interior hashes
@@ -335,8 +352,8 @@ func readBlockCounts(file io.ReaderAt, size int64) ([]uint32, error) {
 // the memCached / wrapMem helpers to wrap an in-memory file.
 // blockCountsFile stores the uint32 add-count per block; numLeaves is derived
 // from the cumulative sum of all block counts.
-// metaFile stores recordMode (bytes 0-31), numLeaves (bytes 32-63), consistency
-// hash (bytes 64-95), and generated leaves (bytes 96-127).
+// metaFile holds the persistent metadata slots; see the metaFile field for the
+// layout.
 // bitmap tracks deleted leaf positions; pass nil for a fresh forest. When using a WAL,
 // the bitmap is loaded by the WAL after recovery and passed here. For non-WAL usage,
 // load it with loadDeletedBitmap.
@@ -383,8 +400,8 @@ func newForest(file, blockCountsFile, metaFile *cachedRWS, bitmap *deletedBitmap
 		return nil, fmt.Errorf("trim block counts: %w", err)
 	}
 
-	// Read consistency hash from metaFile (bytes 64-95, written atomically by WAL).
-	// Zero hash on first run or if metaFile is empty (io.EOF leaves the buffer zeroed).
+	// Read the consistency-hash slot from the metaFile (see the metaFile field).
+	// Zero hash on first run or an empty metaFile (io.EOF leaves the buffer zeroed).
 	var consistencyHash [32]byte
 	if _, err := metaFile.ReadAt(consistencyHash[:], bestHashOffset); err != nil && err != io.EOF {
 		return nil, fmt.Errorf("read consistency hash: %w", err)
@@ -703,12 +720,9 @@ func (f *Forest) rebuildPositionMap() error {
 	return nil
 }
 
-// loadMetadata reads recordMode (bytes 0-31), numLeaves (bytes 32-63) and the
-// generated-leaves count (bytes 96-127) from the metaFile. Each field is read
-// as its own 32-byte slot, matching the meta cache's fixed record size; a slot
-// past the end of the file — a fresh database, or a file written before the
-// slot existed — reads as io.EOF with the buffer left zeroed, which is the
-// field's zero value.
+// loadMetadata reads the recordMode, numLeaves and generated-leaves slots from
+// the metaFile (see the metaFile field for the layout). The consistency-hash
+// slot is read separately by OpenForest.
 func (f *Forest) loadMetadata() error {
 	// readSlot reads one 32-byte metadata slot. present is false when the slot is
 	// absent: a fresh database, or a meta file written before the slot existed.
@@ -755,9 +769,9 @@ func (f *Forest) loadMetadata() error {
 	return nil
 }
 
-// saveRecordMode writes the recordMode flag to the metaFile (bytes 0-31, with
-// the flag in byte 0). The write goes through the WAL-protected cachedRWS, so
-// it is crash-safe.
+// saveRecordMode writes the recordMode flag to its metaFile slot (see the
+// metaFile field). The write goes through the WAL-protected cachedRWS, so it
+// is crash-safe.
 func (f *Forest) saveRecordMode() error {
 	var recordModeBuf [32]byte
 	if f.recordMode {
@@ -766,8 +780,8 @@ func (f *Forest) saveRecordMode() error {
 	return f.metaFile.PutHashAt(recordModeBuf, 0)
 }
 
-// saveNumLeaves writes numLeaves to the metaFile (bytes 32-63). The write goes
-// through the WAL-protected cachedRWS, so it is crash-safe.
+// saveNumLeaves writes numLeaves to its metaFile slot (see the metaFile field).
+// The write goes through the WAL-protected cachedRWS, so it is crash-safe.
 func (f *Forest) saveNumLeaves() error {
 	var numLeavesBuf [32]byte
 	binary.LittleEndian.PutUint64(numLeavesBuf[:], f.NumLeaves)
@@ -781,24 +795,23 @@ func (f *Forest) interiorsCurrent() bool {
 	return f.lastGeneratedLeaves == f.NumLeaves && f.unmaskedDels == 0
 }
 
-// clearGeneratedLeaves zeroes the generated-leaves slot of the metaFile
-// (bytes 96-127). Mutating operations call it before their first write so
-// that an error return part way through never leaves a slot claiming the
-// interior hashes are complete; the operations that finish with complete
-// interiors write the slot back via saveGeneratedLeaves.
+// clearGeneratedLeaves zeroes the generated-leaves slot of the metaFile.
+// Mutating operations call it before their first write so that an error
+// return part way through never leaves a slot claiming the interior hashes
+// are complete; the operations that finish with complete interiors write the
+// slot back via saveGeneratedLeaves.
 func (f *Forest) clearGeneratedLeaves() error {
 	var zero [32]byte
 	return f.metaFile.PutHashAt(zero, generatedLeavesOffset)
 }
 
-// saveGeneratedLeaves writes the generated-leaves slot of the metaFile
-// (bytes 96-127): NumLeaves when the interior hashes are current (see
-// interiorsCurrent) and zero otherwise. The write goes through the
-// WAL-protected cachedRWS, so a flush commits the slot atomically with the
-// leaves, bitmap and numLeaves it describes. A stored slot that matches the
-// stored numLeaves therefore proves the stored interior hashes are complete,
-// which lets loadMetadata seed lastGeneratedLeaves and the next rehash pass
-// skip the full rebuild.
+// saveGeneratedLeaves writes the generated-leaves slot of the metaFile:
+// NumLeaves when the interior hashes are current (see interiorsCurrent) and
+// zero otherwise. The write goes through the WAL-protected cachedRWS, so a
+// flush commits the slot atomically with the leaves, bitmap and numLeaves it
+// describes. A stored slot that matches the stored numLeaves therefore proves
+// the stored interior hashes are complete, which lets loadMetadata seed
+// lastGeneratedLeaves and the next rehash pass skip the full rebuild.
 func (f *Forest) saveGeneratedLeaves() error {
 	var buf [32]byte
 	if f.interiorsCurrent() {
@@ -812,9 +825,10 @@ func (f *Forest) saveGeneratedLeaves() error {
 	return f.metaFile.PutHashAt(buf, generatedLeavesOffset)
 }
 
-// ReadConsistencyHash reads the consistency hash from metaFile (bytes 64-95).
-// The hash is written atomically by WAL.Flush(). Returns a zero hash on a
-// fresh database where the metaFile has not yet been written that far.
+// ReadConsistencyHash reads the consistency-hash slot from the metaFile (see
+// the metaFile field). The hash is written atomically by WAL.Flush(). Returns
+// a zero hash on a fresh database where the metaFile has not yet been written
+// that far.
 //
 // Takes f.mu to serialize the metaFile read against a concurrent Flush, which
 // holds the write lock while WAL.Flush rewrites the meta cache and its size
