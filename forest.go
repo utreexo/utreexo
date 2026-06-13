@@ -33,7 +33,7 @@ const (
 	forestDeletedFileName     = "forest_deleted.dat"      // deleted-leaf bitmap, 8 bytes per word
 	forestBlockCountsFileName = "forest_blockcounts.dat"  // per-block add count, 4 bytes each
 	forestJournalFileName     = "forest_journal.dat"      // WAL journal for crash recovery
-	forestMetaFileName        = "forest_meta.dat"         // recordMode + numLeaves + consistency hash
+	forestMetaFileName        = "forest_meta.dat"         // recordMode + numLeaves + consistency hash + generated leaves
 	forestPosMapCtrlFileName  = "forest_posmap_ctrl.dat"  // Swiss Table control bytes, mmap'd
 	forestPosMapSlotsFileName = "forest_posmap_slots.dat" // Swiss Table slot values, mmap'd
 )
@@ -248,7 +248,7 @@ type Forest struct {
 
 	file            *cachedRWS
 	blockCountsFile *cachedRWS // stores uint32 add-count per block, 4 bytes each
-	metaFile        *cachedRWS // stores recordMode (bytes 0-31) + consistency hash (bytes 32-63)
+	metaFile        *cachedRWS // recordMode, numLeaves, consistency hash, generated leaves (32-byte slots)
 	NumLeaves       uint64
 	forestRows      uint8 // Fixed maximum rows for stable position mapping
 
@@ -319,7 +319,8 @@ func readBlockCounts(file io.ReaderAt, size int64) ([]uint32, error) {
 // the memCached / wrapMem helpers to wrap an in-memory file.
 // blockCountsFile stores the uint32 add-count per block; numLeaves is derived
 // from the cumulative sum of all block counts.
-// metaFile stores recordMode (bytes 0-31), numLeaves (bytes 32-63), and consistency hash (bytes 64-95).
+// metaFile stores recordMode (bytes 0-31), numLeaves (bytes 32-63), consistency
+// hash (bytes 64-95), and generated leaves (bytes 96-127).
 // bitmap tracks deleted leaf positions; pass nil for a fresh forest. When using a WAL,
 // the bitmap is loaded by the WAL after recovery and passed here. For non-WAL usage,
 // load it with loadDeletedBitmap.
