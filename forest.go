@@ -668,6 +668,10 @@ func (f *Forest) rebuildPositionMap() error {
 			var hash Hash
 			copy(hash[:], hashBatch.data[i*32:])
 
+			if hash == empty {
+				continue
+			}
+
 			if err := f.positionMap.Set(hash, packPosIndex(leafPos, addIndex)); err != nil {
 				return fmt.Errorf("positionMap.Set at %d: %w", leafPos, err)
 			}
@@ -808,17 +812,20 @@ func (f *Forest) appendBlockCount(count uint32) error {
 // add adds a single leaf to the forest.
 // If hash is empty, the sibling (existing root) moves up to the parent position.
 func (f *Forest) add(hash Hash, addIndex int32) error {
-	// Add to position map (before incrementing NumLeaves)
+	// Add to position map (before incrementing NumLeaves). Empty leaves are
+	// not tracked: they exist only to mask out a position.
 	if hash != empty {
 		if err := f.positionMap.Set(hash, packPosIndex(f.NumLeaves, addIndex)); err != nil {
 			return fmt.Errorf("positionMap.Set: %w", err)
 		}
+	}
 
-		// Write the leaf hash at position NumLeaves
-		err := f.writeHash(f.NumLeaves, hash)
-		if err != nil {
-			return fmt.Errorf("write leaf: %w", err)
-		}
+	// Write the leaf hash at position NumLeaves. Empty hashes are written
+	// too: the leaf row is the ground truth every rebuild reads, and the
+	// slot may hold a stale hash from an earlier occupant (Undo removes a
+	// leaf from the position map without clearing its slot).
+	if err := f.writeHash(f.NumLeaves, hash); err != nil {
+		return fmt.Errorf("write leaf: %w", err)
 	}
 
 	currentHash := hash
@@ -1193,6 +1200,11 @@ func (f *Forest) undoInternal(numAdds uint64, delHashes []Hash) error {
 		hash, err := f.readHash(pos)
 		if err != nil {
 			return fmt.Errorf("read hash at %d for undo add: %w", pos, err)
+		}
+		// An empty hash is a leaf that was added as empty; add never
+		// entered it into the position map.
+		if hash == empty {
+			continue
 		}
 		if _, err := f.positionMap.Delete(hash); err != nil {
 			return fmt.Errorf("positionMap.Delete at %d: %w", pos, err)

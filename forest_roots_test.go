@@ -398,3 +398,38 @@ func TestRehashAndProveRootsMatchModify(t *testing.T) {
 		require.NoError(t, err, "block %d proof", b)
 	}
 }
+
+// TestRehashAndProvePreservesDeletedRootLeaf deletes a leaf that is itself a
+// root (a single-leaf tree) through the record pipeline and then undoes the
+// block. The masking walk must leave the leaf's hash in its slot — readers
+// mask the position through the deleted bitmap, and Undo restores the root
+// from the preserved hash, just as it does after a deleteSingle of the same
+// leaf.
+func TestRehashAndProvePreservesDeletedRootLeaf(t *testing.T) {
+	dir := t.TempDir()
+	f, err := newForest(memCached(t, 32), memCached(t, 4), memCached(t, 32), nil,
+		dir+"/ctrl", dir+"/slots", 16, 0)
+	require.NoError(t, err)
+
+	hashes := make([]Hash, 3)
+	leaves := make([]Leaf, 3)
+	for i := range leaves {
+		hashes[i] = testHashFromInt(i)
+		leaves[i] = Leaf{Hash: hashes[i]}
+	}
+	// Three leaves form a two-leaf tree plus a single-leaf tree, so the
+	// third leaf's position is a row-0 root.
+	require.NoError(t, f.Modify(leaves, nil, Proof{}))
+	rootsBefore := f.GetRoots()
+
+	require.NoError(t, f.EnterRecordMode())
+	_, delPositions, err := f.Record(nil, hashes[2:3])
+	require.NoError(t, err)
+	_, _, _, err = f.RehashAndProve(delPositions)
+	require.NoError(t, err)
+	require.NoError(t, f.ExitRecordMode())
+
+	require.NoError(t, f.Undo(nil, Proof{}, hashes[2:3], nil))
+	require.Equal(t, rootsBefore, f.GetRoots(),
+		"undoing the recorded deletion must restore the root leaf's hash")
+}

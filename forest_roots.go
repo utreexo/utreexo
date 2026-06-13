@@ -139,11 +139,11 @@ func (f *Forest) rehashDeletionRow(affected []uint64, row uint8, numLeaves uint6
 			}
 
 			if isRootPositionTotalRows(pos, numLeaves, forestRows) {
-				if row == 0 {
-					if err := f.writeHashAt(pos, empty); err != nil {
-						return err
-					}
-				}
+				// A deleted leaf that is itself a root keeps its hash in the
+				// slot, matching deleteSingle: every reader masks the
+				// position through the deleted bitmap, the position map
+				// verifies its entries against the slot, and Undo restores
+				// the root from the preserved hash.
 				rowwalk.MarkRoot(parents, i)
 				continue
 			}
