@@ -703,21 +703,54 @@ func (f *Forest) rebuildPositionMap() error {
 	return nil
 }
 
-// loadMetadata reads recordMode (bytes 0-31) and numLeaves (bytes 32-63)
-// from the metaFile. Each field occupies one 32-byte entry.
+// loadMetadata reads recordMode (bytes 0-31), numLeaves (bytes 32-63) and the
+// generated-leaves count (bytes 96-127) from the metaFile. Each field is read
+// as its own 32-byte slot, matching the meta cache's fixed record size; a slot
+// past the end of the file — a fresh database, or a file written before the
+// slot existed — reads as io.EOF with the buffer left zeroed, which is the
+// field's zero value.
 func (f *Forest) loadMetadata() error {
-	var buf [64]byte
-	_, err := f.metaFile.ReadAt(buf[:], 0)
-	if err == io.EOF {
-		// Fresh database, no metadata yet.
-		return nil
+	// readSlot reads one 32-byte metadata slot. present is false when the slot is
+	// absent: a fresh database, or a meta file written before the slot existed.
+	readSlot := func(offset int64) (slot [32]byte, present bool, err error) {
+		n, err := f.metaFile.ReadAt(slot[:], offset)
+		if err == io.EOF {
+			return slot, n == len(slot), nil
+		}
+		return slot, err == nil, err
 	}
+
+	recordModeSlot, _, err := readSlot(0)
 	if err != nil {
 		return err
 	}
-	f.recordMode = buf[0] != 0
-	if metaLeaves := binary.LittleEndian.Uint64(buf[32:]); metaLeaves > 0 {
+	f.recordMode = recordModeSlot[0] != 0
+
+	numLeavesSlot, _, err := readSlot(32)
+	if err != nil {
+		return err
+	}
+	if metaLeaves := binary.LittleEndian.Uint64(numLeavesSlot[:8]); metaLeaves > 0 {
 		f.NumLeaves = metaLeaves
+	}
+
+	genSlot, genPresent, err := readSlot(generatedLeavesOffset)
+	if err != nil {
+		return err
+	}
+	if !genPresent {
+		// Legacy meta file with no slot. Normal mode is always caught up, so seed
+		// lastGeneratedLeaves from numLeaves. Record mode stays at 0 to rebuild.
+		if !f.recordMode {
+			f.lastGeneratedLeaves = f.NumLeaves
+		}
+		return nil
+	}
+
+	// The slot holds the leaf count the last rehash covered. Seed only when it
+	// still equals numLeaves, otherwise stay at 0 and rebuild from the first leaf.
+	if gen := binary.LittleEndian.Uint64(genSlot[:8]); gen != 0 && gen == f.NumLeaves {
+		f.lastGeneratedLeaves = gen
 	}
 	return nil
 }
