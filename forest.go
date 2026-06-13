@@ -1249,7 +1249,37 @@ func (f *Forest) Undo(prevAdds []Hash, proof Proof, delHashes, prevRoots []Hash)
 		return fmt.Errorf("cannot call Undo while in record mode; call HashAll first")
 	}
 
-	return f.undoInternal(uint64(len(prevAdds)), delHashes)
+	mutating := len(prevAdds) > 0 || len(delHashes) > 0
+
+	// An undo reverts the existing parent hashes rather than rebuilding them,
+	// so like modifyInternal it is only correct when those hashes are current.
+	// Reject it otherwise so stale hashes are never baked into new parents.
+	if mutating && !f.interiorsCurrent() {
+		return fmt.Errorf("cannot undo a block over stale parent hashes, run HashAll first")
+	}
+
+	// Clear the slot before the first write so an error part way through never
+	// leaves a completeness claim over partially written parent hashes.
+	if mutating {
+		if err := f.clearGeneratedLeaves(); err != nil {
+			return fmt.Errorf("clear generated leaves: %w", err)
+		}
+	}
+
+	if err := f.undoInternal(uint64(len(prevAdds)), delHashes); err != nil {
+		// The parent hash writes may have landed partially, so treat them as
+		// unbuilt and let the next rehash pass run from the first leaf.
+		f.lastGeneratedLeaves = 0
+		return err
+	}
+
+	if !mutating {
+		return nil
+	}
+	// The guard above ran with the parent hashes current and the undo left
+	// them covering every remaining leaf.
+	f.lastGeneratedLeaves = f.NumLeaves
+	return f.saveGeneratedLeaves()
 }
 
 // undoInternal reverts additions and deletions.
