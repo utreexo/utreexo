@@ -221,6 +221,12 @@ func (w *wal) Flush(bestHash [32]byte) error {
 		return fmt.Errorf("wal apply: %w", err)
 	}
 
+	// The bestHash write above went directly to the underlying metaFile,
+	// bypassing its cache. Bump the cache's size tracking to cover it so
+	// reads of the consistency hash in this session fall through to the
+	// underlying file instead of short-circuiting to io.EOF.
+	w.cached[metaFileIdx].bumpMaxWritten(bestHashOffset + journalHashSize)
+
 	// Sync underlying files (including bitmap file).
 	for i, c := range w.cached {
 		if err := syncFile(c.underlying); err != nil {

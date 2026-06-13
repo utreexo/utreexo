@@ -815,7 +815,14 @@ func (f *Forest) saveGeneratedLeaves() error {
 // ReadConsistencyHash reads the consistency hash from metaFile (bytes 64-95).
 // The hash is written atomically by WAL.Flush(). Returns a zero hash on a
 // fresh database where the metaFile has not yet been written that far.
+//
+// Takes f.mu to serialize the metaFile read against a concurrent Flush, which
+// holds the write lock while WAL.Flush rewrites the meta cache and its size
+// tracking.
 func (f *Forest) ReadConsistencyHash() ([32]byte, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
 	var hash [32]byte
 	_, err := f.metaFile.ReadAt(hash[:], bestHashOffset)
 	if err == io.EOF {
