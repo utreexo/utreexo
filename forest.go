@@ -1638,11 +1638,50 @@ func (f *Forest) HashAll() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	// The rebuild below recomputes every interior hash from the first leaf;
+	// until it completes, none of them count as built. An error return part
+	// way through then never leaves a completeness claim over a partially
+	// rebuilt file.
+	if err := f.clearGeneratedLeaves(); err != nil {
+		return fmt.Errorf("clear generated leaves: %w", err)
+	}
+	f.lastGeneratedLeaves = 0
+
 	totalLeaves := f.NumLeaves
 
 	// Reset to rebuild from scratch
 	f.NumLeaves = 0
 
+	if err := f.hashAllLeaves(totalLeaves); err != nil {
+		// The rebuild advances NumLeaves per processed leaf, so a failure
+		// part way through leaves it at a partial count. Restore the real
+		// count: the leaves and block accounting still describe all of
+		// totalLeaves, and a retry or a later Record must start from there
+		// rather than truncate the forest or overwrite live leaves.
+		f.NumLeaves = totalLeaves
+		return err
+	}
+
+	// Every interior hash was just rebuilt from the leaves and the deleted
+	// bitmap, so the next RehashAndProve pass only needs to cover leaves
+	// appended after this point, and every recorded deletion has been
+	// masked by the rebuild.
+	f.lastGeneratedLeaves = totalLeaves
+	f.unmaskedDels = 0
+
+	f.recordMode = false
+	if err := f.saveRecordMode(); err != nil {
+		return fmt.Errorf("save record mode: %w", err)
+	}
+
+	return f.saveGeneratedLeaves()
+}
+
+// hashAllLeaves replays every leaf through the root-merge walk that add uses,
+// writing each parent hash while treating bitmap-deleted leaves as empty.
+// NumLeaves must be zero on entry; it ends at totalLeaves on success and at
+// the number of fully processed leaves on error.
+func (f *Forest) hashAllLeaves(totalLeaves uint64) error {
 	for pos := uint64(0); pos < totalLeaves; pos++ {
 		var hash Hash
 		if f.deletedLeafPositions.isSet(pos) {
@@ -1686,12 +1725,6 @@ func (f *Forest) HashAll() error {
 
 		f.NumLeaves++
 	}
-
-	f.recordMode = false
-	if err := f.saveRecordMode(); err != nil {
-		return fmt.Errorf("save record mode: %w", err)
-	}
-
 	return nil
 }
 
