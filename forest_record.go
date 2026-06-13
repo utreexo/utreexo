@@ -189,14 +189,26 @@ func (f *Forest) EnterRecordMode() error {
 	return nil
 }
 
-// ExitRecordMode transitions the forest out of record mode after GenerateRoots
-// has written all intermediate hashes to the data file.
+// ExitRecordMode transitions the forest out of record mode. It requires the
+// interior hashes to be fully caught up — every leaf covered by a rehash pass
+// and every recorded deletion masked — because the normal mutation paths
+// (Modify, ModifyAndReturnTTLs, Undo) extend existing interior hashes rather
+// than rebuild them; exiting over stale interiors would let them bake the
+// staleness into new parents. Run RehashAndProve for the outstanding blocks
+// or HashAll first.
 func (f *Forest) ExitRecordMode() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if !f.recordMode {
 		return nil
+	}
+
+	if !f.interiorsCurrent() {
+		return fmt.Errorf("cannot exit record mode: the last rehash covered %d of "+
+			"%d leaves and %d recorded deletions await their masking walk; run "+
+			"RehashAndProve for the outstanding blocks or HashAll first",
+			f.lastGeneratedLeaves, f.NumLeaves, f.unmaskedDels)
 	}
 
 	f.recordMode = false
