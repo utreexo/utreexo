@@ -269,22 +269,38 @@ type Forest struct {
 	// Persisted to metaFile (bytes 0-31, padded).
 	recordMode bool
 
-	// lastGeneratedLeaves is how many leaves the last RehashAndProve pass
-	// covered. Subsequent calls rehash only the leaves appended since — a
-	// contiguous range whose paths merge at every row — instead of the whole
-	// forest.
+	// lastGeneratedLeaves is the leaf count through which the interior hashes
+	// are known current. Any operation that finishes with complete interiors
+	// advances it to NumLeaves — RehashAndProve, Modify, ModifyAndReturnTTLs,
+	// Undo and HashAll. RehashAndProve reads it to rehash only the leaves
+	// appended since the previous pass — a contiguous range whose paths merge
+	// at every row — instead of the whole forest.
 	//
 	// The forest must track this itself rather than take a per-call count
 	// from the caller: Record can run blocks ahead of RehashAndProve when the
 	// two are pipelined, so one pass may cover several blocks of appends and
 	// only the forest knows where the previous pass stopped.
 	//
-	// Not persisted. Zero on a freshly opened forest forces a full pass,
-	// rebuilding every interior hash from the leaves and the deleted bitmap.
-	// That heals everything a crash can cut off mid-pipeline: appended leaves
+	// Persisted through the metaFile's generated-leaves slot, but only when
+	// the interior hashes are fully caught up (see interiorsCurrent). On
+	// open, loadMetadata seeds this field from the slot when the slot
+	// matches the stored numLeaves; otherwise the field stays zero, which
+	// forces the next pass to run from the first leaf, rebuilding every
+	// interior hash from the leaves and the deleted bitmap. That full pass
+	// heals everything a crash can cut off mid-pipeline: appended leaves
 	// whose interiors were never written, and recorded deletions whose
 	// masking walk never ran. Guarded by f.mu.
 	lastGeneratedLeaves uint64
+
+	// unmaskedDels counts deletions Record has marked in the deleted bitmap
+	// whose masking walk has not yet run. An incremental RehashAndProve masks
+	// the pendingDels it is given and subtracts them; a pass from the first
+	// leaf — or HashAll — masks every deleted leaf at the leaf row and zeroes
+	// the count outright, including positions never passed in. The count is
+	// zero exactly when the interior hashes already reflect the bitmap; while
+	// it is nonzero they do not, and saveGeneratedLeaves keeps the
+	// generated-leaves slot at zero. Guarded by f.mu.
+	unmaskedDels uint64
 
 	// wal is set when created via OpenForest; nil for newForest (test/advanced usage).
 	wal *wal
@@ -723,6 +739,44 @@ func (f *Forest) saveNumLeaves() error {
 	var numLeavesBuf [32]byte
 	binary.LittleEndian.PutUint64(numLeavesBuf[:], f.NumLeaves)
 	return f.metaFile.PutHashAt(numLeavesBuf, 32)
+}
+
+// interiorsCurrent reports whether every interior hash matches the leaves and
+// the deleted bitmap: the last rehash pass covered all leaves and no recorded
+// deletion is awaiting its masking walk.
+func (f *Forest) interiorsCurrent() bool {
+	return f.lastGeneratedLeaves == f.NumLeaves && f.unmaskedDels == 0
+}
+
+// clearGeneratedLeaves zeroes the generated-leaves slot of the metaFile
+// (bytes 96-127). Mutating operations call it before their first write so
+// that an error return part way through never leaves a slot claiming the
+// interior hashes are complete; the operations that finish with complete
+// interiors write the slot back via saveGeneratedLeaves.
+func (f *Forest) clearGeneratedLeaves() error {
+	var zero [32]byte
+	return f.metaFile.PutHashAt(zero, generatedLeavesOffset)
+}
+
+// saveGeneratedLeaves writes the generated-leaves slot of the metaFile
+// (bytes 96-127): NumLeaves when the interior hashes are current (see
+// interiorsCurrent) and zero otherwise. The write goes through the
+// WAL-protected cachedRWS, so a flush commits the slot atomically with the
+// leaves, bitmap and numLeaves it describes. A stored slot that matches the
+// stored numLeaves therefore proves the stored interior hashes are complete,
+// which lets loadMetadata seed lastGeneratedLeaves and the next rehash pass
+// skip the full rebuild.
+func (f *Forest) saveGeneratedLeaves() error {
+	var buf [32]byte
+	if f.interiorsCurrent() {
+		binary.LittleEndian.PutUint64(buf[:], f.NumLeaves)
+	}
+	// When the parent hashes are not current, buf stays zero, so the slot is
+	// set to zero rather than left untouched. This way the call alone fully
+	// determines the slot's committed value, without relying on a preceding
+	// clearGeneratedLeaves call, so no path can leave a stale nonzero slot that
+	// wrongly claims the parent hashes are complete.
+	return f.metaFile.PutHashAt(buf, generatedLeavesOffset)
 }
 
 // ReadConsistencyHash reads the consistency hash from metaFile (bytes 64-95).
