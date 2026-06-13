@@ -956,31 +956,6 @@ func (f *Forest) add(hash Hash, addIndex int32) error {
 	return nil
 }
 
-func (f *Forest) delete(delHashes []Hash) error {
-	if len(delHashes) == 0 {
-		return nil
-	}
-
-	for _, delHash := range delHashes {
-		_, found, err := f.positionMap.Get(delHash)
-		if err != nil {
-			return fmt.Errorf("positionMap.Get: %w", err)
-		}
-		if !found {
-			return fmt.Errorf("delhash %v not found in position map", delHash)
-		}
-	}
-
-	for _, delHash := range delHashes {
-		err := f.deleteSingle(delHash)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
 func (f *Forest) deleteSingle(delHash Hash) error {
 	// Get the packed value (contains position + addIndex)
 	packed, _, err := f.positionMap.Get(delHash)
@@ -1521,18 +1496,59 @@ func (f *Forest) Modify(adds []Leaf, delHashes []Hash, _ Proof) error {
 		return fmt.Errorf("cannot call Modify while in record mode; call HashAll first")
 	}
 
-	// Delete first.
-	if len(delHashes) > 0 {
-		err := f.delete(delHashes)
+	return f.modifyInternal(adds, delHashes)
+}
+
+// modifyInternal applies one block, deletions first then additions, and
+// persists the block accounting. The caller holds f.mu and has checked
+// recordMode.
+func (f *Forest) modifyInternal(adds []Leaf, delHashes []Hash) error {
+	// Reject unknown deletions before anything is written: a rejected block
+	// leaves the forest untouched, including its generated-leaves claim.
+	for _, delHash := range delHashes {
+		_, found, err := f.positionMap.Get(delHash)
 		if err != nil {
+			return fmt.Errorf("positionMap.Get: %w", err)
+		}
+		if !found {
+			return fmt.Errorf("delhash %v not found in position map", delHash)
+		}
+	}
+
+	mutating := len(adds) > 0 || len(delHashes) > 0
+
+	// A block is applied by extending the existing parent hashes rather than
+	// rebuilding them, so it is only correct when those hashes are already
+	// current. Reject the block otherwise so stale hashes are never baked into
+	// new parents. The callers' recordMode check does not cover this on its
+	// own, because a Modify or Undo that failed partway leaves the parent
+	// hashes stale while recordMode stays false.
+	if mutating && !f.interiorsCurrent() {
+		return fmt.Errorf("cannot apply a block over stale parent hashes, run HashAll first")
+	}
+
+	// Clear the slot before the first write so an error part way through never
+	// leaves a completeness claim over partially written parent hashes.
+	if mutating {
+		if err := f.clearGeneratedLeaves(); err != nil {
+			return fmt.Errorf("clear generated leaves: %w", err)
+		}
+	}
+
+	// Delete first.
+	for _, delHash := range delHashes {
+		if err := f.deleteSingle(delHash); err != nil {
+			// The parent hash writes may have landed partially, so treat them
+			// as unbuilt and let the next rehash pass run from the first leaf.
+			f.lastGeneratedLeaves = 0
 			return fmt.Errorf("delete: %w", err)
 		}
 	}
 
 	// Then add.
 	for i, leaf := range adds {
-		err := f.add(leaf.Hash, int32(i))
-		if err != nil {
+		if err := f.add(leaf.Hash, int32(i)); err != nil {
+			f.lastGeneratedLeaves = 0
 			return fmt.Errorf("add: %w", err)
 		}
 	}
@@ -1544,7 +1560,13 @@ func (f *Forest) Modify(adds []Leaf, delHashes []Hash, _ Proof) error {
 		return fmt.Errorf("save num leaves: %w", err)
 	}
 
-	return nil
+	if !mutating {
+		return nil
+	}
+	// The guard above ran with the parent hashes current and the apply
+	// extended them over the new leaves, so they cover every leaf again.
+	f.lastGeneratedLeaves = f.NumLeaves
+	return f.saveGeneratedLeaves()
 }
 
 // ModifyAndReturnTTLs adds and deletes elements from the forest, returning
@@ -1573,29 +1595,9 @@ func (f *Forest) ModifyAndReturnTTLs(adds []Leaf, delHashes []Hash, _ Proof) ([]
 		addIndexes = append(addIndexes, unpackIndex(packed))
 	}
 
-	// Delete first.
-	if len(delHashes) > 0 {
-		err := f.delete(delHashes)
-		if err != nil {
-			return nil, fmt.Errorf("delete: %w", err)
-		}
+	if err := f.modifyInternal(adds, delHashes); err != nil {
+		return nil, err
 	}
-
-	// Then add.
-	for i, leaf := range adds {
-		err := f.add(leaf.Hash, int32(i))
-		if err != nil {
-			return nil, fmt.Errorf("add: %w", err)
-		}
-	}
-
-	if err := f.appendBlockCount(uint32(len(adds))); err != nil {
-		return nil, fmt.Errorf("append block count: %w", err)
-	}
-	if err := f.saveNumLeaves(); err != nil {
-		return nil, fmt.Errorf("save num leaves: %w", err)
-	}
-
 	return addIndexes, nil
 }
 
