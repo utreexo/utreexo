@@ -141,7 +141,7 @@ func (b *deletedBitmap) set(pos uint64) {
 		// Double the capacity to amortize growth. During IBD, NumLeaves
 		// increases every block and newly-added leaves may be deleted in
 		// the same block, so positions steadily exceed the initial size.
-		// Without doubling, every new high-water position would copy the
+		// Without doubling, each new position past the end would copy the
 		// entire bitmap (O(n²) total).
 		newLen := max(
 			uint64(len(b.bits))*2, // amortized doubling
