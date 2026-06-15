@@ -7,14 +7,26 @@ import (
 
 // Record adds and deletes elements without computing parent hashes. The forest
 // must be in record mode first (see EnterRecordMode); Record errors otherwise.
-// Use during IBD for performance; call HashAll or GenerateRoots when done to
-// build the tree. It returns add indexes and leaf positions for deleted leaves.
+// Use during IBD for performance; call RehashAndProve per block, or HashAll
+// when done, to build the tree. It returns add indexes and leaf positions for
+// deleted leaves.
 func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, []uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if !f.recordMode {
 		return nil, nil, fmt.Errorf("cannot call Record outside record mode; call EnterRecordMode first")
+	}
+
+	// Record appends leaves and marks deletions without building their parent
+	// hashes, so the persisted generated-leaves slot can no longer claim the
+	// tree is complete. Zero the slot but not lastGeneratedLeaves: the next
+	// RehashAndProve still resumes incrementally, while a crash reopens to a
+	// full rebuild. A call that records nothing leaves the slot alone.
+	if len(adds) > 0 || len(delHashes) > 0 {
+		if err := f.clearGeneratedLeaves(); err != nil {
+			return nil, nil, fmt.Errorf("clear generated leaves: %w", err)
+		}
 	}
 
 	// writeAddHashes runs in a background goroutine: the file offsets it
@@ -38,6 +50,7 @@ func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, []uint64, error
 		hashWg.Wait()
 		return nil, nil, err
 	}
+	f.unmaskedDels += uint64(len(delPositions))
 
 	if len(adds) > 0 {
 		batch, err := f.positionMap.BeginBatch(uint64(len(adds)))
@@ -176,14 +189,26 @@ func (f *Forest) EnterRecordMode() error {
 	return nil
 }
 
-// ExitRecordMode transitions the forest out of record mode after GenerateRoots
-// has written all intermediate hashes to the data file.
+// ExitRecordMode transitions the forest out of record mode. It requires the
+// interior hashes to be fully caught up — every leaf covered by a rehash pass
+// and every recorded deletion masked — because the normal mutation paths
+// (Modify, ModifyAndReturnTTLs, Undo) extend existing interior hashes rather
+// than rebuild them; exiting over stale interiors would let them bake the
+// staleness into new parents. Run RehashAndProve for the outstanding blocks
+// or HashAll first.
 func (f *Forest) ExitRecordMode() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if !f.recordMode {
 		return nil
+	}
+
+	if !f.interiorsCurrent() {
+		return fmt.Errorf("cannot exit record mode: the last rehash covered %d of "+
+			"%d leaves and %d recorded deletions await their masking walk; run "+
+			"RehashAndProve for the outstanding blocks or HashAll first",
+			f.lastGeneratedLeaves, f.NumLeaves, f.unmaskedDels)
 	}
 
 	f.recordMode = false

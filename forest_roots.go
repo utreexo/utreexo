@@ -1,9 +1,91 @@
 package utreexo
 
 import (
+	"fmt"
+
 	"github.com/utreexo/utreexo/internal/rowwalk"
 	"golang.org/x/exp/slices"
 )
+
+// RehashAndProve regenerates the forest roots and, in the same deletion walk,
+// captures the inclusion proof for pendingDels.
+//
+// The sibling hashes the walk reads while recomputing deletion-path parents are
+// the proof hashes, so the proof falls out of the walk without a separate
+// traversal of the file.
+//
+// Appended leaves are rehashed before the deletion walk, so a sibling the walk
+// reads on an add path is already final. The walk writes each deletion-path
+// parent last, overwriting whatever the add pass left at that position, so the
+// masking of deleted leaves carries all the way to the roots.
+//
+// pendingDels must be deletion positions Record returned, each passed to
+// exactly one successful RehashAndProve call: the forest counts recorded
+// deletions awaiting their masking walk to know when the interior hashes are
+// fully caught up, and the count stays accurate only under that pairing. A
+// call that returns an error consumes nothing — pass the same pendingDels
+// again once the fault is cleared; re-running the walk overwrites its earlier
+// partial writes with the same values.
+func (f *Forest) RehashAndProve(pendingDels []uint64) ([]Hash, uint64, Proof, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	// Interior hashes are rewritten below; keep the generated-leaves slot
+	// cleared until the pass completes so an error return cannot leave a
+	// completeness claim over a half-rebuilt file.
+	if err := f.clearGeneratedLeaves(); err != nil {
+		return nil, 0, Proof{}, fmt.Errorf("clear generated leaves: %w", err)
+	}
+
+	totalLeaves := f.NumLeaves
+	forestRows := f.forestRows
+
+	fromLeaves := f.lastGeneratedLeaves
+	if fromLeaves == 0 || fromLeaves > totalLeaves {
+		fromLeaves = 0
+	}
+	if err := f.processAddsParallel(fromLeaves, totalLeaves, forestRows); err != nil {
+		return nil, 0, Proof{}, err
+	}
+
+	proof, err := f.rehashDeletionsAndCaptureProof(pendingDels, totalLeaves, forestRows)
+	if err != nil {
+		return nil, 0, Proof{}, err
+	}
+
+	roots, numLeaves, err := f.getRoots(totalLeaves)
+	if err != nil {
+		return nil, 0, Proof{}, err
+	}
+
+	// Update the counters only after every step that can fail. An earlier
+	// error returned without touching them, so the caller can pass the same
+	// pendingDels again and the retry counts them exactly once.
+	f.lastGeneratedLeaves = totalLeaves
+	prevUnmasked := f.unmaskedDels
+	if fromLeaves == 0 {
+		// fromLeaves == 0 means the pass above rebuilt every leaf's parent
+		// hashes, not just the appended ones. That rebuild reads every leaf
+		// and masks the deleted ones through the bitmap, so every recorded
+		// deletion is now masked, even ones whose positions were never passed
+		// in pendingDels. None are left outstanding, so the count drops to zero.
+		f.unmaskedDels = 0
+	} else {
+		// This pass masked the pendingDels it was given, so subtract them from
+		// the outstanding count. min keeps it from going below zero: a caller
+		// can hand back more positions than are outstanding (a batch a full
+		// pass already masked), and masking those again is harmless, but a
+		// plain subtraction would underflow the unsigned count to a huge value
+		// that never reaches zero, leaving the forest stuck in record mode.
+		f.unmaskedDels -= min(f.unmaskedDels, uint64(len(pendingDels)))
+	}
+	if err := f.saveGeneratedLeaves(); err != nil {
+		f.unmaskedDels = prevUnmasked
+		return nil, 0, Proof{}, fmt.Errorf("save generated leaves: %w", err)
+	}
+
+	return roots, numLeaves, proof, nil
+}
 
 // rehashDeletionsAndCaptureProof rehashes the deletion paths of pendingDels and
 // assembles their inclusion proof. Walking row by row, sibling pairs that are
@@ -99,11 +181,11 @@ func (f *Forest) rehashDeletionRow(affected []uint64, row uint8, numLeaves uint6
 			}
 
 			if isRootPositionTotalRows(pos, numLeaves, forestRows) {
-				if row == 0 {
-					if err := f.writeHashAt(pos, empty); err != nil {
-						return err
-					}
-				}
+				// A deleted leaf that is itself a root keeps its hash in the
+				// slot, matching deleteSingle: every reader masks the
+				// position through the deleted bitmap, the position map
+				// verifies its entries against the slot, and Undo restores
+				// the root from the preserved hash.
 				rowwalk.MarkRoot(parents, i)
 				continue
 			}

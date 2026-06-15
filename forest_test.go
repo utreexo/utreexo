@@ -1143,6 +1143,53 @@ func TestForestRebuildPositionMap(t *testing.T) {
 	}
 }
 
+func TestForestRebuildPositionMapSkipsEmptyLeaves(t *testing.T) {
+	tmpDir := t.TempDir()
+	forest, err := newForest(memCached(t, 32), memCached(t, 4), memCached(t, 32), nil, tmpDir+"/ctrl", tmpDir+"/slots", 8, 0)
+	require.NoError(t, err)
+
+	left := testHashFromInt(1)
+	right := testHashFromInt(2)
+	adds := []Leaf{
+		{Hash: left},
+		{Hash: empty},
+		{Hash: right},
+	}
+	require.NoError(t, forest.Modify(adds, nil, Proof{}))
+	require.Equal(t, uint64(2), forest.positionMap.Count())
+
+	deleted, err := forest.positionMap.Delete(left)
+	require.NoError(t, err)
+	require.True(t, deleted)
+	deleted, err = forest.positionMap.Delete(right)
+	require.NoError(t, err)
+	require.True(t, deleted)
+	require.Equal(t, uint64(0), forest.positionMap.Count())
+
+	// rebuildPositionMap reads sequentially from the underlying files, just like
+	// startup. Flush the test cache so the underlying memFile has the leaves and
+	// block count.
+	require.NoError(t, forest.file.Flush())
+	require.NoError(t, forest.blockCountsFile.Flush())
+
+	require.NoError(t, forest.rebuildPositionMap())
+	require.Equal(t, uint64(2), forest.positionMap.Count())
+
+	_, found, err := forest.positionMap.Get(empty)
+	require.NoError(t, err)
+	require.False(t, found)
+
+	packed, found, err := forest.positionMap.Get(left)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, packPosIndex(0, 0), packed)
+
+	packed, found, err = forest.positionMap.Get(right)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, packPosIndex(2, 2), packed)
+}
+
 // TestForestUndoAfterRebuild verifies that Undo works correctly after
 // restarting a Forest with a fresh Swiss Table (forcing positionMap rebuild).
 // This catches bugs where the rebuilt positionMap is missing state needed

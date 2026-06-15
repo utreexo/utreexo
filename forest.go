@@ -33,7 +33,7 @@ const (
 	forestDeletedFileName     = "forest_deleted.dat"      // deleted-leaf bitmap, 8 bytes per word
 	forestBlockCountsFileName = "forest_blockcounts.dat"  // per-block add count, 4 bytes each
 	forestJournalFileName     = "forest_journal.dat"      // WAL journal for crash recovery
-	forestMetaFileName        = "forest_meta.dat"         // recordMode + numLeaves + consistency hash
+	forestMetaFileName        = "forest_meta.dat"         // persistent metadata slots; see Forest.metaFile
 	forestPosMapCtrlFileName  = "forest_posmap_ctrl.dat"  // Swiss Table control bytes, mmap'd
 	forestPosMapSlotsFileName = "forest_posmap_slots.dat" // Swiss Table slot values, mmap'd
 )
@@ -141,7 +141,7 @@ func (b *deletedBitmap) set(pos uint64) {
 		// Double the capacity to amortize growth. During IBD, NumLeaves
 		// increases every block and newly-added leaves may be deleted in
 		// the same block, so positions steadily exceed the initial size.
-		// Without doubling, every new high-water position would copy the
+		// Without doubling, each new position past the end would copy the
 		// entire bitmap (O(n²) total).
 		newLen := max(
 			uint64(len(b.bits))*2, // amortized doubling
@@ -248,9 +248,26 @@ type Forest struct {
 
 	file            *cachedRWS
 	blockCountsFile *cachedRWS // stores uint32 add-count per block, 4 bytes each
-	metaFile        *cachedRWS // stores recordMode (bytes 0-31) + consistency hash (bytes 32-63)
-	NumLeaves       uint64
-	forestRows      uint8 // Fixed maximum rows for stable position mapping
+	// metaFile holds the forest's persistent metadata as four fixed-size
+	// 32-byte slots, one per field. The slot size matches the fixed record
+	// size the meta cache and the WAL use for this file. A slot past the end
+	// of the file — a fresh database, or one written before the slot existed —
+	// reads as io.EOF with the buffer left zeroed, i.e. the field's zero value.
+	//
+	//	bytes 0-31    recordMode flag: byte 0 is 1 in record mode, else 0
+	//	bytes 32-63   numLeaves: little-endian uint64 in the first 8 bytes
+	//	bytes 64-95   consistency hash: the WAL's committed bestHash
+	//	bytes 96-127  generated leaves: little-endian uint64 in the first 8 bytes
+	//
+	// recordMode, numLeaves and generated leaves are written through the
+	// WAL-protected cachedRWS, so a flush commits them atomically. The
+	// consistency hash is written straight to the underlying file by the WAL's
+	// Flush at bestHashOffset, bypassing the cache. The generated-leaves slot
+	// is RehashAndProve's resume marker; see saveGeneratedLeaves for its
+	// semantics.
+	metaFile   *cachedRWS
+	NumLeaves  uint64
+	forestRows uint8 // Fixed maximum rows for stable position mapping
 
 	// positionMap maps leaf hashes to packed (addIndex, position) values.
 	// Upper 17 bits = addIndex (index within Modify batch), lower 47 bits = position.
@@ -266,8 +283,41 @@ type Forest struct {
 
 	// recordMode is true after Record is called but before HashAll completes.
 	// Calling Modify while in record mode would corrupt the tree.
-	// Persisted to metaFile (bytes 0-31, padded).
+	// Persisted in the metaFile's recordMode slot (see the metaFile field).
 	recordMode bool
+
+	// lastGeneratedLeaves is the leaf count through which the interior hashes
+	// are known current. Any operation that finishes with complete interiors
+	// advances it to NumLeaves — RehashAndProve, Modify, ModifyAndReturnTTLs,
+	// Undo and HashAll. RehashAndProve reads it to rehash only the leaves
+	// appended since the previous pass — a contiguous range whose paths merge
+	// at every row — instead of the whole forest.
+	//
+	// The forest must track this itself rather than take a per-call count
+	// from the caller: Record can run blocks ahead of RehashAndProve when the
+	// two are pipelined, so one pass may cover several blocks of appends and
+	// only the forest knows where the previous pass stopped.
+	//
+	// Persisted through the metaFile's generated-leaves slot, but only when
+	// the interior hashes are fully caught up (see interiorsCurrent). On
+	// open, loadMetadata seeds this field from the slot when the slot
+	// matches the stored numLeaves; otherwise the field stays zero, which
+	// forces the next pass to run from the first leaf, rebuilding every
+	// interior hash from the leaves and the deleted bitmap. That full pass
+	// heals everything a crash can cut off mid-pipeline: appended leaves
+	// whose interiors were never written, and recorded deletions whose
+	// masking walk never ran. Guarded by f.mu.
+	lastGeneratedLeaves uint64
+
+	// unmaskedDels counts deletions Record has marked in the deleted bitmap
+	// whose masking walk has not yet run. An incremental RehashAndProve masks
+	// the pendingDels it is given and subtracts them; a pass from the first
+	// leaf — or HashAll — masks every deleted leaf at the leaf row and zeroes
+	// the count outright, including positions never passed in. The count is
+	// zero exactly when the interior hashes already reflect the bitmap; while
+	// it is nonzero they do not, and saveGeneratedLeaves keeps the
+	// generated-leaves slot at zero. Guarded by f.mu.
+	unmaskedDels uint64
 
 	// wal is set when created via OpenForest; nil for newForest (test/advanced usage).
 	wal *wal
@@ -302,7 +352,8 @@ func readBlockCounts(file io.ReaderAt, size int64) ([]uint32, error) {
 // the memCached / wrapMem helpers to wrap an in-memory file.
 // blockCountsFile stores the uint32 add-count per block; numLeaves is derived
 // from the cumulative sum of all block counts.
-// metaFile stores recordMode (bytes 0-31), numLeaves (bytes 32-63), and consistency hash (bytes 64-95).
+// metaFile holds the persistent metadata slots; see the metaFile field for the
+// layout.
 // bitmap tracks deleted leaf positions; pass nil for a fresh forest. When using a WAL,
 // the bitmap is loaded by the WAL after recovery and passed here. For non-WAL usage,
 // load it with loadDeletedBitmap.
@@ -349,8 +400,8 @@ func newForest(file, blockCountsFile, metaFile *cachedRWS, bitmap *deletedBitmap
 		return nil, fmt.Errorf("trim block counts: %w", err)
 	}
 
-	// Read consistency hash from metaFile (bytes 64-95, written atomically by WAL).
-	// Zero hash on first run or if metaFile is empty (io.EOF leaves the buffer zeroed).
+	// Read the consistency-hash slot from the metaFile (see the metaFile field).
+	// Zero hash on first run or an empty metaFile (io.EOF leaves the buffer zeroed).
 	var consistencyHash [32]byte
 	if _, err := metaFile.ReadAt(consistencyHash[:], bestHashOffset); err != nil && err != io.EOF {
 		return nil, fmt.Errorf("read consistency hash: %w", err)
@@ -533,10 +584,17 @@ func OpenForest(dbpath string, opts ...ForestOption) (*Forest, error) {
 
 // Flush atomically commits all cached writes through the WAL journal.
 // Only valid on forests created via OpenForest.
+//
+// Acquires f.mu to serialize against concurrent readers and writers of the
+// deletedLeafPositions bitmap: Record mutates it under f.mu and the WAL
+// iterates it while serializing, while RehashAndProve reads it. Without the
+// lock a periodic flush could race those accesses.
 func (f *Forest) Flush(bestHash [32]byte) error {
 	if f.wal == nil {
 		return fmt.Errorf("flush: no WAL (use OpenForest to enable)")
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.wal.Flush(bestHash)
 }
 
@@ -644,6 +702,10 @@ func (f *Forest) rebuildPositionMap() error {
 			var hash Hash
 			copy(hash[:], hashBatch.data[i*32:])
 
+			if hash == empty {
+				continue
+			}
+
 			if err := f.positionMap.Set(hash, packPosIndex(leafPos, addIndex)); err != nil {
 				return fmt.Errorf("positionMap.Set at %d: %w", leafPos, err)
 			}
@@ -658,28 +720,58 @@ func (f *Forest) rebuildPositionMap() error {
 	return nil
 }
 
-// loadMetadata reads recordMode (bytes 0-31) and numLeaves (bytes 32-63)
-// from the metaFile. Each field occupies one 32-byte entry.
+// loadMetadata reads the recordMode, numLeaves and generated-leaves slots from
+// the metaFile (see the metaFile field for the layout). The consistency-hash
+// slot is read separately by OpenForest.
 func (f *Forest) loadMetadata() error {
-	var buf [64]byte
-	_, err := f.metaFile.ReadAt(buf[:], 0)
-	if err == io.EOF {
-		// Fresh database, no metadata yet.
-		return nil
+	// readSlot reads one 32-byte metadata slot. present is false when the slot is
+	// absent: a fresh database, or a meta file written before the slot existed.
+	readSlot := func(offset int64) (slot [32]byte, present bool, err error) {
+		n, err := f.metaFile.ReadAt(slot[:], offset)
+		if err == io.EOF {
+			return slot, n == len(slot), nil
+		}
+		return slot, err == nil, err
 	}
+
+	recordModeSlot, _, err := readSlot(0)
 	if err != nil {
 		return err
 	}
-	f.recordMode = buf[0] != 0
-	if metaLeaves := binary.LittleEndian.Uint64(buf[32:]); metaLeaves > 0 {
+	f.recordMode = recordModeSlot[0] != 0
+
+	numLeavesSlot, _, err := readSlot(32)
+	if err != nil {
+		return err
+	}
+	if metaLeaves := binary.LittleEndian.Uint64(numLeavesSlot[:8]); metaLeaves > 0 {
 		f.NumLeaves = metaLeaves
+	}
+
+	genSlot, genPresent, err := readSlot(generatedLeavesOffset)
+	if err != nil {
+		return err
+	}
+	if !genPresent {
+		// Legacy meta file with no slot. Normal mode is always caught up, so seed
+		// lastGeneratedLeaves from numLeaves. Record mode stays at 0 to rebuild.
+		if !f.recordMode {
+			f.lastGeneratedLeaves = f.NumLeaves
+		}
+		return nil
+	}
+
+	// The slot holds the leaf count the last rehash covered. Seed only when it
+	// still equals numLeaves, otherwise stay at 0 and rebuild from the first leaf.
+	if gen := binary.LittleEndian.Uint64(genSlot[:8]); gen != 0 && gen == f.NumLeaves {
+		f.lastGeneratedLeaves = gen
 	}
 	return nil
 }
 
-// saveRecordMode writes the recordMode flag to the metaFile (bytes 0-31, with
-// the flag in byte 0). The write goes through the WAL-protected cachedRWS, so
-// it is crash-safe.
+// saveRecordMode writes the recordMode flag to its metaFile slot (see the
+// metaFile field). The write goes through the WAL-protected cachedRWS, so it
+// is crash-safe.
 func (f *Forest) saveRecordMode() error {
 	var recordModeBuf [32]byte
 	if f.recordMode {
@@ -688,18 +780,63 @@ func (f *Forest) saveRecordMode() error {
 	return f.metaFile.PutHashAt(recordModeBuf, 0)
 }
 
-// saveNumLeaves writes numLeaves to the metaFile (bytes 32-63). The write goes
-// through the WAL-protected cachedRWS, so it is crash-safe.
+// saveNumLeaves writes numLeaves to its metaFile slot (see the metaFile field).
+// The write goes through the WAL-protected cachedRWS, so it is crash-safe.
 func (f *Forest) saveNumLeaves() error {
 	var numLeavesBuf [32]byte
 	binary.LittleEndian.PutUint64(numLeavesBuf[:], f.NumLeaves)
 	return f.metaFile.PutHashAt(numLeavesBuf, 32)
 }
 
-// ReadConsistencyHash reads the consistency hash from metaFile (bytes 64-95).
-// The hash is written atomically by WAL.Flush(). Returns a zero hash on a
-// fresh database where the metaFile has not yet been written that far.
+// interiorsCurrent reports whether every interior hash matches the leaves and
+// the deleted bitmap: the last rehash pass covered all leaves and no recorded
+// deletion is awaiting its masking walk.
+func (f *Forest) interiorsCurrent() bool {
+	return f.lastGeneratedLeaves == f.NumLeaves && f.unmaskedDels == 0
+}
+
+// clearGeneratedLeaves zeroes the generated-leaves slot of the metaFile.
+// Mutating operations call it before their first write so that an error
+// return part way through never leaves a slot claiming the interior hashes
+// are complete; the operations that finish with complete interiors write the
+// slot back via saveGeneratedLeaves.
+func (f *Forest) clearGeneratedLeaves() error {
+	var zero [32]byte
+	return f.metaFile.PutHashAt(zero, generatedLeavesOffset)
+}
+
+// saveGeneratedLeaves writes the generated-leaves slot of the metaFile:
+// NumLeaves when the interior hashes are current (see interiorsCurrent) and
+// zero otherwise. The write goes through the WAL-protected cachedRWS, so a
+// flush commits the slot atomically with the leaves, bitmap and numLeaves it
+// describes. A stored slot that matches the stored numLeaves therefore proves
+// the stored interior hashes are complete, which lets loadMetadata seed
+// lastGeneratedLeaves and the next rehash pass skip the full rebuild.
+func (f *Forest) saveGeneratedLeaves() error {
+	var buf [32]byte
+	if f.interiorsCurrent() {
+		binary.LittleEndian.PutUint64(buf[:], f.NumLeaves)
+	}
+	// When the parent hashes are not current, buf stays zero, so the slot is
+	// set to zero rather than left untouched. This way the call alone fully
+	// determines the slot's committed value, without relying on a preceding
+	// clearGeneratedLeaves call, so no path can leave a stale nonzero slot that
+	// wrongly claims the parent hashes are complete.
+	return f.metaFile.PutHashAt(buf, generatedLeavesOffset)
+}
+
+// ReadConsistencyHash reads the consistency-hash slot from the metaFile (see
+// the metaFile field). The hash is written atomically by WAL.Flush(). Returns
+// a zero hash on a fresh database where the metaFile has not yet been written
+// that far.
+//
+// Takes f.mu to serialize the metaFile read against a concurrent Flush, which
+// holds the write lock while WAL.Flush rewrites the meta cache and its size
+// tracking.
 func (f *Forest) ReadConsistencyHash() ([32]byte, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
 	var hash [32]byte
 	_, err := f.metaFile.ReadAt(hash[:], bestHashOffset)
 	if err == io.EOF {
@@ -784,17 +921,20 @@ func (f *Forest) appendBlockCount(count uint32) error {
 // add adds a single leaf to the forest.
 // If hash is empty, the sibling (existing root) moves up to the parent position.
 func (f *Forest) add(hash Hash, addIndex int32) error {
-	// Add to position map (before incrementing NumLeaves)
+	// Add to position map (before incrementing NumLeaves). Empty leaves are
+	// not tracked: they exist only to mask out a position.
 	if hash != empty {
 		if err := f.positionMap.Set(hash, packPosIndex(f.NumLeaves, addIndex)); err != nil {
 			return fmt.Errorf("positionMap.Set: %w", err)
 		}
+	}
 
-		// Write the leaf hash at position NumLeaves
-		err := f.writeHash(f.NumLeaves, hash)
-		if err != nil {
-			return fmt.Errorf("write leaf: %w", err)
-		}
+	// Write the leaf hash at position NumLeaves. Empty hashes are written
+	// too: the leaf row is the ground truth every rebuild reads, and the
+	// slot may hold a stale hash from an earlier occupant (Undo removes a
+	// leaf from the position map without clearing its slot).
+	if err := f.writeHash(f.NumLeaves, hash); err != nil {
+		return fmt.Errorf("write leaf: %w", err)
 	}
 
 	currentHash := hash
@@ -834,31 +974,6 @@ func (f *Forest) add(hash Hash, addIndex int32) error {
 	}
 
 	f.NumLeaves++
-	return nil
-}
-
-func (f *Forest) delete(delHashes []Hash) error {
-	if len(delHashes) == 0 {
-		return nil
-	}
-
-	for _, delHash := range delHashes {
-		_, found, err := f.positionMap.Get(delHash)
-		if err != nil {
-			return fmt.Errorf("positionMap.Get: %w", err)
-		}
-		if !found {
-			return fmt.Errorf("delhash %v not found in position map", delHash)
-		}
-	}
-
-	for _, delHash := range delHashes {
-		err := f.deleteSingle(delHash)
-		if err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 
@@ -1155,7 +1270,37 @@ func (f *Forest) Undo(prevAdds []Hash, proof Proof, delHashes, prevRoots []Hash)
 		return fmt.Errorf("cannot call Undo while in record mode; call HashAll first")
 	}
 
-	return f.undoInternal(uint64(len(prevAdds)), delHashes)
+	mutating := len(prevAdds) > 0 || len(delHashes) > 0
+
+	// An undo reverts the existing parent hashes rather than rebuilding them,
+	// so like modifyInternal it is only correct when those hashes are current.
+	// Reject it otherwise so stale hashes are never baked into new parents.
+	if mutating && !f.interiorsCurrent() {
+		return fmt.Errorf("cannot undo a block over stale parent hashes, run HashAll first")
+	}
+
+	// Clear the slot before the first write so an error part way through never
+	// leaves a completeness claim over partially written parent hashes.
+	if mutating {
+		if err := f.clearGeneratedLeaves(); err != nil {
+			return fmt.Errorf("clear generated leaves: %w", err)
+		}
+	}
+
+	if err := f.undoInternal(uint64(len(prevAdds)), delHashes); err != nil {
+		// The parent hash writes may have landed partially, so treat them as
+		// unbuilt and let the next rehash pass run from the first leaf.
+		f.lastGeneratedLeaves = 0
+		return err
+	}
+
+	if !mutating {
+		return nil
+	}
+	// The guard above ran with the parent hashes current and the undo left
+	// them covering every remaining leaf.
+	f.lastGeneratedLeaves = f.NumLeaves
+	return f.saveGeneratedLeaves()
 }
 
 // undoInternal reverts additions and deletions.
@@ -1169,6 +1314,11 @@ func (f *Forest) undoInternal(numAdds uint64, delHashes []Hash) error {
 		hash, err := f.readHash(pos)
 		if err != nil {
 			return fmt.Errorf("read hash at %d for undo add: %w", pos, err)
+		}
+		// An empty hash is a leaf that was added as empty; add never
+		// entered it into the position map.
+		if hash == empty {
+			continue
 		}
 		if _, err := f.positionMap.Delete(hash); err != nil {
 			return fmt.Errorf("positionMap.Delete at %d: %w", pos, err)
@@ -1397,18 +1547,59 @@ func (f *Forest) Modify(adds []Leaf, delHashes []Hash, _ Proof) error {
 		return fmt.Errorf("cannot call Modify while in record mode; call HashAll first")
 	}
 
-	// Delete first.
-	if len(delHashes) > 0 {
-		err := f.delete(delHashes)
+	return f.modifyInternal(adds, delHashes)
+}
+
+// modifyInternal applies one block, deletions first then additions, and
+// persists the block accounting. The caller holds f.mu and has checked
+// recordMode.
+func (f *Forest) modifyInternal(adds []Leaf, delHashes []Hash) error {
+	// Reject unknown deletions before anything is written: a rejected block
+	// leaves the forest untouched, including its generated-leaves claim.
+	for _, delHash := range delHashes {
+		_, found, err := f.positionMap.Get(delHash)
 		if err != nil {
+			return fmt.Errorf("positionMap.Get: %w", err)
+		}
+		if !found {
+			return fmt.Errorf("delhash %v not found in position map", delHash)
+		}
+	}
+
+	mutating := len(adds) > 0 || len(delHashes) > 0
+
+	// A block is applied by extending the existing parent hashes rather than
+	// rebuilding them, so it is only correct when those hashes are already
+	// current. Reject the block otherwise so stale hashes are never baked into
+	// new parents. The callers' recordMode check does not cover this on its
+	// own, because a Modify or Undo that failed partway leaves the parent
+	// hashes stale while recordMode stays false.
+	if mutating && !f.interiorsCurrent() {
+		return fmt.Errorf("cannot apply a block over stale parent hashes, run HashAll first")
+	}
+
+	// Clear the slot before the first write so an error part way through never
+	// leaves a completeness claim over partially written parent hashes.
+	if mutating {
+		if err := f.clearGeneratedLeaves(); err != nil {
+			return fmt.Errorf("clear generated leaves: %w", err)
+		}
+	}
+
+	// Delete first.
+	for _, delHash := range delHashes {
+		if err := f.deleteSingle(delHash); err != nil {
+			// The parent hash writes may have landed partially, so treat them
+			// as unbuilt and let the next rehash pass run from the first leaf.
+			f.lastGeneratedLeaves = 0
 			return fmt.Errorf("delete: %w", err)
 		}
 	}
 
 	// Then add.
 	for i, leaf := range adds {
-		err := f.add(leaf.Hash, int32(i))
-		if err != nil {
+		if err := f.add(leaf.Hash, int32(i)); err != nil {
+			f.lastGeneratedLeaves = 0
 			return fmt.Errorf("add: %w", err)
 		}
 	}
@@ -1420,7 +1611,13 @@ func (f *Forest) Modify(adds []Leaf, delHashes []Hash, _ Proof) error {
 		return fmt.Errorf("save num leaves: %w", err)
 	}
 
-	return nil
+	if !mutating {
+		return nil
+	}
+	// The guard above ran with the parent hashes current and the apply
+	// extended them over the new leaves, so they cover every leaf again.
+	f.lastGeneratedLeaves = f.NumLeaves
+	return f.saveGeneratedLeaves()
 }
 
 // ModifyAndReturnTTLs adds and deletes elements from the forest, returning
@@ -1449,29 +1646,9 @@ func (f *Forest) ModifyAndReturnTTLs(adds []Leaf, delHashes []Hash, _ Proof) ([]
 		addIndexes = append(addIndexes, unpackIndex(packed))
 	}
 
-	// Delete first.
-	if len(delHashes) > 0 {
-		err := f.delete(delHashes)
-		if err != nil {
-			return nil, fmt.Errorf("delete: %w", err)
-		}
+	if err := f.modifyInternal(adds, delHashes); err != nil {
+		return nil, err
 	}
-
-	// Then add.
-	for i, leaf := range adds {
-		err := f.add(leaf.Hash, int32(i))
-		if err != nil {
-			return nil, fmt.Errorf("add: %w", err)
-		}
-	}
-
-	if err := f.appendBlockCount(uint32(len(adds))); err != nil {
-		return nil, fmt.Errorf("append block count: %w", err)
-	}
-	if err := f.saveNumLeaves(); err != nil {
-		return nil, fmt.Errorf("save num leaves: %w", err)
-	}
-
 	return addIndexes, nil
 }
 
@@ -1482,11 +1659,50 @@ func (f *Forest) HashAll() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	// The rebuild below recomputes every interior hash from the first leaf;
+	// until it completes, none of them count as built. An error return part
+	// way through then never leaves a completeness claim over a partially
+	// rebuilt file.
+	if err := f.clearGeneratedLeaves(); err != nil {
+		return fmt.Errorf("clear generated leaves: %w", err)
+	}
+	f.lastGeneratedLeaves = 0
+
 	totalLeaves := f.NumLeaves
 
 	// Reset to rebuild from scratch
 	f.NumLeaves = 0
 
+	if err := f.hashAllLeaves(totalLeaves); err != nil {
+		// The rebuild advances NumLeaves per processed leaf, so a failure
+		// part way through leaves it at a partial count. Restore the real
+		// count: the leaves and block accounting still describe all of
+		// totalLeaves, and a retry or a later Record must start from there
+		// rather than truncate the forest or overwrite live leaves.
+		f.NumLeaves = totalLeaves
+		return err
+	}
+
+	// Every interior hash was just rebuilt from the leaves and the deleted
+	// bitmap, so the next RehashAndProve pass only needs to cover leaves
+	// appended after this point, and every recorded deletion has been
+	// masked by the rebuild.
+	f.lastGeneratedLeaves = totalLeaves
+	f.unmaskedDels = 0
+
+	f.recordMode = false
+	if err := f.saveRecordMode(); err != nil {
+		return fmt.Errorf("save record mode: %w", err)
+	}
+
+	return f.saveGeneratedLeaves()
+}
+
+// hashAllLeaves replays every leaf through the root-merge walk that add uses,
+// writing each parent hash while treating bitmap-deleted leaves as empty.
+// NumLeaves must be zero on entry; it ends at totalLeaves on success and at
+// the number of fully processed leaves on error.
+func (f *Forest) hashAllLeaves(totalLeaves uint64) error {
 	for pos := uint64(0); pos < totalLeaves; pos++ {
 		var hash Hash
 		if f.deletedLeafPositions.isSet(pos) {
@@ -1530,12 +1746,6 @@ func (f *Forest) HashAll() error {
 
 		f.NumLeaves++
 	}
-
-	f.recordMode = false
-	if err := f.saveRecordMode(); err != nil {
-		return fmt.Errorf("save record mode: %w", err)
-	}
-
 	return nil
 }
 

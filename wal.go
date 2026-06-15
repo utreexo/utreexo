@@ -31,9 +31,10 @@ import (
 //	0 = main hash file     (cachedRWS)
 //	1 = block counts file  (cachedRWS)
 //	2 = meta file          (cachedRWS)
-//	    Bytes  0-31: recordMode (byte 0), zero-padded
-//	    Bytes 32-63: numLeaves (bytes 32-39, LE), zero-padded
-//	    Bytes 64-95: consistency hash (written by WAL.Flush)
+//	    Bytes   0-31: recordMode (byte 0), zero-padded
+//	    Bytes  32-63: numLeaves (bytes 32-39, LE), zero-padded
+//	    Bytes  64-95: consistency hash (written by WAL.Flush)
+//	    Bytes 96-127: generated leaves (bytes 96-103, LE), zero-padded
 //	3 = deleted bitmap file (dirty words from deletedBitmap)
 //
 // Flush sequence:
@@ -78,6 +79,11 @@ const (
 	metaFileIdx    = 2  // journal fileIdx for the metadata file
 	deletedFileIdx = 3  // journal fileIdx for the deleted bitmap file
 	bestHashOffset = 64 // byte offset of the consistency hash in the metadata file
+
+	// generatedLeavesOffset is the byte offset of the generated-leaves
+	// count in the metadata file. See Forest.saveGeneratedLeaves for the
+	// slot's semantics.
+	generatedLeavesOffset = 96
 )
 
 // walFile represents an underlying file with its entry size and cache config.
@@ -214,6 +220,12 @@ func (w *wal) Flush(bestHash [32]byte) error {
 	if err := w.applyFromCaches(bestHash); err != nil {
 		return fmt.Errorf("wal apply: %w", err)
 	}
+
+	// The bestHash write above went directly to the underlying metaFile,
+	// bypassing its cache. Bump the cache's size tracking to cover it so
+	// reads of the consistency hash in this session fall through to the
+	// underlying file instead of short-circuiting to io.EOF.
+	w.cached[metaFileIdx].bumpMaxWritten(bestHashOffset + journalHashSize)
 
 	// Sync underlying files (including bitmap file).
 	for i, c := range w.cached {
