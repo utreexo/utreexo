@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 )
 
@@ -57,7 +58,13 @@ type cachedRWS struct {
 	// Concrete dispatch lets escape analysis see through cache.put so
 	// callers like PutHashAt can pass [32]byte by value without forcing
 	// the local to heap.
-	cache      *cacheImpl
+	cache *cacheImpl
+	// mu guards the in-memory cache map so the record and generate pipeline
+	// stages can read and write disjoint file offsets concurrently. It is held
+	// only around the map op, not around the underlying-file read on a miss, so
+	// concurrent reads still overlap. maxWritten is atomic and baseSize is only
+	// rewritten at flush time (when no pipeline stage runs), so neither needs mu.
+	mu         sync.Mutex
 	maxWritten atomic.Int64 // highest byte offset ever written (logical file size)
 	baseSize   int64        // underlying file size at last flush
 }
@@ -99,13 +106,16 @@ func (c *cachedRWS) Size() int64 {
 // past the underlying file size return (0, io.EOF). Callers that want
 // "unwritten position reads as zero" semantics must handle io.EOF themselves.
 func (c *cachedRWS) ReadAt(p []byte, off int64) (int, error) {
+	c.mu.Lock()
 	if cached, ok := c.cache.get(off); ok {
 		n := copy(p, cached)
+		c.mu.Unlock()
 		if n < len(p) {
 			return n, io.EOF
 		}
 		return n, nil
 	}
+	c.mu.Unlock()
 	if off >= c.baseSize {
 		return 0, io.EOF
 	}
@@ -117,11 +127,14 @@ func (c *cachedRWS) ReadAt(p []byte, off int64) (int, error) {
 // value lets callers verify hashes without allocating a buffer that would
 // otherwise escape through io.ReaderAt.
 func (c *cachedRWS) HashAt(off int64) ([32]byte, error) {
+	c.mu.Lock()
 	if cached, ok := c.cache.get(off); ok {
 		var h [32]byte
 		copy(h[:], cached)
+		c.mu.Unlock()
 		return h, nil
 	}
+	c.mu.Unlock()
 	if off >= c.baseSize {
 		return [32]byte{}, io.EOF
 	}
@@ -135,7 +148,10 @@ func (c *cachedRWS) WriteAt(p []byte, off int64) (int, error) {
 	if len(p) != c.cache.entrySize() {
 		return 0, fmt.Errorf("expected %d bytes, got %d", c.cache.entrySize(), len(p))
 	}
-	if err := c.cache.put(off, p); err != nil {
+	c.mu.Lock()
+	err := c.cache.put(off, p)
+	c.mu.Unlock()
+	if err != nil {
 		return 0, err
 	}
 	c.bumpMaxWritten(off + int64(len(p)))
@@ -149,7 +165,10 @@ func (c *cachedRWS) PutHashAt(hash [32]byte, off int64) error {
 	if c.cache.entrySize() != 32 {
 		return fmt.Errorf("PutHashAt: entrySize %d != 32", c.cache.entrySize())
 	}
-	if err := c.cache.put(off, hash[:]); err != nil {
+	c.mu.Lock()
+	err := c.cache.put(off, hash[:])
+	c.mu.Unlock()
+	if err != nil {
 		return err
 	}
 	c.bumpMaxWritten(off + 32)
@@ -163,7 +182,10 @@ func (c *cachedRWS) PutUint32At(val uint32, off int64) error {
 	}
 	var buf [4]byte
 	binary.LittleEndian.PutUint32(buf[:], val)
-	if err := c.cache.put(off, buf[:]); err != nil {
+	c.mu.Lock()
+	err := c.cache.put(off, buf[:])
+	c.mu.Unlock()
+	if err != nil {
 		return err
 	}
 	c.bumpMaxWritten(off + 4)
@@ -184,6 +206,8 @@ func (c *cachedRWS) bumpMaxWritten(end int64) {
 
 // Flush writes all cached data to the underlying file and clears the cache.
 func (c *cachedRWS) Flush() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	var flushErr error
 	c.cache.forEach(func(offset int64, data []byte) {
 		if flushErr != nil {
@@ -207,6 +231,8 @@ func (c *cachedRWS) Flush() error {
 
 // Discard drops all buffered writes without touching the underlying file.
 func (c *cachedRWS) Discard() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.cache.clear()
 	c.maxWritten.Store(c.baseSize)
 }
@@ -218,6 +244,8 @@ func (c *cachedRWS) Close() {
 
 // FlushNeeded returns true if the cache has exceeded its memory threshold.
 func (c *cachedRWS) FlushNeeded() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.cache.overflowed()
 }
 
@@ -258,6 +286,8 @@ func (c *cachedRWS) Truncate(size int64) error {
 // been applied to the underlying file (e.g. by the WAL), so that a
 // subsequent Discard resets to the correct post-flush baseline.
 func (c *cachedRWS) resetAfterFlush() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.cache.clear()
 	c.baseSize = c.maxWritten.Load()
 	return nil

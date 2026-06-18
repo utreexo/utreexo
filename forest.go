@@ -309,15 +309,22 @@ type Forest struct {
 	// masking walk never ran. Guarded by f.mu.
 	lastGeneratedLeaves uint64
 
-	// unmaskedDels counts deletions Record has marked in the deleted bitmap
-	// whose masking walk has not yet run. An incremental RehashAndProve masks
-	// the pendingDels it is given and subtracts them; a pass from the first
-	// leaf — or HashAll — masks every deleted leaf at the leaf row and zeroes
-	// the count outright, including positions never passed in. The count is
-	// zero exactly when the interior hashes already reflect the bitmap; while
-	// it is nonzero they do not, and saveGeneratedLeaves keeps the
-	// generated-leaves slot at zero. Guarded by f.mu.
+	// unmaskedDels counts deletions a Record marked as recorded but whose
+	// masking walk has not yet run. Record raises it; each block's
+	// RehashAndProve subtracts the deletions it masks. It is zero exactly when
+	// the interior hashes reflect every recorded deletion, including
+	// deletion-only blocks that advance no leaves, so interiorsCurrent reads it
+	// to know the forest is caught up. Guarded by pipelineMu.
 	unmaskedDels uint64
+
+	// pipelineMu guards the two fields that the record stage and the generate
+	// stage touch concurrently while both hold f.mu.RLock: NumLeaves (record
+	// advances it, generate reads it through interiorsCurrent) and unmaskedDels
+	// (record raises it, generate lowers it). Every other field either belongs
+	// to a single stage or is reached only under f.mu's write lock, so this is
+	// the whole of the cross-stage sharing. Held only for the field access,
+	// never across the rehash or positionMap work.
+	pipelineMu sync.Mutex
 
 	// wal is set when created via OpenForest; nil for newForest (test/advanced usage).
 	wal *wal
@@ -790,8 +797,25 @@ func (f *Forest) saveNumLeaves() error {
 
 // interiorsCurrent reports whether every interior hash matches the leaves and
 // the deleted bitmap: the last rehash pass covered all leaves and no recorded
-// deletion is awaiting its masking walk.
+// deletion is awaiting its masking walk. unmaskedDels catches a deletion-only
+// block, which advances no leaves, so matching the leaf count alone is not
+// enough.
 func (f *Forest) interiorsCurrent() bool {
+	// NumLeaves and unmaskedDels are read under pipelineMu because the record
+	// stage can be advancing them concurrently while a generate-stage call here
+	// holds only f.mu.RLock. lastGeneratedLeaves belongs to the generate stage
+	// (and to the exclusive callers under f.mu's write lock), so it needs no
+	// extra guard.
+	f.pipelineMu.Lock()
+	defer f.pipelineMu.Unlock()
+	return f.interiorsCurrentLocked()
+}
+
+// interiorsCurrentLocked is interiorsCurrent's body. The caller must hold
+// pipelineMu, which lets saveGeneratedLeaves read the current state and
+// NumLeaves under one acquisition rather than reading NumLeaves a second time
+// unguarded.
+func (f *Forest) interiorsCurrentLocked() bool {
 	return f.lastGeneratedLeaves == f.NumLeaves && f.unmaskedDels == 0
 }
 
@@ -814,9 +838,13 @@ func (f *Forest) clearGeneratedLeaves() error {
 // lastGeneratedLeaves and the next rehash pass skip the full rebuild.
 func (f *Forest) saveGeneratedLeaves() error {
 	var buf [32]byte
-	if f.interiorsCurrent() {
+	// Hold pipelineMu across the check and the NumLeaves read so the record
+	// stage cannot advance NumLeaves between them, and so the read is guarded.
+	f.pipelineMu.Lock()
+	if f.interiorsCurrentLocked() {
 		binary.LittleEndian.PutUint64(buf[:], f.NumLeaves)
 	}
+	f.pipelineMu.Unlock()
 	// When the parent hashes are not current, buf stays zero, so the slot is
 	// set to zero rather than left untouched. This way the call alone fully
 	// determines the slot's committed value, without relying on a preceding
@@ -851,6 +879,10 @@ func (f *Forest) ReadConsistencyHash() ([32]byte, error) {
 func (f *Forest) GetNumLeaves() uint64 {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
+	// NumLeaves is guarded by pipelineMu while the record stage may be
+	// advancing it concurrently with a generate-stage pass.
+	f.pipelineMu.Lock()
+	defer f.pipelineMu.Unlock()
 	return f.NumLeaves
 }
 
@@ -1129,19 +1161,20 @@ func (f *Forest) rehashToRoot(pos uint64, hash Hash) error {
 func (f *Forest) GetRoots() []Hash {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	roots, _, _ := f.getRoots(f.NumLeaves)
+	roots, _, _ := f.getRoots(f.NumLeaves, f.deletedLeafPositions)
 	return roots
 }
 
 // getRoots reads the hashes at the forest's root positions for numLeaves,
-// yielding empty for a root that is itself a leaf marked deleted.
+// masking against deleted, which yields empty for a root that is itself a leaf
+// marked deleted.
 //
 // This function is NOT safe for concurrent access.
-func (f *Forest) getRoots(numLeaves uint64) ([]Hash, uint64, error) {
+func (f *Forest) getRoots(numLeaves uint64, deleted *deletedBitmap) ([]Hash, uint64, error) {
 	rootPositions := RootPositions(numLeaves, f.forestRows)
 	roots := make([]Hash, len(rootPositions))
 	for i, pos := range rootPositions {
-		if f.deletedLeafPositions.isSet(pos) {
+		if deleted.isSet(pos) {
 			roots[i] = empty
 			continue
 		}
@@ -1668,6 +1701,10 @@ func (f *Forest) HashAll() error {
 	}
 	f.lastGeneratedLeaves = 0
 
+	// The rebuild below masks whatever deletions are set in the bitmap. In
+	// record mode Record marks no bits, so a caller that uses HashAll instead
+	// of per-block RehashAndProve passes must mark its recorded deletions in
+	// the bitmap first; the rebuild then masks them and zeroes the count below.
 	totalLeaves := f.NumLeaves
 
 	// Reset to rebuild from scratch
