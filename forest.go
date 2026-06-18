@@ -309,14 +309,12 @@ type Forest struct {
 	// masking walk never ran. Guarded by f.mu.
 	lastGeneratedLeaves uint64
 
-	// unmaskedDels counts deletions Record has marked in the deleted bitmap
-	// whose masking walk has not yet run. An incremental RehashAndProve masks
-	// the pendingDels it is given and subtracts them; a pass from the first
-	// leaf — or HashAll — masks every deleted leaf at the leaf row and zeroes
-	// the count outright, including positions never passed in. The count is
-	// zero exactly when the interior hashes already reflect the bitmap; while
-	// it is nonzero they do not, and saveGeneratedLeaves keeps the
-	// generated-leaves slot at zero. Guarded by f.mu.
+	// unmaskedDels counts deletions a Record marked as recorded but whose
+	// masking walk has not yet run. Record raises it; each block's
+	// RehashAndProve subtracts the deletions it masks. It is zero exactly when
+	// the interior hashes reflect every recorded deletion, including
+	// deletion-only blocks that advance no leaves, so interiorsCurrent reads it
+	// to know the forest is caught up. Guarded by f.mu.
 	unmaskedDels uint64
 
 	// wal is set when created via OpenForest; nil for newForest (test/advanced usage).
@@ -790,7 +788,9 @@ func (f *Forest) saveNumLeaves() error {
 
 // interiorsCurrent reports whether every interior hash matches the leaves and
 // the deleted bitmap: the last rehash pass covered all leaves and no recorded
-// deletion is awaiting its masking walk.
+// deletion is awaiting its masking walk. unmaskedDels catches a deletion-only
+// block, which advances no leaves, so matching the leaf count alone is not
+// enough.
 func (f *Forest) interiorsCurrent() bool {
 	return f.lastGeneratedLeaves == f.NumLeaves && f.unmaskedDels == 0
 }
@@ -1129,19 +1129,20 @@ func (f *Forest) rehashToRoot(pos uint64, hash Hash) error {
 func (f *Forest) GetRoots() []Hash {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	roots, _, _ := f.getRoots(f.NumLeaves)
+	roots, _, _ := f.getRoots(f.NumLeaves, f.deletedLeafPositions)
 	return roots
 }
 
 // getRoots reads the hashes at the forest's root positions for numLeaves,
-// yielding empty for a root that is itself a leaf marked deleted.
+// masking against deleted, which yields empty for a root that is itself a leaf
+// marked deleted.
 //
 // This function is NOT safe for concurrent access.
-func (f *Forest) getRoots(numLeaves uint64) ([]Hash, uint64, error) {
+func (f *Forest) getRoots(numLeaves uint64, deleted *deletedBitmap) ([]Hash, uint64, error) {
 	rootPositions := RootPositions(numLeaves, f.forestRows)
 	roots := make([]Hash, len(rootPositions))
 	for i, pos := range rootPositions {
-		if f.deletedLeafPositions.isSet(pos) {
+		if deleted.isSet(pos) {
 			roots[i] = empty
 			continue
 		}
@@ -1668,6 +1669,10 @@ func (f *Forest) HashAll() error {
 	}
 	f.lastGeneratedLeaves = 0
 
+	// The rebuild below masks whatever deletions are set in the bitmap. In
+	// record mode Record marks no bits, so a caller that uses HashAll instead
+	// of per-block RehashAndProve passes must mark its recorded deletions in
+	// the bitmap first; the rebuild then masks them and zeroes the count below.
 	totalLeaves := f.NumLeaves
 
 	// Reset to rebuild from scratch

@@ -600,10 +600,13 @@ func FuzzForestRecord(f *testing.F) {
 			for i, add := range adds {
 				addHashes[i] = add.Hash
 			}
-			_, _, err = recordForest.Record(addHashes, delHashes)
+			_, blockDels, err := recordForest.Record(addHashes, delHashes)
 			if err != nil {
 				t.Fatalf("block %d: Record error: %v", b, err)
 			}
+			// HashAll masks the deletions set in the bitmap and Record marks
+			// none, so mark this block's deletions as its own pass would.
+			markDeleted(recordForest, blockDels)
 		}
 
 		// Now hash all for the record forest

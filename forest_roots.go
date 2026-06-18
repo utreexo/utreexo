@@ -7,6 +7,28 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+// ForestSnapshot is the per-block view a proof-generation pass operates on: the
+// cumulative leaf count at that block and the deleted-leaf bitmap to mask
+// against. RehashAndProve reads layout and masking only through the snapshot,
+// never the live forest fields, so a pass is pinned to one block's state even
+// while the record stage advances NumLeaves for later blocks.
+//
+// In the IBD pipeline the snapshot's bitmap is the forest's own: the generate
+// stage is its sole writer and rehashes blocks in record order, so it holds the
+// deletions in force as of numLeaves. The snapshot is the unit a future
+// concurrent generator would carry per block, each with its own bitmap version.
+type ForestSnapshot struct {
+	numLeaves uint64
+	deleted   *deletedBitmap
+}
+
+// Snapshot captures the forest's per-block proof-generation view at numLeaves.
+// The caller passes the leaf count it recorded for the block being proved
+// rather than letting the pass read the live NumLeaves.
+func (f *Forest) Snapshot(numLeaves uint64) ForestSnapshot {
+	return ForestSnapshot{numLeaves: numLeaves, deleted: f.deletedLeafPositions}
+}
+
 // RehashAndProve regenerates the forest roots and, in the same deletion walk,
 // captures the inclusion proof for pendingDels.
 //
@@ -19,14 +41,22 @@ import (
 // parent last, overwriting whatever the add pass left at that position, so the
 // masking of deleted leaves carries all the way to the roots.
 //
+// snap is the per-block view (see ForestSnapshot): the leaf count the roots are
+// laid out over and the bitmap the walk masks against. The pass reads both from
+// the snapshot, so the record stage advancing NumLeaves for later blocks cannot
+// bias this one.
+//
 // pendingDels must be deletion positions Record returned, each passed to
-// exactly one successful RehashAndProve call: the forest counts recorded
-// deletions awaiting their masking walk to know when the interior hashes are
-// fully caught up, and the count stays accurate only under that pairing. A
-// call that returns an error consumes nothing — pass the same pendingDels
-// again once the fault is cleared; re-running the walk overwrites its earlier
-// partial writes with the same values.
-func (f *Forest) RehashAndProve(pendingDels []uint64) ([]Hash, uint64, Proof, error) {
+// exactly one successful RehashAndProve call. RehashAndProve sets their deleted
+// bits at the start of the pass and masks them as it walks, so the bitmap
+// reflects exactly the blocks rehashed so far and a later block's deletions
+// never bias this one. The forest counts these deletions awaiting their masking
+// walk to know when the interior hashes are fully caught up, and the count
+// stays accurate only under that one-call pairing. A call that returns an error
+// consumes nothing. Pass the same pendingDels again once the fault is cleared,
+// and re-running the walk overwrites its earlier partial writes with the same
+// values.
+func (f *Forest) RehashAndProve(snap ForestSnapshot, pendingDels []uint64) ([]Hash, uint64, Proof, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -37,23 +67,32 @@ func (f *Forest) RehashAndProve(pendingDels []uint64) ([]Hash, uint64, Proof, er
 		return nil, 0, Proof{}, fmt.Errorf("clear generated leaves: %w", err)
 	}
 
-	totalLeaves := f.NumLeaves
+	// Mark this block's deletions at the moment its proof pass runs. Record
+	// leaves the bitmap untouched, so a block's bits become visible exactly
+	// here, both for the add pass that masks created-then-spent leaves and for
+	// the deletion walk below. The set is idempotent, so a retry after an error
+	// re-marks the same positions harmlessly.
+	for _, pos := range pendingDels {
+		snap.deleted.set(pos)
+	}
+
+	totalLeaves := snap.numLeaves
 	forestRows := f.forestRows
 
 	fromLeaves := f.lastGeneratedLeaves
 	if fromLeaves == 0 || fromLeaves > totalLeaves {
 		fromLeaves = 0
 	}
-	if err := f.processAddsParallel(fromLeaves, totalLeaves, forestRows); err != nil {
+	if err := f.processAddsParallel(fromLeaves, totalLeaves, forestRows, snap.deleted); err != nil {
 		return nil, 0, Proof{}, err
 	}
 
-	proof, err := f.rehashDeletionsAndCaptureProof(pendingDels, totalLeaves, forestRows)
+	proof, err := f.rehashDeletionsAndCaptureProof(pendingDels, totalLeaves, forestRows, snap.deleted)
 	if err != nil {
 		return nil, 0, Proof{}, err
 	}
 
-	roots, numLeaves, err := f.getRoots(totalLeaves)
+	roots, numLeaves, err := f.getRoots(totalLeaves, snap.deleted)
 	if err != nil {
 		return nil, 0, Proof{}, err
 	}
@@ -62,23 +101,15 @@ func (f *Forest) RehashAndProve(pendingDels []uint64) ([]Hash, uint64, Proof, er
 	// error returned without touching them, so the caller can pass the same
 	// pendingDels again and the retry counts them exactly once.
 	f.lastGeneratedLeaves = totalLeaves
+	// This pass masked the pendingDels it was given, so subtract them from the
+	// outstanding count Record raised when it recorded the block. Record marks
+	// no bits, so a from-scratch pass (fromLeaves == 0) still masks only the
+	// deletions whose bits a pass has set, i.e. this block's, which is why the
+	// subtraction is unconditional. min keeps the unsigned count from
+	// underflowing if a caller re-passes positions an earlier pass already
+	// masked.
 	prevUnmasked := f.unmaskedDels
-	if fromLeaves == 0 {
-		// fromLeaves == 0 means the pass above rebuilt every leaf's parent
-		// hashes, not just the appended ones. That rebuild reads every leaf
-		// and masks the deleted ones through the bitmap, so every recorded
-		// deletion is now masked, even ones whose positions were never passed
-		// in pendingDels. None are left outstanding, so the count drops to zero.
-		f.unmaskedDels = 0
-	} else {
-		// This pass masked the pendingDels it was given, so subtract them from
-		// the outstanding count. min keeps it from going below zero: a caller
-		// can hand back more positions than are outstanding (a batch a full
-		// pass already masked), and masking those again is harmless, but a
-		// plain subtraction would underflow the unsigned count to a huge value
-		// that never reaches zero, leaving the forest stuck in record mode.
-		f.unmaskedDels -= min(f.unmaskedDels, uint64(len(pendingDels)))
-	}
+	f.unmaskedDels -= min(f.unmaskedDels, uint64(len(pendingDels)))
 	if err := f.saveGeneratedLeaves(); err != nil {
 		f.unmaskedDels = prevUnmasked
 		return nil, 0, Proof{}, fmt.Errorf("save generated leaves: %w", err)
@@ -97,7 +128,7 @@ func (f *Forest) RehashAndProve(pendingDels []uint64) ([]Hash, uint64, Proof, er
 // defaultForestRows when the forest uses a different row count). Proof hashes
 // are ordered by row, then by position within the row, as calculateHashes
 // expects.
-func (f *Forest) rehashDeletionsAndCaptureProof(pendingDels []uint64, numLeaves uint64, forestRows uint8) (Proof, error) {
+func (f *Forest) rehashDeletionsAndCaptureProof(pendingDels []uint64, numLeaves uint64, forestRows uint8, deleted *deletedBitmap) (Proof, error) {
 	if len(pendingDels) == 0 {
 		return Proof{}, nil
 	}
@@ -110,7 +141,7 @@ func (f *Forest) rehashDeletionsAndCaptureProof(pendingDels []uint64, numLeaves 
 	proofHashes := make([]Hash, 0, len(pendingDels))
 
 	for row := uint8(0); row < forestRows && len(affected) > 0; row++ {
-		parents, rowProof, err := f.rehashDeletionRow(affected, row, numLeaves, forestRows)
+		parents, rowProof, err := f.rehashDeletionRow(affected, row, numLeaves, forestRows, deleted)
 		if err != nil {
 			return Proof{}, err
 		}
@@ -148,7 +179,7 @@ func sortedDeletionTargets(pendingDels []uint64, forestRows uint8) (affected, ta
 // A sibling past the row's last occupied position contributes an empty hash
 // without touching the file, so a read error is a real I/O fault and aborts
 // the row.
-func (f *Forest) rehashDeletionRow(affected []uint64, row uint8, numLeaves uint64, forestRows uint8) ([]uint64, []Hash, error) {
+func (f *Forest) rehashDeletionRow(affected []uint64, row uint8, numLeaves uint64, forestRows uint8, deleted *deletedBitmap) ([]uint64, []Hash, error) {
 	n := len(affected)
 	parents := make([]uint64, n)
 	proofSlots := make([]Hash, n)
@@ -190,7 +221,7 @@ func (f *Forest) rehashDeletionRow(affected []uint64, row uint8, numLeaves uint6
 				continue
 			}
 
-			currentHash, err := f.readHashForProof(pos)
+			currentHash, err := f.readHashForProof(pos, deleted)
 			if err != nil {
 				return err
 			}
@@ -206,7 +237,7 @@ func (f *Forest) rehashDeletionRow(affected []uint64, row uint8, numLeaves uint6
 			if sibPos > maxPos {
 				sibHash = empty
 			} else {
-				h, err := f.readHashForProof(sibPos)
+				h, err := f.readHashForProof(sibPos, deleted)
 				if err != nil {
 					return err
 				}
@@ -251,7 +282,7 @@ func (f *Forest) rehashDeletionRow(affected []uint64, row uint8, numLeaves uint6
 // root one row at a time. At every row the rehash collapses each appended
 // sibling pair to a single parent computation; the per-row work is fanned
 // across the pipeline worker pool once a row reaches minParallelSize.
-func (f *Forest) processAddsParallel(prevLeaves, totalLeaves uint64, forestRows uint8) error {
+func (f *Forest) processAddsParallel(prevLeaves, totalLeaves uint64, forestRows uint8, deleted *deletedBitmap) error {
 	numAdds := int(totalLeaves - prevLeaves)
 	if numAdds == 0 {
 		return nil
@@ -267,7 +298,7 @@ func (f *Forest) processAddsParallel(prevLeaves, totalLeaves uint64, forestRows 
 
 	for row := uint8(0); row < forestRows && len(affected) > 0; row++ {
 		var err error
-		parents, err = f.rehashAddRow(affected, parents, row, totalLeaves, forestRows)
+		parents, err = f.rehashAddRow(affected, parents, row, totalLeaves, forestRows, deleted)
 		if err != nil {
 			return err
 		}
@@ -289,7 +320,7 @@ func (f *Forest) processAddsParallel(prevLeaves, totalLeaves uint64, forestRows 
 // the file, so a read error is a real I/O fault and aborts the row. parents is
 // grown when too small and reused as the result buffer to avoid a per-row
 // allocation.
-func (f *Forest) rehashAddRow(affected, parents []uint64, row uint8, totalLeaves uint64, forestRows uint8) ([]uint64, error) {
+func (f *Forest) rehashAddRow(affected, parents []uint64, row uint8, totalLeaves uint64, forestRows uint8, deleted *deletedBitmap) ([]uint64, error) {
 	n := len(affected)
 	if cap(parents) < n {
 		parents = make([]uint64, n)
@@ -333,7 +364,7 @@ func (f *Forest) rehashAddRow(affected, parents []uint64, row uint8, totalLeaves
 			rPos := rightSib(pos)
 
 			var leftHash, rightHash Hash
-			if row == 0 && f.deletedLeafPositions.isSet(lPos) {
+			if row == 0 && deleted.isSet(lPos) {
 				leftHash = empty
 			} else {
 				h, err := f.readHashAt(lPos)
@@ -345,7 +376,7 @@ func (f *Forest) rehashAddRow(affected, parents []uint64, row uint8, totalLeaves
 
 			if rPos > maxPos {
 				rightHash = empty
-			} else if row == 0 && f.deletedLeafPositions.isSet(rPos) {
+			} else if row == 0 && deleted.isSet(rPos) {
 				rightHash = empty
 			} else {
 				h, err := f.readHashAt(rPos)
@@ -394,8 +425,8 @@ func runRowWork(n int, work func(start, end int) error) error {
 
 // readHashForProof reads the hash at position, returning empty for a deleted
 // leaf on the leaf row. Non-leaf rows always read from the file.
-func (f *Forest) readHashForProof(position uint64) (Hash, error) {
-	if DetectRow(position, f.forestRows) == 0 && f.deletedLeafPositions.isSet(position) {
+func (f *Forest) readHashForProof(position uint64, deleted *deletedBitmap) (Hash, error) {
+	if DetectRow(position, f.forestRows) == 0 && deleted.isSet(position) {
 		return empty, nil
 	}
 	return f.readHashAt(position)
