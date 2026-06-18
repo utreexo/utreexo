@@ -11,8 +11,14 @@ import (
 // when done, to build the tree. It returns add indexes and leaf positions for
 // deleted leaves.
 func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, []uint64, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	// A read lock, not the write lock: Record and RehashAndProve touch disjoint
+	// forest state (Record owns positionMap, the leaf row and NumLeaves; the
+	// pass owns the bitmap, the interior rows and the generated-leaves counters)
+	// so they run concurrently. The cache mutex and pipelineMu cover the few
+	// structures both reach. The write lock stays for the exclusive paths
+	// (Modify, Undo, HashAll, Flush) that must not overlap the pipeline.
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 
 	if !f.recordMode {
 		return nil, nil, fmt.Errorf("cannot call Record outside record mode; call EnterRecordMode first")
@@ -71,7 +77,9 @@ func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, []uint64, error
 	if hashErr != nil {
 		return nil, nil, hashErr
 	}
+	f.pipelineMu.Lock()
 	f.NumLeaves += uint64(len(adds))
+	f.pipelineMu.Unlock()
 
 	if err := f.appendBlockCount(uint32(len(adds))); err != nil {
 		return nil, nil, fmt.Errorf("append block count: %w", err)
@@ -87,7 +95,9 @@ func (f *Forest) Record(adds []Hash, delHashes []Hash) ([]int32, []uint64, error
 	// bitmap here would let a later block's deletions bias an earlier block's
 	// pass. interiorsCurrent uses the count to know when every recorded deletion
 	// has been masked, including deletion-only blocks that add no leaves.
+	f.pipelineMu.Lock()
 	f.unmaskedDels += uint64(len(delPositions))
+	f.pipelineMu.Unlock()
 
 	return addIndexes, delPositions, nil
 }

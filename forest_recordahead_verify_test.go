@@ -1,10 +1,110 @@
 package utreexo
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+// TestConcurrentRecordGenerate runs the record stage and the generate stage in
+// separate goroutines against one forest, mirroring the IBD proof pipeline:
+// record runs ahead through a buffered channel while generate rehashes each
+// block in order. It asserts every block's roots and leaf count match a serial
+// Modify reference. Run with -race to prove the two stages share no unguarded
+// state.
+func TestConcurrentRecordGenerate(t *testing.T) {
+	const (
+		numAdds  = uint32(64)
+		duration = uint32(0x07)
+		seed     = int64(0x07)
+		blocks   = 40
+	)
+
+	// Setup (serial): drive a reference forest with Modify, capturing each
+	// block's true roots, leaf count, and the add/del hashes to replay.
+	gtChain := newSimChainWithSeed(duration, seed)
+	gdir := t.TempDir()
+	gt, err := newForest(memCached(t, 32), memCached(t, 4), memCached(t, 32), nil, gdir+"/ctrl", gdir+"/slots", 16, 0)
+	require.NoError(t, err)
+
+	type blockData struct {
+		addHashes []Hash
+		delHashes []Hash
+		numLeaves uint64
+		roots     []Hash
+	}
+	data := make([]blockData, blocks)
+	for b := 0; b < blocks; b++ {
+		adds, _, delHashes := gtChain.NextBlock(numAdds)
+		require.NoError(t, gt.Modify(adds, delHashes, Proof{}), "gt block %d", b)
+		data[b] = blockData{
+			addHashes: simChainAddHashes(adds),
+			delHashes: delHashes,
+			numLeaves: gt.NumLeaves,
+			roots:     gt.GetRoots(),
+		}
+	}
+
+	// Concurrent forest in record mode.
+	rdir := t.TempDir()
+	rf, err := newForest(memCached(t, 32), memCached(t, 4), memCached(t, 32), nil, rdir+"/ctrl", rdir+"/slots", 16, 0)
+	require.NoError(t, err)
+	require.NoError(t, rf.EnterRecordMode())
+
+	type genItem struct {
+		block        int
+		numLeaves    uint64
+		delPositions []uint64
+	}
+	// Buffered so the record stage runs ahead of the generate stage, which is
+	// the steady state the pipeline relies on and the case that exposed the bug.
+	ch := make(chan genItem, 32)
+
+	gotRoots := make([][]Hash, blocks)
+	gotNumLeaves := make([]uint64, blocks)
+	var recordErr, genErr error
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Record stage.
+	go func() {
+		defer wg.Done()
+		defer close(ch)
+		for b := 0; b < blocks; b++ {
+			_, delPositions, err := rf.Record(data[b].addHashes, data[b].delHashes)
+			if err != nil {
+				recordErr = err
+				return
+			}
+			ch <- genItem{block: b, numLeaves: data[b].numLeaves, delPositions: delPositions}
+		}
+	}()
+
+	// Generate stage: rehash each block in order as it arrives.
+	go func() {
+		defer wg.Done()
+		for item := range ch {
+			roots, nl, _, err := rf.RehashAndProve(rf.Snapshot(item.numLeaves), item.delPositions)
+			if err != nil {
+				genErr = err
+				return
+			}
+			gotRoots[item.block] = roots
+			gotNumLeaves[item.block] = nl
+		}
+	}()
+
+	wg.Wait()
+	require.NoError(t, recordErr)
+	require.NoError(t, genErr)
+
+	for b := 0; b < blocks; b++ {
+		require.Equal(t, data[b].numLeaves, gotNumLeaves[b], "block %d numLeaves", b)
+		require.Equal(t, data[b].roots, gotRoots[b], "block %d roots", b)
+	}
+}
 
 // markDeleted sets the given leaf positions in the forest's deleted bitmap,
 // mirroring what each block's RehashAndProve does. White-box tests that drive

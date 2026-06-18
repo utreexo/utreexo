@@ -57,8 +57,14 @@ func (f *Forest) Snapshot(numLeaves uint64) ForestSnapshot {
 // and re-running the walk overwrites its earlier partial writes with the same
 // values.
 func (f *Forest) RehashAndProve(snap ForestSnapshot, pendingDels []uint64) ([]Hash, uint64, Proof, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	// A read lock, not the write lock: this pass and a concurrent Record touch
+	// disjoint forest state. This pass owns the bitmap, the interior rows and
+	// the generated-leaves counters; Record owns positionMap, the leaf row and
+	// NumLeaves. The cache mutex and pipelineMu cover what both reach. Only one
+	// generate stage runs at a time, so the pass-owned fields need no extra
+	// guard here.
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 
 	// Interior hashes are rewritten below; keep the generated-leaves slot
 	// cleared until the pass completes so an error return cannot leave a
@@ -108,10 +114,14 @@ func (f *Forest) RehashAndProve(snap ForestSnapshot, pendingDels []uint64) ([]Ha
 	// subtraction is unconditional. min keeps the unsigned count from
 	// underflowing if a caller re-passes positions an earlier pass already
 	// masked.
+	f.pipelineMu.Lock()
 	prevUnmasked := f.unmaskedDels
 	f.unmaskedDels -= min(f.unmaskedDels, uint64(len(pendingDels)))
+	f.pipelineMu.Unlock()
 	if err := f.saveGeneratedLeaves(); err != nil {
+		f.pipelineMu.Lock()
 		f.unmaskedDels = prevUnmasked
+		f.pipelineMu.Unlock()
 		return nil, 0, Proof{}, fmt.Errorf("save generated leaves: %w", err)
 	}
 
