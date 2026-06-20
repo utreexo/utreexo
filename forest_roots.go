@@ -2,6 +2,7 @@ package utreexo
 
 import (
 	"fmt"
+	"io"
 
 	"github.com/utreexo/utreexo/internal/rowwalk"
 	"golang.org/x/exp/slices"
@@ -246,12 +247,52 @@ func (f *Forest) rehashDeletionRow(affected []uint64, row uint8, numLeaves uint6
 	return parents, proof, nil
 }
 
-// processAddsParallel rebuilds the interior hashes for the leaves appended
-// between prevLeaves and totalLeaves, walking each affected position up to its
-// root one row at a time. At every row the rehash collapses each appended
-// sibling pair to a single parent computation; the per-row work is fanned
-// across the pipeline worker pool once a row reaches minParallelSize.
+// defaultAddRehashWindow caps how many appended leaves one rehash pass
+// materializes, so its memory is bounded. Forests override it via addRehashWindow.
+const defaultAddRehashWindow uint64 = 1 << 22
+
+// processAddsParallel rebuilds the parent hashes for the leaves appended between
+// prevLeaves and totalLeaves, one window at a time so a large backlog stays
+// bounded in memory. Each window extends the hashes like an appended block, so
+// its right edge resolves when the next window covers it, and the WAL cache is
+// spilled between windows. A single-window pass never flushes.
 func (f *Forest) processAddsParallel(prevLeaves, totalLeaves uint64, forestRows uint8) error {
+	window := f.addRehashWindow
+	if window == 0 {
+		window = defaultAddRehashWindow
+	}
+	for start := prevLeaves; start < totalLeaves; start += window {
+		end := start + window
+		if end > totalLeaves {
+			end = totalLeaves
+		}
+		if err := f.processAddsRange(start, end, forestRows); err != nil {
+			return err
+		}
+
+		// Spill the WAL cache at the committed bestHash so the node cache stays
+		// in budget. RehashAndProve holds f.mu, so flush directly. The marker
+		// stays behind, so a kill here redoes the pass from the first leaf.
+		if end < totalLeaves && f.FlushNeeded() {
+			var bestHash [32]byte
+			if _, err := f.metaFile.ReadAt(bestHash[:], bestHashOffset); err != nil && err != io.EOF {
+				return err
+			}
+			if err := f.wal.Flush(bestHash); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// processAddsRange rebuilds the interior hashes for the leaves appended between
+// prevLeaves and totalLeaves, walking each affected position up to its root one
+// row at a time. At every row the rehash collapses each appended sibling pair to
+// a single parent computation; the per-row work is fanned across the pipeline
+// worker pool once a row reaches minParallelSize.
+func (f *Forest) processAddsRange(prevLeaves, totalLeaves uint64, forestRows uint8) error {
 	numAdds := int(totalLeaves - prevLeaves)
 	if numAdds == 0 {
 		return nil

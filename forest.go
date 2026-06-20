@@ -269,6 +269,10 @@ type Forest struct {
 	NumLeaves  uint64
 	forestRows uint8 // Fixed maximum rows for stable position mapping
 
+	// addRehashWindow caps how many appended leaves one rehash pass
+	// materializes. Zero uses defaultAddRehashWindow.
+	addRehashWindow uint64
+
 	// positionMap maps leaf hashes to packed (addIndex, position) values.
 	// Upper 17 bits = addIndex (index within Modify batch), lower 47 bits = position.
 	// Only tracks leaves (row 0), not intermediate nodes.

@@ -206,6 +206,52 @@ func TestProcessAddsParallel(t *testing.T) {
 	}
 }
 
+// TestRehashAndProveFromZeroWindowed records leaves into a WAL forest whose cache
+// is far below the forest, then rebuilds from zero on reopen. The shrunk window
+// makes the pass cross many boundaries and the tiny cache makes it spill between
+// them and read boundary hashes back from disk. The roots must match Modify, and
+// the recorded NumLeaves must survive the reopen and the spills.
+func TestRehashAndProveFromZeroWindowed(t *testing.T) {
+	const numLeaves = 5000
+
+	dbpath := t.TempDir()
+	adds, _, _ := newSimChainWithSeed(0, 0x99).NextBlock(numLeaves)
+
+	want, err := OpenForest(t.TempDir())
+	require.NoError(t, err)
+	defer want.Close([32]byte{})
+	require.NoError(t, want.Modify(adds, nil, Proof{}))
+
+	// Record with a cache far below the forest, then close without rehashing: the
+	// marker-behind shape a kill during IBD record leaves.
+	f, err := OpenForest(dbpath, MaxCacheMemory(64*32))
+	require.NoError(t, err)
+	require.NoError(t, f.EnterRecordMode())
+	_, _, err = f.Record(simChainAddHashes(adds), nil)
+	require.NoError(t, err)
+	require.True(t, f.FlushNeeded(), "recorded leaves should overflow the tiny budget")
+	require.NoError(t, f.Close([32]byte{0x01}))
+
+	// Reopen and rebuild from zero: NumLeaves survives, and the pass spills between
+	// windows and reads boundary hashes back from disk to land the Modify roots.
+	f2, err := OpenForest(dbpath, MaxCacheMemory(64*32))
+	require.NoError(t, err)
+	f2.addRehashWindow = 64
+	require.Equal(t, uint64(numLeaves), f2.NumLeaves)
+	require.Zero(t, f2.lastGeneratedLeaves)
+
+	roots, _, _, err := f2.RehashAndProve(nil)
+	require.NoError(t, err)
+	require.Equal(t, want.GetRoots(), roots)
+	require.NoError(t, f2.Close([32]byte{0x01}))
+
+	// The spills during the rebuild must not have disturbed NumLeaves.
+	f3, err := OpenForest(dbpath)
+	require.NoError(t, err)
+	defer f3.Close([32]byte{0x01})
+	require.Equal(t, uint64(numLeaves), f3.NumLeaves)
+}
+
 func TestRehashDeletionsAndCaptureProof(t *testing.T) {
 	const forestRows = uint8(16)
 
