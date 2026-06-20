@@ -1,6 +1,7 @@
 package utreexo
 
 import (
+	"encoding/binary"
 	"sort"
 	"testing"
 
@@ -250,6 +251,50 @@ func TestRehashAndProveFromZeroWindowed(t *testing.T) {
 	require.NoError(t, err)
 	defer f3.Close([32]byte{0x01})
 	require.Equal(t, uint64(numLeaves), f3.NumLeaves)
+}
+
+// TestLoadMetadataTrustsBehindMarker checks that a nonzero marker behind
+// NumLeaves is taken as caught up (lastGeneratedLeaves seeded from NumLeaves, no
+// rebuild), the shape an old binary leaves by advancing NumLeaves without it.
+func TestLoadMetadataTrustsBehindMarker(t *testing.T) {
+	const (
+		numLeaves = 3000
+		markAt    = 2000 // the marker is rewritten to this count, behind NumLeaves
+	)
+
+	dbpath := t.TempDir()
+	adds, _, _ := newSimChainWithSeed(0, 0x4D).NextBlock(numLeaves)
+
+	// Build a current forest, then rewrite the marker behind NumLeaves like an
+	// old binary that advances NumLeaves without touching it.
+	f, err := OpenForest(dbpath)
+	require.NoError(t, err)
+	require.NoError(t, f.Modify(adds, nil, Proof{}))
+
+	f.mu.Lock()
+	var markBuf [32]byte
+	binary.LittleEndian.PutUint64(markBuf[:], markAt)
+	require.NoError(t, f.metaFile.PutHashAt(markBuf, generatedLeavesOffset))
+	f.mu.Unlock()
+	require.NoError(t, f.Close([32]byte{0x01}))
+
+	// Reopen: the behind marker is taken as caught up, so lastGeneratedLeaves
+	// equals NumLeaves.
+	reopened, err := OpenForest(dbpath)
+	require.NoError(t, err)
+	defer reopened.Close([32]byte{0x01})
+	require.Equal(t, uint64(numLeaves), reopened.lastGeneratedLeaves)
+	require.Equal(t, uint64(numLeaves), reopened.NumLeaves)
+
+	// The forest is already caught up, so this returns the existing roots.
+	roots, _, _, err := reopened.RehashAndProve(nil)
+	require.NoError(t, err)
+
+	modifyForest, err := OpenForest(t.TempDir())
+	require.NoError(t, err)
+	defer modifyForest.Close([32]byte{})
+	require.NoError(t, modifyForest.Modify(adds, nil, Proof{}))
+	require.Equal(t, modifyForest.GetRoots(), roots)
 }
 
 func TestRehashDeletionsAndCaptureProof(t *testing.T) {
