@@ -269,6 +269,10 @@ type Forest struct {
 	NumLeaves  uint64
 	forestRows uint8 // Fixed maximum rows for stable position mapping
 
+	// addRehashWindow caps how many appended leaves one rehash pass
+	// materializes. Zero uses defaultAddRehashWindow.
+	addRehashWindow uint64
+
 	// positionMap maps leaf hashes to packed (addIndex, position) values.
 	// Upper 17 bits = addIndex (index within Modify batch), lower 47 bits = position.
 	// Only tracks leaves (row 0), not intermediate nodes.
@@ -761,10 +765,12 @@ func (f *Forest) loadMetadata() error {
 		return nil
 	}
 
-	// The slot holds the leaf count the last rehash covered. Seed only when it
-	// still equals numLeaves, otherwise stay at 0 and rebuild from the first leaf.
-	if gen := binary.LittleEndian.Uint64(genSlot[:8]); gen != 0 && gen == f.NumLeaves {
-		f.lastGeneratedLeaves = gen
+	// A nonzero slot means no append cleared it (Record clears it), so every
+	// append since built its parent hashes and the forest is caught up: seed
+	// lastGeneratedLeaves from numLeaves, like the legacy path above. A zero slot
+	// or one ahead of numLeaves rebuilds from the first leaf.
+	if gen := binary.LittleEndian.Uint64(genSlot[:8]); gen != 0 && gen <= f.NumLeaves {
+		f.lastGeneratedLeaves = f.NumLeaves
 	}
 	return nil
 }
