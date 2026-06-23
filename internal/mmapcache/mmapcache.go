@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package mmapcache provides a cache backed by a single anonymous mmap region.
 // The region covers the full data file address space but pages are
 // demand-paged by the kernel, so only touched pages consume physical memory.

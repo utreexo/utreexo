@@ -70,6 +70,17 @@ func TestSwissPositionMapFallbackBasic(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, uint64(100), v)
 
+	// BeginBatch + Insert
+	batch, err := m.BeginBatch(2)
+	require.NoError(t, err)
+	require.NoError(t, batch.Insert(h2, 200))
+	require.NoError(t, batch.Insert([32]byte{4}, 40))
+	require.Equal(t, uint64(4), m.Count())
+	v, ok, err = m.Get(h2)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint64(200), v)
+
 	// SetConsistencyHash is a no-op
 	require.NoError(t, m.SetConsistencyHash([32]byte{1, 2, 3}))
 }

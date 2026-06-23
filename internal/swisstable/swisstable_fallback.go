@@ -49,6 +49,27 @@ func (m *SwissPositionMap) Set(hash [32]byte, packed uint64) error {
 	return nil
 }
 
+// Batch inserts hash and packed position pairs into a SwissPositionMap. It
+// mirrors the batch API of the mmap-backed implementation so this package
+// presents the same public API on every platform. The map grows on demand,
+// so the batch only holds a reference to its map.
+type Batch struct {
+	m *SwissPositionMap
+}
+
+// BeginBatch returns a Batch for inserting up to maxEntries pairs. The map
+// resizes itself as entries are added, so maxEntries is unused here.
+func (m *SwissPositionMap) BeginBatch(maxEntries uint64) (Batch, error) {
+	return Batch{m: m}, nil
+}
+
+// Insert stores a hash -> packed position mapping. No duplicate check is
+// performed, as the caller guarantees new keys.
+func (b *Batch) Insert(hash [32]byte, packed uint64) error {
+	b.m.m[mini(hash)] = packed
+	return nil
+}
+
 // Delete removes a hash from the map.
 func (m *SwissPositionMap) Delete(hash [32]byte) (bool, error) {
 	key := mini(hash)
