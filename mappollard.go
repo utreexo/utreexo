@@ -87,6 +87,58 @@ type view struct {
 	full      bool
 }
 
+// MapPollardView holds a prepared modification to a MapPollard. The
+// modification does not affect the MapPollard until Commit is called.
+type MapPollardView struct {
+	pollard   *MapPollard
+	view      *view
+	committed bool
+}
+
+// GetStump returns the accumulator state produced by the prepared
+// modification.
+func (v *MapPollardView) GetStump() Stump {
+	if v == nil || v.view == nil {
+		return Stump{}
+	}
+
+	roots := make([]Hash, len(v.view.roots))
+	copy(roots, v.view.roots)
+	return Stump{
+		Roots:     roots,
+		NumLeaves: v.view.numLeaves,
+	}
+}
+
+// GetTreeRows returns the tree rows produced by the prepared modification.
+func (v *MapPollardView) GetTreeRows() uint8 {
+	if v == nil || v.view == nil {
+		return 0
+	}
+
+	return v.view.totalRows
+}
+
+// Commit applies the prepared modification to its MapPollard. It returns an
+// error when the view was already committed.
+func (v *MapPollardView) Commit() error {
+	if v == nil || v.pollard == nil || v.view == nil {
+		return fmt.Errorf("cannot commit an uninitialized MapPollard view")
+	}
+
+	m := v.pollard
+	m.rwLock.Lock()
+	defer m.rwLock.Unlock()
+
+	if v.committed {
+		return fmt.Errorf("MapPollard view was already committed")
+	}
+
+	m.commitView(v.view)
+	v.committed = true
+	return nil
+}
+
 // initView returns an initialized view.
 func initView(rs []Hash, count int) *view {
 	r := make([]Hash, len(rs))
@@ -1108,6 +1160,53 @@ func (m *MapPollard) getView(ins modifyInstruction) (*view, error) {
 	return view, nil
 }
 
+// getProofIngestedView returns a view that has ingested the proof and has all
+// the information needed to perform a modification.
+func (m *MapPollard) getProofIngestedView(ins modifyInstruction,
+	ingestIns ingestInstruction) (*view, error) {
+
+	view := initView(m.Roots, len(ins.after))
+	view.numLeaves = m.NumLeaves
+	view.totalRows = m.TotalRows
+	view.full = m.Full
+
+	for _, root := range m.Roots {
+		if root == empty {
+			continue
+		}
+		node, found := m.Nodes.Get(root)
+		if !found {
+			return nil, fmt.Errorf("root node of %v not found", root)
+		}
+		view.nodes[root] = node
+	}
+
+	// Each triple in ingestIns.Hashes is [leftSib, rightSib, aunt].
+	// Pre-copy the aunt nodes the pollard has into the view for view.ingest.
+	//
+	// These aunts are required to be in the view in order for the accumulator
+	// deletion operation to succeed.
+	for i := 2; i < len(ingestIns.Hashes); i += 3 {
+		hash := ingestIns.Hashes[i]
+		node, found := m.Nodes.Get(hash)
+		if found {
+			view.nodes[hash] = node
+		}
+	}
+	if err := view.ingest(ingestIns); err != nil {
+		return nil, err
+	}
+
+	if err := view.fetchNodesNeededForDels(m, ins); err != nil {
+		return nil, err
+	}
+	if err := view.fetchNodesNeededForAdd(m); err != nil {
+		return nil, err
+	}
+
+	return view, nil
+}
+
 // commitView commits the view to the map pollard.
 func (m *MapPollard) commitView(v *view) {
 	for _, delHash := range v.removed {
@@ -1244,31 +1343,76 @@ func NewMapPollard(full bool) MapPollard {
 	}
 }
 
+// prepareModify builds a view containing the requested modification.
+//
+// This function is not safe for concurrent access.
+func (m *MapPollard) prepareModify(adds []Leaf, delHashes []Hash,
+	proof Proof, ingestProof bool) (*MapPollardView, error) {
+
+	ins, err := generateModifyIns(m.NumLeaves, delHashes, proof)
+	if err != nil {
+		return nil, err
+	}
+
+	var view *view
+	if ingestProof {
+		var ingestIns ingestInstruction
+		ingestIns, _, _, err = generateIngestAndUndoInfo(m.NumLeaves,
+			delHashes, proof)
+		if err != nil {
+			return nil, err
+		}
+		view, err = m.getProofIngestedView(ins, ingestIns)
+	} else {
+		view, err = m.getView(ins)
+	}
+	if err != nil {
+		return nil, err
+	}
+	err = view.remove(ins)
+	if err != nil {
+		return nil, err
+	}
+
+	err = view.add(adds)
+	if err != nil {
+		return nil, err
+	}
+
+	return &MapPollardView{
+		pollard: m,
+		view:    view,
+	}, nil
+}
+
+// PrepareModify returns a view containing the result of the requested
+// modification without changing the MapPollard. The proof is ingested into
+// the prepared view. Commit applies the view to the MapPollard.
+//
+// The MapPollard must not be modified until the view is committed or
+// discarded.
+//
+// NOTE: there's no verification done that the passed in proof is valid. It's
+// the caller's responsibility to verify that the given proof is valid.
+func (m *MapPollard) PrepareModify(adds []Leaf, delHashes []Hash,
+	proof Proof) (*MapPollardView, error) {
+
+	m.rwLock.RLock()
+	defer m.rwLock.RUnlock()
+
+	return m.prepareModify(adds, delHashes, proof, true)
+}
+
 // Modify takes in the additions and deletions and updates the accumulator accordingly.
 func (m *MapPollard) Modify(adds []Leaf, delHashes []Hash, proof Proof) error {
 	m.rwLock.Lock()
 	defer m.rwLock.Unlock()
 
-	ins, err := generateModifyIns(m.NumLeaves, delHashes, proof)
+	prepared, err := m.prepareModify(adds, delHashes, proof, false)
 	if err != nil {
 		return err
 	}
-
-	view, err := m.getView(ins)
-	if err != nil {
-		return err
-	}
-	err = view.remove(ins)
-	if err != nil {
-		return err
-	}
-
-	err = view.add(adds)
-	if err != nil {
-		return err
-	}
-
-	m.commitView(view)
+	m.commitView(prepared.view)
 
 	return nil
 }
