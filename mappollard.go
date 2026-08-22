@@ -1026,9 +1026,16 @@ func (v *view) fetchNodesNeededForDels(m *MapPollard, ins modifyInstruction) err
 	return nil
 }
 
-// fetchAndCacheNode fetches and caches the node for the given hash. Caller should check that
-// the given hash isn't empty as it'll just return as not found.
+// fetchAndCacheNode returns the node from the view when it is already cached.
+// Otherwise, it fetches the node from the map pollard and caches it in the
+// view. Nodes in the view may include modifications that have not been
+// committed to the map pollard. Caller should check that the given hash isn't
+// empty as it'll just return as not found.
 func (v *view) fetchAndCacheNode(m *MapPollard, hash Hash) (Node, bool) {
+	if node, found := v.nodes[hash]; found {
+		return node, true
+	}
+
 	node, found := m.Nodes.Get(hash)
 	if !found {
 		return Node{}, found
@@ -1046,23 +1053,19 @@ func (v *view) cacheBelows(m *MapPollard, node Node) error {
 	}
 
 	if node.LBelow != empty {
-		lBelow, found := m.Nodes.Get(node.LBelow)
+		_, found := v.fetchAndCacheNode(m, node.LBelow)
 		if !found {
 			return fmt.Errorf("node %v points to %v but is "+
 				"not found", node, node.LBelow)
 		}
-
-		v.nodes[node.LBelow] = lBelow
 	}
 
 	if node.RBelow != empty {
-		rBelow, found := m.Nodes.Get(node.RBelow)
+		_, found := v.fetchAndCacheNode(m, node.RBelow)
 		if !found {
 			return fmt.Errorf("node %v points to %v but is "+
 				"not found", node, node.RBelow)
 		}
-
-		v.nodes[node.RBelow] = rBelow
 	}
 
 	return nil

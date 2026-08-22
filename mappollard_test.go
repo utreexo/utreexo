@@ -646,6 +646,167 @@ func applySingleModify(utreexo Utreexo, adds []Leaf, dels []Hash) error {
 	return nil
 }
 
+// proofViewTestCase contains a map pollard and a view with an ingested
+// deletion proof.
+type proofViewTestCase struct {
+	name     string
+	pollard  *MapPollard
+	view     *view
+	rootHash Hash
+	rootNode Node
+}
+
+// buildProofViewTestCase creates the state shared by the view lookup tests.
+func buildProofViewTestCase(t *testing.T, name string,
+	delIndexes []int) proofViewTestCase {
+
+	t.Helper()
+
+	// Build a complete pollard that can generate the deletion proof.
+	leaves := make([]Leaf, 8)
+	for i := range leaves {
+		leaves[i] = Leaf{
+			Hash:     sha256.Sum256([]byte{uint8(i)}),
+			Remember: true,
+		}
+	}
+	full := NewMapPollard(false)
+	require.NoError(t, full.Modify(leaves, nil, Proof{}))
+
+	// Generate the proof and the same ingest instruction used by the map
+	// pollard proof path.
+	delHashes := make([]Hash, len(delIndexes))
+	for i, index := range delIndexes {
+		delHashes[i] = leaves[index].Hash
+	}
+	proof, err := full.Prove(delHashes)
+	require.NoError(t, err)
+	ingestIns, _, _, err := generateIngestAndUndoInfo(
+		full.NumLeaves, delHashes, proof)
+	require.NoError(t, err)
+
+	// Initialize the map pollard with roots only, then copy those roots into
+	// the view before ingesting the proof.
+	pollard := InitWithStump(full.GetStump())
+	pollard.TotalRows = full.TotalRows
+	proofView := initView(pollard.Roots, len(delHashes))
+	proofView.numLeaves = pollard.NumLeaves
+	proofView.totalRows = pollard.TotalRows
+	for _, root := range pollard.Roots {
+		rootNode, found := pollard.Nodes.Get(root)
+		require.True(t, found)
+		proofView.nodes[root] = rootNode
+	}
+	require.NoError(t, proofView.ingest(ingestIns))
+
+	// Select a root whose node has child hashes after proof ingestion.
+	var rootHash Hash
+	var rootNode Node
+	for _, root := range pollard.Roots {
+		node := proofView.nodes[root]
+		if node.LBelow != empty {
+			rootHash = root
+			rootNode = node
+			break
+		}
+	}
+	require.NotEqual(t, Hash(empty), rootHash)
+
+	return proofViewTestCase{
+		name:     name,
+		pollard:  pollard,
+		view:     proofView,
+		rootHash: rootHash,
+		rootNode: rootNode,
+	}
+}
+
+func TestViewFetchAndCacheNodeAfterProofIngestion(t *testing.T) {
+	// Build the complete input state for each proof shape before running the
+	// assertions.
+	tests := []proofViewTestCase{
+		buildProofViewTestCase(t, "single deletion", []int{2}),
+		buildProofViewTestCase(t, "deletions in both branches", []int{1, 6}),
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// The root hash is present in both caches. The map pollard node has
+			// empty child hashes, while the view node has the child hashes
+			// supplied by the proof.
+			mapRoot, found := test.pollard.Nodes.Get(test.rootHash)
+			require.True(t, found)
+			require.Equal(t, Hash(empty), mapRoot.LBelow)
+			require.Equal(t, Hash(empty), mapRoot.RBelow)
+			require.NotEqual(t, Hash(empty), test.rootNode.LBelow)
+			require.NotEqual(t, Hash(empty), test.rootNode.RBelow)
+
+			// The lookup must return the node already present in the view.
+			gotRoot, found := test.view.fetchAndCacheNode(test.pollard,
+				test.rootHash)
+			require.True(t, found)
+			require.Equal(t, test.rootNode, gotRoot)
+		})
+	}
+}
+
+// cacheBelowsTestCase contains the expected children for a root whose child
+// nodes are split between the map pollard and the view.
+type cacheBelowsTestCase struct {
+	proofViewTestCase
+	leftChild  Node
+	rightChild Node
+}
+
+// buildCacheBelowsTestCase places one child in each node cache.
+func buildCacheBelowsTestCase(t *testing.T, name string,
+	delIndexes []int) cacheBelowsTestCase {
+
+	t.Helper()
+
+	test := buildProofViewTestCase(t, name, delIndexes)
+	leftChild, found := test.view.nodes[test.rootNode.LBelow]
+	require.True(t, found)
+	rightChild, found := test.view.nodes[test.rootNode.RBelow]
+	require.True(t, found)
+
+	// Keep the left child only in the map pollard and the right child only
+	// in the view. cacheBelows must resolve both sources.
+	delete(test.view.nodes, test.rootNode.LBelow)
+	test.pollard.Nodes.Put(test.rootNode.LBelow, leftChild)
+
+	return cacheBelowsTestCase{
+		proofViewTestCase: test,
+		leftChild:         leftChild,
+		rightChild:        rightChild,
+	}
+}
+
+func TestViewCacheBelowsAfterProofIngestion(t *testing.T) {
+	// Build the complete input state for each proof shape before running the
+	// assertions.
+	tests := []cacheBelowsTestCase{
+		buildCacheBelowsTestCase(t, "single deletion", []int{2}),
+		buildCacheBelowsTestCase(t, "deletions in both branches", []int{1, 6}),
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// cacheBelows must copy the left child from the map pollard and retain
+			// the right child from the view.
+			require.NoError(t, test.view.cacheBelows(test.pollard,
+				test.rootNode))
+
+			leftChild, found := test.view.nodes[test.rootNode.LBelow]
+			require.True(t, found)
+			require.Equal(t, test.leftChild, leftChild)
+			rightChild, found := test.view.nodes[test.rootNode.RBelow]
+			require.True(t, found)
+			require.Equal(t, test.rightChild, rightChild)
+		})
+	}
+}
+
 func TestGetMissingPositions(t *testing.T) {
 	tests := []struct {
 		mods   []singleModify
