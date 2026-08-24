@@ -825,6 +825,145 @@ func (v *view) undoDeletion(createIndex []int32, undoInfo undoInfo, ingestIns in
 	return nil
 }
 
+// undoAdd removes the additions that had happened and places empty roots back
+// to where they were.
+func (v *view) undoAdd(m *MapPollard, adds []Hash, origPrevRoots []Hash) error {
+	s := Stump{
+		Roots:     make([]Hash, len(origPrevRoots)),
+		NumLeaves: v.numLeaves - uint64(len(adds)),
+	}
+	copy(s.Roots, origPrevRoots)
+
+	prevRoots, err := getSingleRoots(s, adds)
+	if err != nil {
+		return err
+	}
+	for i := len(prevRoots) - 1; i >= 0; i-- {
+		prevRoot := prevRoots[i]
+		err = v.undoSingleAdd(m, prevRoot)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// undoSingleAdd undoes the last single addition and puts back empty roots that
+// were present before the addition.
+func (v *view) undoSingleAdd(m *MapPollard, prevRoots []Hash) error {
+	startIdx := 0
+	for i, root := range v.roots {
+		if i > len(prevRoots)-1 {
+			break
+		}
+
+		if root != prevRoots[i] {
+			break
+		}
+
+		startIdx++
+	}
+
+	// Pop from the root hashes and remove node.
+	var rootHash Hash
+	rootHash, v.roots = v.roots[len(v.roots)-1], v.roots[:len(v.roots)-1]
+	node, found := v.fetchAndCacheNode(m, rootHash)
+	if !found {
+		return fmt.Errorf("roothash of %v not found in nodes", rootHash)
+	}
+	v.del(rootHash)
+
+	for i := startIdx; i < len(prevRoots); i++ {
+		if prevRoots[i] == empty {
+			v.roots = append(v.roots, prevRoots[i])
+			v.nodes[prevRoots[i]] = Node{AddIndex: -1}
+
+			continue
+		}
+
+		// We have nothing cached.
+		if node.RBelow == empty && node.LBelow == empty {
+			v.roots = append(v.roots, prevRoots[i])
+			v.nodes[prevRoots[i]] = Node{AddIndex: -1}
+
+			node = Node{AddIndex: -1}
+			rootHash = empty
+			continue
+		}
+
+		rNode, found := v.fetchAndCacheNode(m, node.RBelow)
+		if !found {
+			return fmt.Errorf("rBelow of %v for %v not found in nodes",
+				node.RBelow, rootHash)
+		}
+		lNode, found := v.fetchAndCacheNode(m, node.LBelow)
+		if !found {
+			return fmt.Errorf("lBelow of %v for %v not found in nodes",
+				node.LBelow, rootHash)
+		}
+
+		// swapBelow repoints the children's above pointers, so they must be
+		// in the view first.
+		if err := v.cacheBelows(m, rNode); err != nil {
+			return err
+		}
+		if err := v.cacheBelows(m, lNode); err != nil {
+			return err
+		}
+
+		// Swap and point to children.
+		var err error
+		rNode, lNode, err = v.swapBelow(rNode, lNode, node.RBelow, node.LBelow)
+		if err != nil {
+			return err
+		}
+
+		// Make lnode the root.
+		lNode.Above = empty
+		v.nodes[node.LBelow] = lNode
+		v.roots = append(v.roots, node.LBelow)
+
+		// Remove rnode.
+		v.del(node.RBelow)
+
+		// Set rNode as next node to be removed.
+		rootHash = node.RBelow
+		node = rNode
+	}
+
+	v.numLeaves--
+	v.totalRows = TreeRows(v.numLeaves)
+
+	return nil
+}
+
+// Undo reverts the last modify on the view. The adds, createIndex, proof,
+// hashes, and origPrevRoots MUST be the data from the previous modify.
+// origPrevRoots MUST be the roots that this Undo will go back to.
+func (v *view) Undo(m *MapPollard, adds []Hash, createIndex []int32,
+	proof Proof, undoIns undoInfo, ingestIns ingestInstruction,
+	hashes, origPrevRoots []Hash) error {
+
+	s := Stump{
+		Roots:     make([]Hash, len(origPrevRoots)),
+		NumLeaves: v.numLeaves - uint64(len(adds)),
+	}
+	copy(s.Roots, origPrevRoots)
+
+	_, err := s.Update(hashes, nil, proof)
+	if err != nil {
+		return err
+	}
+
+	err = v.undoAdd(m, adds, s.Roots)
+	if err != nil {
+		return err
+	}
+
+	return v.undoDeletion(createIndex, undoIns, ingestIns, hashes)
+}
+
 // ingest places the proof in the view.
 func (v *view) ingest(ins ingestInstruction) error {
 	if len(ins.Hashes)%3 != 0 {
@@ -1123,23 +1262,6 @@ func (v *view) cacheBelows(m *MapPollard, node Node) error {
 	return nil
 }
 
-// getViewForUndo returns a view that is able to perform undos.
-//
-// NOTE: it's only capable of undoing deletions for now.
-func (m *MapPollard) getViewForUndo(undoIns undoInfo) (*view, error) {
-	view := initView(m.Roots, undoIns.length())
-	view.numLeaves = m.NumLeaves
-	view.totalRows = m.TotalRows
-	view.full = m.Full
-
-	err := view.fetchNodesNeededForUndoDel(m, undoIns)
-	if err != nil {
-		return nil, err
-	}
-
-	return view, nil
-}
-
 // getView returns a view that has all the necesssary information to perform a modification.
 func (m *MapPollard) getView(ins modifyInstruction) (*view, error) {
 	view := initView(m.Roots, len(ins.after))
@@ -1403,6 +1525,56 @@ func (m *MapPollard) PrepareModify(adds []Leaf, delHashes []Hash,
 	return m.prepareModify(adds, delHashes, proof, true)
 }
 
+// prepareUndo returns a view with the previous modify undone. The adds,
+// createIndex, proof, hashes, and origPrevRoots MUST be the data from the
+// modify being undone. origPrevRoots MUST be the roots that the undo will go
+// back to.
+func (m *MapPollard) prepareUndo(adds []Hash, createIndex []int32,
+	proof Proof, hashes, origPrevRoots []Hash) (*MapPollardView, error) {
+
+	view := initView(m.Roots, 0)
+	view.numLeaves = m.NumLeaves
+	view.totalRows = m.TotalRows
+	view.full = m.Full
+
+	ingestIns, undoIns, _, err := generateIngestAndUndoInfo(
+		m.NumLeaves-uint64(len(adds)), hashes, proof)
+	if err != nil {
+		return nil, err
+	}
+
+	err = view.fetchNodesNeededForUndoDel(m, undoIns)
+	if err != nil {
+		return nil, err
+	}
+
+	err = view.Undo(m, adds, createIndex, proof, undoIns, ingestIns,
+		hashes, origPrevRoots)
+	if err != nil {
+		return nil, err
+	}
+
+	return &MapPollardView{
+		pollard: m,
+		view:    view,
+	}, nil
+}
+
+// PrepareUndo returns a view containing the result of undoing the previous
+// modify without changing the MapPollard. Commit applies the view to the
+// MapPollard.
+//
+// The MapPollard must not be modified until the view is committed or
+// discarded.
+func (m *MapPollard) PrepareUndo(adds []Hash, createIndex []int32,
+	proof Proof, hashes, origPrevRoots []Hash) (*MapPollardView, error) {
+
+	m.rwLock.RLock()
+	defer m.rwLock.RUnlock()
+
+	return m.prepareUndo(adds, createIndex, proof, hashes, origPrevRoots)
+}
+
 // Modify takes in the additions and deletions and updates the accumulator accordingly.
 func (m *MapPollard) Modify(adds []Leaf, delHashes []Hash, proof Proof) error {
 	m.rwLock.Lock()
@@ -1469,129 +1641,6 @@ func (m *MapPollard) AllSubTreesToString() string {
 	return AllSubTreesToString(m)
 }
 
-// undoSingleAdd undo-s the last single addition and will put back empty roots that were
-// written over.
-func (m *MapPollard) undoSingleAdd(prevRoots []Hash) error {
-	startIdx := 0
-	for i, root := range m.Roots {
-		if i > len(prevRoots)-1 {
-			break
-		}
-
-		if root != prevRoots[i] {
-			break
-		}
-
-		startIdx++
-	}
-
-	// Pop from the root hashes and remove node.
-	var rootHash Hash
-	rootHash, m.Roots = m.Roots[len(m.Roots)-1], m.Roots[:len(m.Roots)-1]
-	node, found := m.Nodes.Get(rootHash)
-	if !found {
-		return fmt.Errorf("roothash of %v not found in nodes", rootHash)
-	}
-	m.Nodes.Delete(rootHash)
-
-	for i := startIdx; i < len(prevRoots); i++ {
-		if prevRoots[i] == empty {
-			m.Roots = append(m.Roots, prevRoots[i])
-			m.Nodes.Put(prevRoots[i], Node{AddIndex: -1})
-
-			continue
-		}
-
-		// We have nothing cached.
-		if node.RBelow == empty && node.LBelow == empty {
-			m.Roots = append(m.Roots, prevRoots[i])
-			m.Nodes.Put(prevRoots[i], Node{AddIndex: -1})
-
-			node = Node{AddIndex: -1}
-			rootHash = empty
-			continue
-		}
-
-		rNode, found := m.Nodes.Get(node.RBelow)
-		if !found {
-			return fmt.Errorf("rBelow of %v for %v not found in nodes",
-				node.RBelow, rootHash)
-		}
-		lNode, found := m.Nodes.Get(node.LBelow)
-		if !found {
-			return fmt.Errorf("lBelow of %v for %v not found in nodes",
-				node.LBelow, rootHash)
-		}
-
-		// Swap and point to children.
-		var err error
-		rNode, lNode, err = m.swapBelow(rNode, lNode, node.RBelow, node.LBelow)
-		if err != nil {
-			return err
-		}
-
-		// Make lnode the root.
-		lNode.Above = empty
-		m.Nodes.Put(node.LBelow, lNode)
-		m.Roots = append(m.Roots, node.LBelow)
-
-		// Remove rnode.
-		m.Nodes.Delete(node.RBelow)
-
-		// Set rNode as next node to be removed.
-		rootHash = node.RBelow
-		node = rNode
-	}
-
-	m.NumLeaves--
-	m.TotalRows = TreeRows(m.NumLeaves)
-
-	return nil
-}
-
-// updateAbove makes n's belows point to newHash.
-func (m *MapPollard) updateAbove(n Node, newHash Hash) error {
-	if n.LBelow == empty {
-		return nil
-	}
-
-	lBelow, lfound := m.Nodes.Get(n.LBelow)
-	rBelow, rfound := m.Nodes.Get(n.RBelow)
-	if !lfound && !rfound {
-		return nil
-	}
-
-	if !lfound || !rfound {
-		return fmt.Errorf("n points to lBelow of %v and rBelow of %v "+
-			"but only one of them exists", n.LBelow, n.RBelow)
-	}
-
-	lBelow.Above = newHash
-	rBelow.Above = newHash
-
-	m.Nodes.Put(n.LBelow, lBelow)
-	m.Nodes.Put(n.RBelow, rBelow)
-
-	return nil
-}
-
-func (m *MapPollard) swapBelow(a, b Node, aHash, bHash Hash) (Node, Node, error) {
-	err := m.updateAbove(a, bHash)
-	if err != nil {
-		return a, b, err
-	}
-	err = m.updateAbove(b, aHash)
-	if err != nil {
-		return a, b, err
-	}
-
-	// Swap below nodes.
-	a.LBelow, a.RBelow, b.LBelow, b.RBelow =
-		b.LBelow, b.RBelow, a.LBelow, a.RBelow
-
-	return a, b, err
-}
-
 // getSingleRoots returns the roots after each single addition.
 func getSingleRoots(s Stump, adds []Hash) ([][]Hash, error) {
 	roots := make([][]Hash, len(adds))
@@ -1608,29 +1657,6 @@ func getSingleRoots(s Stump, adds []Hash) ([][]Hash, error) {
 	return roots, nil
 }
 
-// undoAdd will remove the additions that had happened and will place empty roots back to where they were.
-func (m *MapPollard) undoAdd(adds []Hash, origPrevRoots []Hash) error {
-	s := Stump{
-		Roots:     make([]Hash, len(origPrevRoots)),
-		NumLeaves: m.NumLeaves - uint64(len(adds)),
-	}
-	copy(s.Roots, origPrevRoots)
-
-	prevRoots, err := getSingleRoots(s, adds)
-	if err != nil {
-		return err
-	}
-	for i := len(prevRoots) - 1; i >= 0; i-- {
-		prevRoot := prevRoots[i]
-		err = m.undoSingleAdd(prevRoot)
-		if err != nil {
-			return err
-		}
-	}
-
-	return err
-}
-
 // Undo will undo the last modify. The numAdds, proof, hashes, MUST be the data from the previous modify.
 // The origPrevRoots MUST be the roots that this Undo will go back to.
 func (m *MapPollard) UndoWithTTLs(adds []Hash, createIndex []int32,
@@ -1639,38 +1665,11 @@ func (m *MapPollard) UndoWithTTLs(adds []Hash, createIndex []int32,
 	m.rwLock.Lock()
 	defer m.rwLock.Unlock()
 
-	s := Stump{
-		Roots:     make([]Hash, len(origPrevRoots)),
-		NumLeaves: m.NumLeaves - uint64(len(adds)),
-	}
-	copy(s.Roots, origPrevRoots)
-	_, err := s.Update(hashes, nil, proof)
-	if err != nil {
-		return fmt.Errorf("Undo errored while undoing added leaves. %v", err)
-	}
-
-	// TODO: figure out undo adds with view as well.
-	err = m.undoAdd(adds, s.Roots)
-	if err != nil {
-		return fmt.Errorf("Undo errored while undoing added leaves. %v", err)
-	}
-
-	ingestIns, undoInfo, _, err := generateIngestAndUndoInfo(m.NumLeaves, hashes, proof)
+	prepared, err := m.prepareUndo(adds, createIndex, proof, hashes, origPrevRoots)
 	if err != nil {
 		return err
 	}
-
-	view, err := m.getViewForUndo(undoInfo)
-	if err != nil {
-		return err
-	}
-
-	err = view.undoDeletion(createIndex, undoInfo, ingestIns, hashes)
-	if err != nil {
-		return fmt.Errorf("Undo errored while undoing deleted leaves. %v", err)
-	}
-
-	m.commitView(view)
+	m.commitView(prepared.view)
 	return nil
 }
 
@@ -1680,38 +1679,11 @@ func (m *MapPollard) Undo(adds []Hash, proof Proof, hashes, origPrevRoots []Hash
 	m.rwLock.Lock()
 	defer m.rwLock.Unlock()
 
-	s := Stump{
-		Roots:     make([]Hash, len(origPrevRoots)),
-		NumLeaves: m.NumLeaves - uint64(len(adds)),
-	}
-	copy(s.Roots, origPrevRoots)
-	_, err := s.Update(hashes, nil, proof)
-	if err != nil {
-		return fmt.Errorf("Undo errored while undoing added leaves. %v", err)
-	}
-
-	// TODO: figure out undo adds with view as well.
-	err = m.undoAdd(adds, s.Roots)
-	if err != nil {
-		return fmt.Errorf("Undo errored while undoing added leaves. %v", err)
-	}
-
-	ingestIns, undoInfo, _, err := generateIngestAndUndoInfo(m.NumLeaves, hashes, proof)
+	prepared, err := m.prepareUndo(adds, nil, proof, hashes, origPrevRoots)
 	if err != nil {
 		return err
 	}
-
-	view, err := m.getViewForUndo(undoInfo)
-	if err != nil {
-		return err
-	}
-
-	err = view.undoDeletion(nil, undoInfo, ingestIns, hashes)
-	if err != nil {
-		return fmt.Errorf("Undo errored while undoing deleted leaves. %v", err)
-	}
-
-	m.commitView(view)
+	m.commitView(prepared.view)
 	return nil
 }
 
