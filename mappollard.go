@@ -938,6 +938,32 @@ func (v *view) undoSingleAdd(m *MapPollard, prevRoots []Hash) error {
 	return nil
 }
 
+// Undo reverts the last modify on the view. The adds, createIndex, proof,
+// hashes, and origPrevRoots MUST be the data from the previous modify.
+// origPrevRoots MUST be the roots that this Undo will go back to.
+func (v *view) Undo(m *MapPollard, adds []Hash, createIndex []int32,
+	proof Proof, undoIns undoInfo, ingestIns ingestInstruction,
+	hashes, origPrevRoots []Hash) error {
+
+	s := Stump{
+		Roots:     make([]Hash, len(origPrevRoots)),
+		NumLeaves: v.numLeaves - uint64(len(adds)),
+	}
+	copy(s.Roots, origPrevRoots)
+
+	_, err := s.Update(hashes, nil, proof)
+	if err != nil {
+		return err
+	}
+
+	err = v.undoAdd(m, adds, s.Roots)
+	if err != nil {
+		return err
+	}
+
+	return v.undoDeletion(createIndex, undoIns, ingestIns, hashes)
+}
+
 // ingest places the proof in the view.
 func (v *view) ingest(ins ingestInstruction) error {
 	if len(ins.Hashes)%3 != 0 {
@@ -1236,23 +1262,6 @@ func (v *view) cacheBelows(m *MapPollard, node Node) error {
 	return nil
 }
 
-// getViewForUndo returns a view that is able to perform undos.
-//
-// NOTE: it's only capable of undoing deletions for now.
-func (m *MapPollard) getViewForUndo(undoIns undoInfo) (*view, error) {
-	view := initView(m.Roots, undoIns.length())
-	view.numLeaves = m.NumLeaves
-	view.totalRows = m.TotalRows
-	view.full = m.Full
-
-	err := view.fetchNodesNeededForUndoDel(m, undoIns)
-	if err != nil {
-		return nil, err
-	}
-
-	return view, nil
-}
-
 // getView returns a view that has all the necesssary information to perform a modification.
 func (m *MapPollard) getView(ins modifyInstruction) (*view, error) {
 	view := initView(m.Roots, len(ins.after))
@@ -1516,6 +1525,56 @@ func (m *MapPollard) PrepareModify(adds []Leaf, delHashes []Hash,
 	return m.prepareModify(adds, delHashes, proof, true)
 }
 
+// prepareUndo returns a view with the previous modify undone. The adds,
+// createIndex, proof, hashes, and origPrevRoots MUST be the data from the
+// modify being undone. origPrevRoots MUST be the roots that the undo will go
+// back to.
+func (m *MapPollard) prepareUndo(adds []Hash, createIndex []int32,
+	proof Proof, hashes, origPrevRoots []Hash) (*MapPollardView, error) {
+
+	view := initView(m.Roots, 0)
+	view.numLeaves = m.NumLeaves
+	view.totalRows = m.TotalRows
+	view.full = m.Full
+
+	ingestIns, undoIns, _, err := generateIngestAndUndoInfo(
+		m.NumLeaves-uint64(len(adds)), hashes, proof)
+	if err != nil {
+		return nil, err
+	}
+
+	err = view.fetchNodesNeededForUndoDel(m, undoIns)
+	if err != nil {
+		return nil, err
+	}
+
+	err = view.Undo(m, adds, createIndex, proof, undoIns, ingestIns,
+		hashes, origPrevRoots)
+	if err != nil {
+		return nil, err
+	}
+
+	return &MapPollardView{
+		pollard: m,
+		view:    view,
+	}, nil
+}
+
+// PrepareUndo returns a view containing the result of undoing the previous
+// modify without changing the MapPollard. Commit applies the view to the
+// MapPollard.
+//
+// The MapPollard must not be modified until the view is committed or
+// discarded.
+func (m *MapPollard) PrepareUndo(adds []Hash, createIndex []int32,
+	proof Proof, hashes, origPrevRoots []Hash) (*MapPollardView, error) {
+
+	m.rwLock.RLock()
+	defer m.rwLock.RUnlock()
+
+	return m.prepareUndo(adds, createIndex, proof, hashes, origPrevRoots)
+}
+
 // Modify takes in the additions and deletions and updates the accumulator accordingly.
 func (m *MapPollard) Modify(adds []Leaf, delHashes []Hash, proof Proof) error {
 	m.rwLock.Lock()
@@ -1752,38 +1811,11 @@ func (m *MapPollard) UndoWithTTLs(adds []Hash, createIndex []int32,
 	m.rwLock.Lock()
 	defer m.rwLock.Unlock()
 
-	s := Stump{
-		Roots:     make([]Hash, len(origPrevRoots)),
-		NumLeaves: m.NumLeaves - uint64(len(adds)),
-	}
-	copy(s.Roots, origPrevRoots)
-	_, err := s.Update(hashes, nil, proof)
-	if err != nil {
-		return fmt.Errorf("Undo errored while undoing added leaves. %v", err)
-	}
-
-	ingestIns, undoInfo, _, err := generateIngestAndUndoInfo(
-		m.NumLeaves-uint64(len(adds)), hashes, proof)
+	prepared, err := m.prepareUndo(adds, createIndex, proof, hashes, origPrevRoots)
 	if err != nil {
 		return err
 	}
-
-	view, err := m.getViewForUndo(undoInfo)
-	if err != nil {
-		return err
-	}
-
-	err = view.undoAdd(m, adds, s.Roots)
-	if err != nil {
-		return fmt.Errorf("Undo errored while undoing added leaves. %v", err)
-	}
-
-	err = view.undoDeletion(createIndex, undoInfo, ingestIns, hashes)
-	if err != nil {
-		return fmt.Errorf("Undo errored while undoing deleted leaves. %v", err)
-	}
-
-	m.commitView(view)
+	m.commitView(prepared.view)
 	return nil
 }
 
@@ -1793,38 +1825,11 @@ func (m *MapPollard) Undo(adds []Hash, proof Proof, hashes, origPrevRoots []Hash
 	m.rwLock.Lock()
 	defer m.rwLock.Unlock()
 
-	s := Stump{
-		Roots:     make([]Hash, len(origPrevRoots)),
-		NumLeaves: m.NumLeaves - uint64(len(adds)),
-	}
-	copy(s.Roots, origPrevRoots)
-	_, err := s.Update(hashes, nil, proof)
-	if err != nil {
-		return fmt.Errorf("Undo errored while undoing added leaves. %v", err)
-	}
-
-	ingestIns, undoInfo, _, err := generateIngestAndUndoInfo(
-		m.NumLeaves-uint64(len(adds)), hashes, proof)
+	prepared, err := m.prepareUndo(adds, nil, proof, hashes, origPrevRoots)
 	if err != nil {
 		return err
 	}
-
-	view, err := m.getViewForUndo(undoInfo)
-	if err != nil {
-		return err
-	}
-
-	err = view.undoAdd(m, adds, s.Roots)
-	if err != nil {
-		return fmt.Errorf("Undo errored while undoing added leaves. %v", err)
-	}
-
-	err = view.undoDeletion(nil, undoInfo, ingestIns, hashes)
-	if err != nil {
-		return fmt.Errorf("Undo errored while undoing deleted leaves. %v", err)
-	}
-
-	m.commitView(view)
+	m.commitView(prepared.view)
 	return nil
 }
 

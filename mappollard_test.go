@@ -372,6 +372,106 @@ func copyMapPollardNodes(t *testing.T, m *MapPollard) map[Hash]Node {
 	return nodes
 }
 
+func TestMapPollardUndoView(t *testing.T) {
+	// Build a pollard with a full tree so both the fully cached and the roots
+	// only cache cases can be exercised.
+	newPollard := func(t *testing.T) *MapPollard {
+		t.Helper()
+
+		leaves := make([]Leaf, 8)
+		for i := range leaves {
+			leaves[i] = Leaf{
+				Hash:     sha256.Sum256([]byte{uint8(i)}),
+				Remember: true,
+			}
+		}
+
+		pollard := NewMapPollard(false)
+		err := pollard.Modify(leaves, nil, Proof{})
+		require.NoError(t, err)
+		return &pollard
+	}
+
+	tests := []struct {
+		name      string
+		rootsOnly bool
+	}{
+		{
+			name: "fully cached pollard",
+		},
+		{
+			name:      "roots only pollard",
+			rootsOnly: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Generate the modify to undo from a complete accumulator.
+			full := newPollard(t)
+			delHash := sha256.Sum256([]byte{2})
+			delHashes := []Hash{delHash}
+			proof, err := full.Prove(delHashes)
+			require.NoError(t, err)
+			adds := []Leaf{{
+				Hash:     sha256.Sum256([]byte{8}),
+				Remember: true,
+			}}
+			addHashes := []Hash{adds[0].Hash}
+
+			// Initialize matching pollards with the cache state selected by the
+			// test case.
+			pollard := newPollard(t)
+			expected := newPollard(t)
+			if test.rootsOnly {
+				pollard = InitWithStump(full.GetStump())
+				pollard.TotalRows = full.TotalRows
+				expected = InitWithStump(full.GetStump())
+				expected.TotalRows = full.TotalRows
+			}
+
+			// Apply the modify to both pollards and remember the state before it.
+			origRoots := pollard.GetRoots()
+			err = pollard.Modify(adds, delHashes, proof)
+			require.NoError(t, err)
+			err = expected.Modify(adds, delHashes, proof)
+			require.NoError(t, err)
+
+			// Snapshot every part of the live pollard before preparing the view.
+			beforeStump := pollard.GetStump()
+			beforeRows := pollard.GetTreeRows()
+			beforeNodes := copyMapPollardNodes(t, pollard)
+
+			// Prepare the undo and keep it private to the returned view.
+			view, err := pollard.PrepareUndo(addHashes, nil, proof, delHashes, origRoots)
+			require.NoError(t, err)
+
+			// Preparation must leave the live accumulator and its cache unchanged.
+			require.Equal(t, beforeStump, pollard.GetStump())
+			require.Equal(t, beforeRows, pollard.GetTreeRows())
+			require.Equal(t, beforeNodes, copyMapPollardNodes(t, pollard))
+
+			// Undo the modify through the established direct flow to obtain the
+			// expected state.
+			err = expected.Undo(addHashes, proof, delHashes, origRoots)
+			require.NoError(t, err)
+
+			// The prepared view must expose the state produced by the direct flow.
+			require.Equal(t, expected.GetStump(), view.GetStump())
+			require.Equal(t, expected.GetTreeRows(), view.GetTreeRows())
+
+			// Committing must publish the complete expected state exactly once.
+			require.NoError(t, view.Commit())
+			require.Equal(t, expected.GetStump(), pollard.GetStump())
+			require.Equal(t, expected.GetTreeRows(), pollard.GetTreeRows())
+			require.Equal(t, copyMapPollardNodes(t, expected),
+				copyMapPollardNodes(t, pollard))
+			require.NoError(t, pollard.sanityCheck())
+			require.ErrorContains(t, view.Commit(), "already committed")
+		})
+	}
+}
+
 func FuzzMapPollardChain(f *testing.F) {
 	// Seed the fuzz target with a chain that performs repeated additions and
 	// deletions.
