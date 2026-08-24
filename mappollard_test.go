@@ -258,14 +258,132 @@ func (p *Proof) checkEqualProof(other Proof) error {
 	return nil
 }
 
+func TestMapPollardView(t *testing.T) {
+	// newPollard returns the same fully cached accumulator for each independent
+	// test state.
+	newPollard := func(t *testing.T) *MapPollard {
+		t.Helper()
+
+		// Build eight remembered leaves so the pollard contains the complete
+		// tree needed by both cache cases.
+		leaves := make([]Leaf, 8)
+		for i := range leaves {
+			leaves[i] = Leaf{
+				Hash:     sha256.Sum256([]byte{uint8(i)}),
+				Remember: true,
+			}
+		}
+
+		pollard := NewMapPollard(false)
+		err := pollard.Modify(leaves, nil, Proof{})
+		require.NoError(t, err)
+		return &pollard
+	}
+
+	// Exercise preparation with nodes already cached and with nodes supplied by
+	// proof ingestion.
+	tests := []struct {
+		name      string
+		rootsOnly bool
+	}{
+		{
+			name: "fully cached pollard",
+		},
+		{
+			name:      "roots only pollard",
+			rootsOnly: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Generate the deletion proof from a complete accumulator.
+			full := newPollard(t)
+			delHash := sha256.Sum256([]byte{2})
+			delHashes := []Hash{delHash}
+			proof, err := full.Prove(delHashes)
+			require.NoError(t, err)
+			adds := []Leaf{{
+				Hash:     sha256.Sum256([]byte{8}),
+				Remember: true,
+			}}
+
+			// Initialize matching pollards with the cache state selected by the
+			// test case.
+			pollard := newPollard(t)
+			expected := newPollard(t)
+			if test.rootsOnly {
+				pollard = InitWithStump(full.GetStump())
+				pollard.TotalRows = full.TotalRows
+				expected = InitWithStump(full.GetStump())
+				expected.TotalRows = full.TotalRows
+			}
+
+			// Snapshot every part of the live pollard before preparing the view.
+			beforeStump := pollard.GetStump()
+			beforeRows := pollard.GetTreeRows()
+			beforeNodes := copyMapPollardNodes(t, pollard)
+
+			// Prepare the modification and keep it private to the returned view.
+			view, err := pollard.PrepareModify(adds, delHashes, proof)
+			require.NoError(t, err)
+
+			// Preparation must leave the live accumulator and its cache unchanged.
+			require.Equal(t, beforeStump, pollard.GetStump())
+			require.Equal(t, beforeRows, pollard.GetTreeRows())
+			require.Equal(t, beforeNodes, copyMapPollardNodes(t, pollard))
+
+			// Apply the same proof and modification through the established direct
+			// flow to obtain the expected state.
+			err = expected.Verify(delHashes, proof, true)
+			require.NoError(t, err)
+			err = expected.Modify(adds, delHashes, proof)
+			require.NoError(t, err)
+
+			// The prepared view must expose the state produced by the direct flow.
+			require.Equal(t, expected.GetStump(), view.GetStump())
+			require.Equal(t, expected.GetTreeRows(), view.GetTreeRows())
+
+			// Committing must publish the complete expected state exactly once.
+			require.NoError(t, view.Commit())
+			require.Equal(t, expected.GetStump(), pollard.GetStump())
+			require.Equal(t, expected.GetTreeRows(), pollard.GetTreeRows())
+			require.Equal(t, copyMapPollardNodes(t, expected),
+				copyMapPollardNodes(t, pollard))
+			require.NoError(t, pollard.sanityCheck())
+			require.ErrorContains(t, view.Commit(), "already committed")
+		})
+	}
+}
+
+// copyMapPollardNodes returns a copy of every node cached by the map pollard.
+func copyMapPollardNodes(t *testing.T, m *MapPollard) map[Hash]Node {
+	t.Helper()
+
+	// Copy through NodesInterface so the comparison also works with alternate
+	// node storage implementations.
+	nodes := make(map[Hash]Node, m.Nodes.Length())
+	err := m.Nodes.ForEach(func(hash Hash, node Node) error {
+		nodes[hash] = node
+		return nil
+	})
+	require.NoError(t, err)
+
+	return nodes
+}
+
 func FuzzMapPollardChain(f *testing.F) {
-	var tests = []struct {
+	// Seed the fuzz target with a chain that performs repeated additions and
+	// deletions.
+	tests := []struct {
 		numAdds  uint32
 		duration uint32
 		seed     int64
 	}{
 		{3, 0x07, 0x07},
 	}
+
+	// Register each table entry as a deterministic fuzz seed.
 	for _, test := range tests {
 		f.Add(test.numAdds, test.duration, test.seed)
 	}
@@ -273,23 +391,30 @@ func FuzzMapPollardChain(f *testing.F) {
 	f.Fuzz(func(t *testing.T, numAdds, duration uint32, seed int64) {
 		t.Parallel()
 
-		// simulate blocks with simchain
+		// Generate a deterministic sequence of accumulator modifications.
 		sc := newSimChainWithSeed(duration, seed)
 
+		// Maintain the direct map pollard, the staged map pollard, and the full
+		// accumulator across the same chain.
 		m := NewMapPollard(false)
+		staged := NewMapPollard(false)
 		full := NewAccumulator()
 
 		var totalAdds, totalDels int
 		for b := 0; b <= 50; b++ {
+			// Generate the additions and deletions for the next simulated block.
 			adds, _, delHashes := sc.NextBlock(numAdds)
 			totalAdds += len(adds)
 			totalDels += len(delHashes)
 
+			// Produce the proof from the full accumulator, which retains every
+			// node required to prove the deletions.
 			expectProof, err := full.Prove(delHashes)
 			if err != nil {
 				t.Fatal(err)
 			}
 
+			// Ingest and verify the proof through the direct map pollard flow.
 			err = m.Verify(delHashes, expectProof, true)
 			if err != nil {
 				t.Fatalf("%v\nproving delHashes:\nproof:\n%s\n%s\nmap:\n%s\nfull:\n%s\n",
@@ -297,12 +422,15 @@ func FuzzMapPollardChain(f *testing.F) {
 					m.String(), full.String())
 			}
 
+			// Prove the same deletions from the nodes now cached by the map
+			// pollard.
 			proof, err := m.Prove(delHashes)
 			if err != nil {
 				t.Fatalf("FuzzMapPollardChain fail at block %d. Couldn't prove\n%s\nError: %v",
 					b, printHashes(delHashes), err)
 			}
 
+			// Require the map pollard proof to match the full accumulator proof.
 			err = proof.checkEqualProof(expectProof)
 			if err != nil {
 				t.Fatalf("\nFor delhashes: %v\nexpected proof:\n%s\ngot:\n%s\nerr: %v\n"+
@@ -311,6 +439,7 @@ func FuzzMapPollardChain(f *testing.F) {
 					m.String(), full.String())
 			}
 
+			// Confirm that every proof target is present in the map pollard.
 			for _, target := range proof.Targets {
 				fetch := target
 				if defaultForestRows != m.TotalRows {
@@ -323,6 +452,32 @@ func FuzzMapPollardChain(f *testing.F) {
 				}
 			}
 
+			// Snapshot every part of the staged pollard before preparation.
+			stumpBefore := staged.GetStump()
+			rowsBefore := staged.GetTreeRows()
+			nodesBefore := copyMapPollardNodes(t, &staged)
+
+			// Prepare the block modification in a private view.
+			view, err := staged.PrepareModify(adds, delHashes, expectProof)
+			if err != nil {
+				t.Fatalf("FuzzMapPollardChain fail while preparing block %d. Error: %v",
+					b, err)
+			}
+
+			// Preparation must leave the live stump, tree rows, and cache
+			// unchanged.
+			if !reflect.DeepEqual(stumpBefore, staged.GetStump()) {
+				t.Fatalf("FuzzMapPollardChain changed accumulator state while preparing block %d", b)
+			}
+			if rowsBefore != staged.GetTreeRows() {
+				t.Fatalf("FuzzMapPollardChain changed tree rows while preparing block %d", b)
+			}
+			if !reflect.DeepEqual(nodesBefore, copyMapPollardNodes(t, &staged)) {
+				t.Fatalf("FuzzMapPollardChain changed cached nodes while preparing block %d", b)
+			}
+
+			// Apply the block through the direct and full accumulator flows, then
+			// publish the prepared view.
 			err = m.Modify(adds, delHashes, proof)
 			if err != nil {
 				t.Fatalf("FuzzMapPollardChain fail at block %d. Error: %v", b, err)
@@ -332,7 +487,26 @@ func FuzzMapPollardChain(f *testing.F) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			err = view.Commit()
+			if err != nil {
+				t.Fatalf("FuzzMapPollardChain fail while committing block %d. Error: %v",
+					b, err)
+			}
 
+			// Committing the prepared modification must produce the same
+			// accumulator and cache as ingesting and modifying directly.
+			if !reflect.DeepEqual(copyMapPollardNodes(t, &m),
+				copyMapPollardNodes(t, &staged)) {
+				t.Fatalf("FuzzMapPollardChain cached nodes differ at block %d", b)
+			}
+			if !reflect.DeepEqual(m.GetStump(), staged.GetStump()) {
+				t.Fatalf("FuzzMapPollardChain accumulator state differs at block %d", b)
+			}
+			if m.GetTreeRows() != staged.GetTreeRows() {
+				t.Fatalf("FuzzMapPollardChain tree rows differ at block %d", b)
+			}
+
+			// Collect every remembered leaf cached by the direct map pollard.
 			cachedHashes := make([]Hash, 0, m.Nodes.Length())
 			leafHashes := make([]Hash, 0, m.Nodes.Length())
 			m.Nodes.ForEach(func(k Hash, v Node) error {
@@ -351,6 +525,7 @@ func FuzzMapPollardChain(f *testing.F) {
 				t.Fatal(err)
 			}
 
+			// Compare proofs for the cached leaves against the full accumulator.
 			cachedProofExpect, err := full.Prove(cachedHashes)
 			if err != nil {
 				t.Fatal(err)
@@ -369,8 +544,11 @@ func FuzzMapPollardChain(f *testing.F) {
 					err, m.String(), full.String())
 			}
 
+			// Exercise proof completion using the validated cached proof.
 			testMakeProofFull(t, m, cachedProof)
 
+			// Finish the block by comparing roots and checking map pollard
+			// structure.
 			fullRoots := full.GetRoots()
 			mapRoots := m.GetRoots()
 			if !reflect.DeepEqual(fullRoots, mapRoots) {
@@ -644,6 +822,167 @@ func applySingleModify(utreexo Utreexo, adds []Leaf, dels []Hash) error {
 	}
 
 	return nil
+}
+
+// proofViewTestCase contains a map pollard and a view with an ingested
+// deletion proof.
+type proofViewTestCase struct {
+	name     string
+	pollard  *MapPollard
+	view     *view
+	rootHash Hash
+	rootNode Node
+}
+
+// buildProofViewTestCase creates the state shared by the view lookup tests.
+func buildProofViewTestCase(t *testing.T, name string,
+	delIndexes []int) proofViewTestCase {
+
+	t.Helper()
+
+	// Build a complete pollard that can generate the deletion proof.
+	leaves := make([]Leaf, 8)
+	for i := range leaves {
+		leaves[i] = Leaf{
+			Hash:     sha256.Sum256([]byte{uint8(i)}),
+			Remember: true,
+		}
+	}
+	full := NewMapPollard(false)
+	require.NoError(t, full.Modify(leaves, nil, Proof{}))
+
+	// Generate the proof and the same ingest instruction used by the map
+	// pollard proof path.
+	delHashes := make([]Hash, len(delIndexes))
+	for i, index := range delIndexes {
+		delHashes[i] = leaves[index].Hash
+	}
+	proof, err := full.Prove(delHashes)
+	require.NoError(t, err)
+	ingestIns, _, _, err := generateIngestAndUndoInfo(
+		full.NumLeaves, delHashes, proof)
+	require.NoError(t, err)
+
+	// Initialize the map pollard with roots only, then copy those roots into
+	// the view before ingesting the proof.
+	pollard := InitWithStump(full.GetStump())
+	pollard.TotalRows = full.TotalRows
+	proofView := initView(pollard.Roots, len(delHashes))
+	proofView.numLeaves = pollard.NumLeaves
+	proofView.totalRows = pollard.TotalRows
+	for _, root := range pollard.Roots {
+		rootNode, found := pollard.Nodes.Get(root)
+		require.True(t, found)
+		proofView.nodes[root] = rootNode
+	}
+	require.NoError(t, proofView.ingest(ingestIns))
+
+	// Select a root whose node has child hashes after proof ingestion.
+	var rootHash Hash
+	var rootNode Node
+	for _, root := range pollard.Roots {
+		node := proofView.nodes[root]
+		if node.LBelow != empty {
+			rootHash = root
+			rootNode = node
+			break
+		}
+	}
+	require.NotEqual(t, Hash(empty), rootHash)
+
+	return proofViewTestCase{
+		name:     name,
+		pollard:  pollard,
+		view:     proofView,
+		rootHash: rootHash,
+		rootNode: rootNode,
+	}
+}
+
+func TestViewFetchAndCacheNodeAfterProofIngestion(t *testing.T) {
+	// Build the complete input state for each proof shape before running the
+	// assertions.
+	tests := []proofViewTestCase{
+		buildProofViewTestCase(t, "single deletion", []int{2}),
+		buildProofViewTestCase(t, "deletions in both branches", []int{1, 6}),
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// The root hash is present in both caches. The map pollard node has
+			// empty child hashes, while the view node has the child hashes
+			// supplied by the proof.
+			mapRoot, found := test.pollard.Nodes.Get(test.rootHash)
+			require.True(t, found)
+			require.Equal(t, Hash(empty), mapRoot.LBelow)
+			require.Equal(t, Hash(empty), mapRoot.RBelow)
+			require.NotEqual(t, Hash(empty), test.rootNode.LBelow)
+			require.NotEqual(t, Hash(empty), test.rootNode.RBelow)
+
+			// The lookup must return the node already present in the view.
+			gotRoot, found := test.view.fetchAndCacheNode(test.pollard,
+				test.rootHash)
+			require.True(t, found)
+			require.Equal(t, test.rootNode, gotRoot)
+		})
+	}
+}
+
+// cacheBelowsTestCase contains the expected children for a root whose child
+// nodes are split between the map pollard and the view.
+type cacheBelowsTestCase struct {
+	proofViewTestCase
+	leftChild  Node
+	rightChild Node
+}
+
+// buildCacheBelowsTestCase places one child in each node cache.
+func buildCacheBelowsTestCase(t *testing.T, name string,
+	delIndexes []int) cacheBelowsTestCase {
+
+	t.Helper()
+
+	test := buildProofViewTestCase(t, name, delIndexes)
+	leftChild, found := test.view.nodes[test.rootNode.LBelow]
+	require.True(t, found)
+	rightChild, found := test.view.nodes[test.rootNode.RBelow]
+	require.True(t, found)
+
+	// Keep the left child only in the map pollard and the right child only
+	// in the view. cacheBelows must resolve both sources.
+	delete(test.view.nodes, test.rootNode.LBelow)
+	test.pollard.Nodes.Put(test.rootNode.LBelow, leftChild)
+
+	return cacheBelowsTestCase{
+		proofViewTestCase: test,
+		leftChild:         leftChild,
+		rightChild:        rightChild,
+	}
+}
+
+func TestViewCacheBelowsAfterProofIngestion(t *testing.T) {
+	// Build the complete input state for each proof shape before running the
+	// assertions.
+	tests := []cacheBelowsTestCase{
+		buildCacheBelowsTestCase(t, "single deletion", []int{2}),
+		buildCacheBelowsTestCase(t, "deletions in both branches", []int{1, 6}),
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// cacheBelows must copy the left child from the map pollard and retain
+			// the right child from the view.
+			require.NoError(t, test.view.cacheBelows(test.pollard,
+				test.rootNode))
+
+			leftChild, found := test.view.nodes[test.rootNode.LBelow]
+			require.True(t, found)
+			require.Equal(t, test.leftChild, leftChild)
+			rightChild, found := test.view.nodes[test.rootNode.RBelow]
+			require.True(t, found)
+			require.Equal(t, test.rightChild, rightChild)
+		})
+	}
 }
 
 func TestGetMissingPositions(t *testing.T) {
