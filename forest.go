@@ -1764,7 +1764,12 @@ func (f *Forest) calculatePosition(hash Hash) (uint64, error) {
 	if !found {
 		return 0, fmt.Errorf("hash %v not found in the position map", hash)
 	}
+	return f.positionFromPacked(hash, packed)
+}
 
+// positionFromPacked calculates the logical position of hash, whose
+// position-map value is already known to be packed
+func (f *Forest) positionFromPacked(hash Hash, packed uint64) (uint64, error) {
 	currentPos := unpackPos(packed)
 	currentHash := hash
 	rowsToTop := 0
@@ -1962,15 +1967,25 @@ func (f *Forest) Prove(delHashes []Hash) (Proof, error) {
 		return Proof{}, nil
 	}
 
-	// Find target positions using the walk-up algorithm.
-	// calculatePosition returns positions in f.forestRows space.
+	// Find target positions using the walk-up algorithm. keeping each
+	// packed position-map value for Undo. Both are in f.forestRows space;
+	// only targets is translated below.
 	targets := make([]uint64, len(delHashes))
+	delPacked := make([]uint64, len(delHashes))
 	for i, hash := range delHashes {
-		target, err := f.calculatePosition(hash)
+		packed, found, err := f.positionMap.Get(hash)
+		if err != nil {
+			return Proof{}, fmt.Errorf("find target for hash %x: %w", hash[:8], err)
+		}
+		if !found {
+			return Proof{}, fmt.Errorf("find target for hash %x: not found in the position map", hash[:8])
+		}
+		target, err := f.positionFromPacked(hash, packed)
 		if err != nil {
 			return Proof{}, fmt.Errorf("find target for hash %x: %w", hash[:8], err)
 		}
 		targets[i] = target
+		delPacked[i] = packed
 	}
 
 	// Translate from f.forestRows space to defaultForestRows space.
@@ -1984,8 +1999,9 @@ func (f *Forest) Prove(delHashes []Hash) (Proof, error) {
 	}
 
 	return Proof{
-		Targets: targets,
-		Proof:   proofHashes,
+		Targets:   targets,
+		Proof:     proofHashes,
+		DelPacked: delPacked,
 	}, nil
 }
 

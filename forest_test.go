@@ -1448,3 +1448,39 @@ func TestForestBlockCountsReconciliation(t *testing.T) {
 		})
 	}
 }
+
+// TestForestProveDelPacked checks that Prove return, for each delHashes and delPacked
+// in the same order. the packed position-map value is Undo needs.
+func TestForestProveDelPacked(t *testing.T) {
+	// forestRows=16
+	tmpDir := t.TempDir()
+	forest, err := newForest(memCached(t, 32), memCached(t, 4), memCached(t, 32), nil, tmpDir+"/ctrl", tmpDir+"/slots", 16, 0)
+	require.NoError(t, err)
+
+	// One block of 8 leaves: postions 0..7, add index == position
+	leaves := make([]Leaf, 8)
+	for i := range leaves {
+		leaves[i] = Leaf{Hash: testHashFromInt(i + 1)}
+	}
+	require.NoError(t, forest.Modify(leaves, nil, Proof{}))
+
+	// Prove before deleting: this is only point where the map
+	// still holds the deleted leaves' values.
+	delHashes := []Hash{leaves[1].Hash, leaves[5].Hash}
+	proof, err := forest.Prove(delHashes)
+	require.NoError(t, err)
+
+	require.Len(t, proof.DelPacked, len(delHashes))
+	for i, h := range delHashes {
+		pos := unpackPos(proof.DelPacked[i])
+
+		// Check against the leaf row itself, not position map.
+		stored, err := forest.readHash(pos)
+		require.NoError(t, err)
+		require.Equal(t, h, stored)
+
+		// All leaves came from one block, so add index equals position
+		require.Equal(t, int32(pos), unpackIndex(proof.DelPacked[i]))
+	}
+
+}

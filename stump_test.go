@@ -337,7 +337,7 @@ func checkUpdateData(updateData UpdateData, adds, delHashes, prevRoots []Hash, p
 
 	// Calculate the modified roots after the remove.
 	intermediate, roots, err := calculateHashes(updateData.PrevNumLeaves,
-		targetsWithHash.hashes, Proof{targetsWithHash.positions, proofWithPositions.hashes})
+		targetsWithHash.hashes, Proof{Targets: targetsWithHash.positions, Proof: proofWithPositions.hashes, DelPacked: proof.DelPacked})
 	if err != nil {
 		return err
 	}

@@ -385,6 +385,7 @@ func TestRehashDeletionsAndCaptureProof(t *testing.T) {
 				// the expected proof with deletion hashes in that same order.
 				sortedDelHashes := hashesSortedByPosition(delHashes, delPositions)
 				wantProof, err := wantForest.Prove(sortedDelHashes)
+				wantProof.DelPacked = nil
 				require.NoError(t, err)
 
 				// Record normally marks these positions before the helper runs.
