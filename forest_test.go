@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -301,7 +302,8 @@ func TestForestSanityCheck(t *testing.T) {
 func (f *Forest) sanityCheck() error {
 	// Check 0: Verify positionMap entry count matches expected
 	// positionMap should have exactly NumLeaves
-	expectedPosMapCount := f.NumLeaves
+	deletedCount := uint64(f.deletedLeafPositions.count())
+	expectedPosMapCount := f.NumLeaves - deletedCount
 	actualPosMapCount := f.positionMap.Count()
 	if actualPosMapCount != expectedPosMapCount {
 		return fmt.Errorf("positionMap count mismatch: expected %d, got %d",
@@ -311,7 +313,6 @@ func (f *Forest) sanityCheck() error {
 	// Check 0.5: Verify deletedLeafPositions bitmap is consistent with positionMap.
 	// Every position marked deleted must be a valid leaf in positionMap, and the
 	// number of deleted + live leaves must equal NumLeaves.
-	deletedCount := uint64(f.deletedLeafPositions.count())
 	liveCount := uint64(0)
 	f.positionMap.ForEach(func(packed uint64) {
 		pos := unpackPos(packed)
@@ -1038,10 +1039,9 @@ func TestForestCrashIncompleteJournal(t *testing.T) {
 		"forest should be at block 200 state after incomplete journal")
 }
 
-// TestForestVerifyDeletedLeaf tests that Verify correctly rejects leaves
-// that have already been deleted. This specifically tests leaves with
-// addIndex > 0 to catch bugs where packed values are used instead of
-// unpacked positions.
+// TestForestVerifyDeletedLeaf tests that Verify rejects leaf once it has been deleted.
+// Deletion drops the leaf from the position map, so verify reports it as missing.
+// The other leaves, added in the same batch with addIndex >0, must still verify
 func TestForestVerifyDeletedLeaf(t *testing.T) {
 	forest := newTestForest(t, 8)
 
@@ -1067,10 +1067,11 @@ func TestForestVerifyDeletedLeaf(t *testing.T) {
 	err = forest.Modify(nil, []Hash{delHash}, Proof{})
 	require.NoError(t, err)
 
-	// Verify the deleted leaf should now fail
+	// Spent leqves are dropped from the position map.
+	// So verify reports them the same way hashes that never existed.
 	err = forest.Verify([]Hash{delHash}, Proof{}, false)
 	require.Error(t, err, "Verify should reject deleted leaf")
-	require.Contains(t, err.Error(), "already been deleted")
+	require.Contains(t, err.Error(), "doesn't exist in the forest")
 
 	// Other leaves should still verify
 	for i, h := range hashes {
@@ -1104,18 +1105,28 @@ func TestForestRebuildPositionMap(t *testing.T) {
 		packed uint64
 	}
 	allLeaves := make([]leafEntry, 0, forest.NumLeaves)
+	var spent []Hash
 	for pos := uint64(0); pos < forest.NumLeaves; pos++ {
 		hash, err := forest.readHash(pos)
 		require.NoError(t, err)
+		if forest.deletedLeafPositions.isSet(pos) {
+			spent = append(spent, hash)
+			continue
+		}
 		packed, found, err := forest.positionMap.Get(hash)
 		require.NoError(t, err)
 		require.True(t, found, "leaf at pos %d not found before rebuild", pos)
 		allLeaves = append(allLeaves, leafEntry{hash: hash, packed: packed})
 	}
+	require.NotEmpty(t, spent, "test needs spent leaves to be meaningful")
 
 	// Clear positionMap and rebuild.
 	for _, le := range allLeaves {
 		_, err := forest.positionMap.Delete(le.hash)
+		require.NoError(t, err)
+	}
+	for _, h := range spent {
+		_, err := forest.positionMap.Delete(h)
 		require.NoError(t, err)
 	}
 	require.Equal(t, uint64(0), forest.positionMap.Count(), "positionMap should be empty after clearing")
@@ -1140,6 +1151,11 @@ func TestForestRebuildPositionMap(t *testing.T) {
 		require.Equal(t, le.packed, got,
 			"packed value mismatch for leaf pos=%d addIndex=%d",
 			unpackPos(le.packed), unpackIndex(le.packed))
+	}
+	for _, h := range spent {
+		_, found, err := forest.positionMap.Get(h)
+		require.NoError(t, err)
+		require.False(t, found, "rebuild resurrected a spent leaf")
 	}
 }
 
@@ -1245,6 +1261,7 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 	proof, err := pollard.Prove(delHashes)
 	require.NoError(t, err)
 
+	forestProof, err := forest.Prove(delHashes)
 	err = forest.Modify(adds, delHashes, Proof{})
 	require.NoError(t, err)
 
@@ -1283,7 +1300,7 @@ func TestForestUndoAfterRebuild(t *testing.T) {
 		"roots should match after restart with rebuilt positionMap")
 
 	// Undo the last block on the restarted forest.
-	err = forest2.Undo(prevAdds, Proof{}, delHashes, checkpointRoots)
+	err = forest2.Undo(prevAdds, forestProof, delHashes, checkpointRoots)
 	require.NoError(t, err)
 
 	// After undo, roots should match the checkpoint.
@@ -1482,5 +1499,133 @@ func TestForestProveDelPacked(t *testing.T) {
 		// All leaves came from one block, so add index equals position
 		require.Equal(t, int32(pos), unpackIndex(proof.DelPacked[i]))
 	}
+}
 
+// TestForestPositionMapLiveOnly checks that the position map holds only
+// live leaves. Deleting leaves drops them from the map while NumLeaves
+// stays the same, deleting them again is rejected without touching the
+// forest, and Undo puts them back with their original packed values.
+func TestForestPositionMapLiveOnly(t *testing.T) {
+	forest := newTestForest(t, 3)
+	leaves := make([]Leaf, 8)
+	for i := range leaves {
+		leaves[i] = Leaf{Hash: testHashFromInt(i)}
+	}
+	require.NoError(t, forest.Modify(leaves, nil, Proof{}))
+
+	//Step 1: Pick sibling leaves 6 and 7. their addIndex is not 0,
+	// so losing it on Undo would show. Prove them before the deletion
+	// so Delpacked still holds their map entries
+	delIdx := []int{6, 7}
+	delHashes := make([]Hash, len(delIdx))
+	for i, idx := range delIdx {
+		delHashes[i] = leaves[idx].Hash
+	}
+	proof, err := forest.Prove(delHashes)
+	require.NoError(t, err)
+	require.Equal(t, len(delHashes), len(proof.DelPacked))
+	for i, idx := range delIdx {
+		want := packPosIndex(uint64(idx), int32(idx))
+		require.Equal(t, want, proof.DelPacked[i], "DelPacked[%d]", i)
+	}
+
+	// Snapshot the state before the deletion.
+	packedBefore := slices.Clone(proof.DelPacked)
+	rootsBefore := forest.GetRoots()
+
+	//Step 2: Delete leaves 6 and 7
+	require.NoError(t, forest.Modify(nil, delHashes, Proof{}))
+	rootsAfter := forest.GetRoots()
+
+	//Step 3: The spent leaves are gone from the map.
+	require.NotEqual(t, rootsBefore, rootsAfter) // rootsAfter should be diff
+	for _, h := range delHashes {
+		_, found, err := forest.positionMap.Get(h)
+		require.NoError(t, err)
+		require.False(t, found)
+	}
+
+	// The live leaves keep their original packed values.
+	for i, leaf := range leaves[:6] {
+		packed, found, err := forest.positionMap.Get(leaf.Hash)
+		require.NoError(t, err)
+		require.True(t, found, "live leaf %d missing", i)
+		require.Equal(t, packPosIndex(uint64(i), int32(i)), packed, "leaf %d", i)
+	}
+	// Numleaves never shrinks; only the map does.
+	require.Equal(t, uint64(len(leaves)), forest.NumLeaves, "NumLeaves is append-only")
+	require.Equal(t, uint64(len(leaves)-len(delHashes)), forest.positionMap.Count())
+
+	// Step 4: Deleting the same leaves again is rejected and leaves the
+	// forest untouched.
+	err = forest.Modify(nil, delHashes, Proof{})
+	require.Error(t, err)
+	require.Equal(t, rootsAfter, forest.GetRoots())
+	require.Equal(t, uint64(len(leaves)-len(delHashes)), forest.positionMap.Count())
+
+	// Step 5: Undo restores the spent leaves with their
+	// original packed values.
+	require.NoError(t, forest.Undo(nil, proof, delHashes, nil))
+	for i, idx := range delIdx {
+		packed, found, err := forest.positionMap.Get(delHashes[i])
+		require.NoError(t, err)
+		require.True(t, found, "leaf %d not restored", idx)
+		require.Equal(t, packedBefore[i], packed, "leaf %d", idx)
+	}
+	require.Equal(t, uint64(len(leaves)), forest.positionMap.Count())
+}
+
+// TestForestUndoRejectsBadDelPacked checks that Undo rejects a DelPacked
+// that does not match delHashes, leaves the forest untouched when it does,
+// and still undoes the block afterwards with the real proof.
+func TestForestUndoRejectsBadDelPacked(t *testing.T) {
+	forest := newTestForest(t, 3)
+	leaves := make([]Leaf, 8)
+	for i := range leaves {
+		leaves[i] = Leaf{Hash: testHashFromInt(i)}
+	}
+	require.NoError(t, forest.Modify(leaves, nil, Proof{}))
+
+	//Step 1: prove two leaves, delete them
+	delIdx := []int{6, 7}
+	delHashes := make([]Hash, len(delIdx))
+	for i, idx := range delIdx {
+		delHashes[i] = leaves[idx].Hash
+	}
+	proof, err := forest.Prove(delHashes)
+	require.NoError(t, err)
+
+	require.NoError(t, forest.Modify(nil, delHashes, Proof{}))
+
+	// Snapshot the state after the deletion. Every rejected Undo
+	// below must leave it as is: same roots, map, leaves 6 and 7 still
+	// spent.
+	rootsAfter := forest.GetRoots()
+	countAfter := forest.positionMap.Count()
+	requireUntouched := func() {
+		t.Helper()
+		require.Equal(t, rootsAfter, forest.GetRoots())
+		require.Equal(t, countAfter, forest.positionMap.Count())
+		for i := range delIdx {
+			_, found, err := forest.positionMap.Get(delHashes[i])
+			require.NoError(t, err)
+			require.False(t, found, "leaf %d restored by a rejected undo", delIdx[i])
+		}
+	}
+	// Step 2: A DelPacked of the wrong length is rejected.
+	badProof := Proof{DelPacked: slices.Clone(proof.DelPacked)[:1]}
+	require.Error(t, forest.Undo(nil, badProof, delHashes, nil))
+	requireUntouched()
+
+	//step 3: A DelPacked in the wrong order is rejected. Its positoins
+	// are valid deleted leaves, so only the hash check catches it.
+	swapped := slices.Clone(proof.DelPacked)
+	swapped[0], swapped[1] = swapped[1], swapped[0]
+	badOrderProof := Proof{DelPacked: swapped}
+	require.Error(t, forest.Undo(nil, badOrderProof, delHashes, nil))
+	requireUntouched()
+
+	// Step 4: The rejected undos left nothing behind, not even the
+	// generated-leaves slot, so the real proof still undoes the block.
+	require.NoError(t, forest.Undo(nil, proof, delHashes, nil))
 }

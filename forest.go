@@ -710,6 +710,10 @@ func (f *Forest) rebuildPositionMap() error {
 				continue
 			}
 
+			if f.deletedLeafPositions.isSet(leafPos) {
+				continue
+			}
+
 			if err := f.positionMap.Set(hash, packPosIndex(leafPos, addIndex)); err != nil {
 				return fmt.Errorf("positionMap.Set at %d: %w", leafPos, err)
 			}
@@ -1264,6 +1268,39 @@ func (f *Forest) GetHash(position uint64) Hash {
 	return f.getHash(position)
 }
 
+// validateUndoDels checks delPacked against the forest before Undo writes
+// anything, so a rejected undo leaves the forest untouched.
+// Each entry must point at a deleted leaf that existed before the block
+// and still holds the matching delHash.
+func (f *Forest) validateUndoDels(numAdds uint64, delHashes []Hash, delPacked []uint64) error {
+	if len(delPacked) != len(delHashes) {
+		return fmt.Errorf("undo: %d delhashes but %d packed positions", len(delHashes), len(delPacked))
+	}
+	if numAdds > f.NumLeaves {
+		return fmt.Errorf("undo: numAdds %d exceeds NumLeaves %d", numAdds, f.NumLeaves)
+	}
+
+	prevNumLeaves := f.NumLeaves - numAdds
+	for i, packed := range delPacked {
+		pos := unpackPos(packed)
+
+		if pos >= prevNumLeaves {
+			return fmt.Errorf("undo: del position %d out of range (numLeaves %d)", pos, prevNumLeaves)
+		}
+		if !f.deletedLeafPositions.isSet(pos) {
+			return fmt.Errorf("undo: position %d is not marked deleted", pos)
+		}
+		stored, err := f.readHash(pos)
+		if err != nil {
+			return fmt.Errorf("undo: read hash at %d: %w", pos, err)
+		}
+		if stored != delHashes[i] {
+			return fmt.Errorf("undo: hash at position %d does not match delHash %d", pos, i)
+		}
+	}
+	return nil
+}
+
 // Undo reverts a modification done by Modify.
 // This implements the Utreexo interface.
 //
@@ -1278,6 +1315,10 @@ func (f *Forest) Undo(prevAdds []Hash, proof Proof, delHashes, prevRoots []Hash)
 
 	mutating := len(prevAdds) > 0 || len(delHashes) > 0
 
+	//Reject a bad delPacked before any write
+	if err := f.validateUndoDels(uint64(len(prevAdds)), delHashes, proof.DelPacked); err != nil {
+		return err
+	}
 	// An undo reverts the existing parent hashes rather than rebuilding them,
 	// so like modifyInternal it is only correct when those hashes are current.
 	// Reject it otherwise so stale hashes are never baked into new parents.
@@ -1293,7 +1334,7 @@ func (f *Forest) Undo(prevAdds []Hash, proof Proof, delHashes, prevRoots []Hash)
 		}
 	}
 
-	if err := f.undoInternal(uint64(len(prevAdds)), delHashes); err != nil {
+	if err := f.undoInternal(uint64(len(prevAdds)), delHashes, proof.DelPacked); err != nil {
 		// The parent hash writes may have landed partially, so treat them as
 		// unbuilt and let the next rehash pass run from the first leaf.
 		f.lastGeneratedLeaves = 0
@@ -1312,8 +1353,10 @@ func (f *Forest) Undo(prevAdds []Hash, proof Proof, delHashes, prevRoots []Hash)
 // undoInternal reverts additions and deletions.
 // numAdds is how many leaves were added in the block being undone.
 // delHashes are the hashes that were deleted in the block being undone;
-// their positions are looked up from positionMap.
-func (f *Forest) undoInternal(numAdds uint64, delHashes []Hash) error {
+// their positions come from delPacked (Proof.delPacked), captured by Prove
+// before the deletion. The called must have checked delPacked with
+// validateUndoDels.
+func (f *Forest) undoInternal(numAdds uint64, delHashes []Hash, delPacked []uint64) error {
 	// Step 1: Undo additions - delete from positionMap before decrementing NumLeaves.
 	for i := range numAdds {
 		pos := f.NumLeaves - numAdds + i
@@ -1339,16 +1382,10 @@ func (f *Forest) undoInternal(numAdds uint64, delHashes []Hash) error {
 		return fmt.Errorf("save num leaves: %w", err)
 	}
 
-	// Step 2: Look up deleted positions from positionMap
+	// Step 2: Forest.Modify dropped the spent leaves from the position map
+	// so their positions come from delPacked instead.
 	delPositions := make([]uint64, len(delHashes))
-	for i, hash := range delHashes {
-		packed, found, err := f.positionMap.Get(hash)
-		if err != nil {
-			return fmt.Errorf("positionMap.Get for undo del: %w", err)
-		}
-		if !found {
-			return fmt.Errorf("hash not found in positionMap for undo")
-		}
+	for i, packed := range delPacked {
 		delPositions[i] = unpackPos(packed)
 	}
 
@@ -1360,6 +1397,11 @@ func (f *Forest) undoInternal(numAdds uint64, delHashes []Hash) error {
 		err := f.undoSingleDeletion(pos)
 		if err != nil {
 			return err
+		}
+		// The leaf is live again; restore its original packed value
+		// so addIndex(TTL) survives the round trip.
+		if err := f.positionMap.Set(delHashes[i], delPacked[i]); err != nil {
+			return fmt.Errorf("positionMap.Set for undo del: %w", err)
 		}
 	}
 
@@ -1599,6 +1641,20 @@ func (f *Forest) modifyInternal(adds []Leaf, delHashes []Hash) error {
 			// as unbuilt and let the next rehash pass run from the first leaf.
 			f.lastGeneratedLeaves = 0
 			return fmt.Errorf("delete: %w", err)
+		}
+	}
+
+	// The tree surgery above looked each delHash up in the positionMap
+	// so drop the spent entries only now.
+	for _, delHash := range delHashes {
+		found, err := f.positionMap.Delete(delHash)
+		if err != nil {
+			f.lastGeneratedLeaves = 0
+			return fmt.Errorf("positionMap.Delete: %w", err)
+		}
+		if !found {
+			f.lastGeneratedLeaves = 0
+			return fmt.Errorf("delhash %v missing from position map", delHash)
 		}
 	}
 
