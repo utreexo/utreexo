@@ -1526,6 +1526,11 @@ func FuzzMapPollardTTLs(f *testing.F) {
 				t.Fatalf("FuzzMapPollardTTLs fail at block %d. Error: %v", b, err)
 			}
 
+			forestProof, err := forest.Prove(delHashes)
+			if err != nil {
+				t.Fatalf("FuzzMapPollardTTLs fail at block %d. Forest prove error: %v", b, err)
+			}
+
 			// Forest should return the same addIndexes
 			forestIndex, err := forest.ModifyAndReturnTTLs(adds, delHashes, proof)
 			if err != nil {
@@ -1556,7 +1561,7 @@ func FuzzMapPollardTTLs(f *testing.F) {
 				t.Fatalf("FuzzMapPollardTTLs fail at block %d. Error: %v", b, err)
 			}
 
-			err = forest.Undo(addHashes, proof, delHashes, origRoots)
+			err = forest.Undo(addHashes, forestProof, delHashes, origRoots)
 			if err != nil {
 				t.Fatalf("FuzzMapPollardTTLs fail at block %d. Forest error: %v", b, err)
 			}

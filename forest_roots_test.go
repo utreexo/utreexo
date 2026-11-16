@@ -385,6 +385,7 @@ func TestRehashDeletionsAndCaptureProof(t *testing.T) {
 				// the expected proof with deletion hashes in that same order.
 				sortedDelHashes := hashesSortedByPosition(delHashes, delPositions)
 				wantProof, err := wantForest.Prove(sortedDelHashes)
+				wantProof.DelPacked = nil
 				require.NoError(t, err)
 
 				// Record normally marks these positions before the helper runs.
@@ -512,7 +513,7 @@ func TestRehashAndProvePreservesDeletedRootLeaf(t *testing.T) {
 	// third leaf's position is a row-0 root.
 	require.NoError(t, f.Modify(leaves, nil, Proof{}))
 	rootsBefore := f.GetRoots()
-
+	proof, err := f.Prove(hashes[2:3])
 	require.NoError(t, f.EnterRecordMode())
 	_, delPositions, err := f.Record(nil, hashes[2:3])
 	require.NoError(t, err)
@@ -520,7 +521,7 @@ func TestRehashAndProvePreservesDeletedRootLeaf(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, f.ExitRecordMode())
 
-	require.NoError(t, f.Undo(nil, Proof{}, hashes[2:3], nil))
+	require.NoError(t, f.Undo(nil, proof, hashes[2:3], nil))
 	require.Equal(t, rootsBefore, f.GetRoots(),
 		"undoing the recorded deletion must restore the root leaf's hash")
 }

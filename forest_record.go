@@ -133,6 +133,11 @@ func (f *Forest) processDeletions(delHashes []Hash) ([]int32, []uint64, error) {
 	for _, pos := range delPositions {
 		f.deletedLeafPositions.set(pos)
 	}
+	for _, delHash := range delHashes {
+		if _, err := f.positionMap.Delete(delHash); err != nil {
+			return nil, nil, fmt.Errorf("positionMap.Delete: %w", err)
+		}
+	}
 	return addIndexes, delPositions, nil
 }
 
